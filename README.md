@@ -97,3 +97,9 @@ This project is licensed under CC0 1.0 Universal - see the LICENSE file for deta
 ## First-Time Run
 
 On first run, you'll need to authenticate with Telegram. Follow the prompts to enter your phone number and the authentication code sent to your Telegram account.
+
+## TODO
+1. Interactive interface? 
+2. Make videos visible by default
+3. Checkup for dublicate posts's files
+4. Better checkup with link?
