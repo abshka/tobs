@@ -101,9 +101,9 @@ On first run, you'll need to authenticate with Telegram. Follow the prompts to e
 
 ## TODO
 
-1. [x] Interactive interface?
+1. [x] The interactive interface
 2. [x] Make videos visible by default
-3. [ ] Move classes into modules
+3. [x] Move classes into modules
 4. [ ] Make interactive way default when running script without .env
 5. [ ] Create subfolders for notes based on year of posting?
 6. [ ] Create links to another posts like as reply in telegram (what an idea hit me)
