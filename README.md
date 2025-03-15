@@ -74,6 +74,7 @@ python main.py
 - --debug: Enable debug logging mode
 - --skip-cache: Ignore cache and reprocess all messages
 - --limit NUMBER: Process only a specific number of recent messages
+- --interactive: Interactive way to use script
 
 Example:
 
@@ -99,7 +100,6 @@ This project is licensed under CC0 1.0 Universal - see the LICENSE file for deta
 On first run, you'll need to authenticate with Telegram. Follow the prompts to enter your phone number and the authentication code sent to your Telegram account.
 
 ## TODO
-1. Interactive interface? 
-2. Make videos visible by default
-3. Checkup for dublicate posts's files
-4. Better checkup with link?
+
+1. [x] Interactive interface?
+2. [x] Make videos visible by default
