@@ -303,5 +303,5 @@ class MediaProcessor:
             return f"\n\n![]({rel_path})"
         elif message.document:
             filename = message.file.name or "документ"
-            return f"\n\n[{filename}]({rel_path})"
+            return f"\n\n![{filename}]({rel_path})"
         return ""
