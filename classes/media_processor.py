@@ -17,11 +17,10 @@ from classes.cache import Cache
 
 logger = logging.getLogger(__name__)
 
-
 class MediaProcessor:
     """Класс для обработки медиа-файлов из Telegram."""
 
-    def __init__(self, config: Config, cache: Cache, optimize_images: bool = False):
+    def __init__(self, config: Config, cache: Cache, optimize_images: bool = True, optimize_videos: bool = True):
         self.config = config
         self.cache = cache
         self.semaphore = asyncio.Semaphore(config.max_concurrent_downloads)
@@ -41,9 +40,10 @@ class MediaProcessor:
             "success": 0,
             "failed": 0,
             "skipped": 0,
-            "total_size_mb": 0,
+            "total_size_mb": 0.0,
         }
         self.optimize_images = optimize_images
+        self.optimize_videos = optimize_videos
 
         # Создаём необходимые директории
         for path in self.paths.values():
@@ -184,6 +184,61 @@ class MediaProcessor:
         except Exception as e:
             logger.warning(f"Ошибка оптимизации изображения {image_path}: {e}")
 
+    @staticmethod
+    async def _optimize_video(video_path: str) -> str:
+        """Оптимизирует видео для уменьшения размера."""
+        try:
+            import subprocess
+            import os
+
+            # Проверяем размер файла перед оптимизацией
+            original_size = os.path.getsize(video_path)
+
+            # Определяем путь для сжатого файла
+            compressed_path = video_path.replace(".mp4", "_compressed.mp4")
+
+            # Используем ffmpeg для сжатия видео
+            command = [
+                "ffmpeg",
+                "-i", video_path,
+                "-vcodec", "libx264",
+                "-crf", "28",
+                "-preset", "slow",
+                compressed_path
+            ]
+
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            stdout, stderr = await process.communicate()
+
+            if process.returncode != 0:
+                logger.warning(f"Ошибка сжатия видео {video_path}: {stderr.decode()}")
+                return video_path
+
+            # Проверяем результат
+            new_size = os.path.getsize(compressed_path)
+            saved_percent = (1 - new_size / original_size) * 100
+            if saved_percent > 5:  # Если сэкономили больше 5%
+                logger.debug(
+                    f"Сжатие видео {video_path}: {saved_percent:.1f}% экономии"
+                )
+
+            # Удаляем оригинальный файл
+            os.remove(video_path)
+
+            return compressed_path
+
+        except ImportError:
+            logger.warning("ffmpeg не установлен, сжатие видео пропущено")
+            return video_path
+        except Exception as e:
+            logger.warning(f"Ошибка сжатия видео {video_path}: {e}")
+            return video_path
+
     async def download_media_item(self, message: Message) -> Optional[str]:
         """Загружает медиа и возвращает markdown-ссылку."""
         # Проверяем кэш, возможно мы уже загружали это медиа
@@ -263,6 +318,10 @@ class MediaProcessor:
                     if self.optimize_images and message.photo:
                         await self._optimize_image(media_path)
 
+                    # Оптимизируем видео если это видео
+                    if message.video or (message.document and message.document.mime_type == "video/mp4"):
+                        media_path = await self._optimize_video(media_path)
+
                 # Проверка фактического размера после загрузки (может быть полезно в случаях, когда размер определен неверно)
                 actual_size_mb = os.path.getsize(media_path) / (1024 * 1024)
                 if (
@@ -289,19 +348,4 @@ class MediaProcessor:
 
     def _create_markdown_link(self, message: Message, rel_path: str) -> str:
         """Создаёт markdown-ссылку в зависимости от типа медиа."""
-        if message.photo:
-            return f"\n\n![]({rel_path})"
-        elif self._is_round_video(message):
-            return f"\n\n![]({rel_path})"
-        elif message.video or (
-                message.document and message.document.mime_type == "video/mp4"
-        ):
-            return f"\n\n![]({rel_path})"
-        elif message.voice or (
-                message.document and message.document.mime_type == "audio/ogg"
-        ):
-            return f"\n\n![]({rel_path})"
-        elif message.document:
-            filename = message.file.name or "документ"
-            return f"\n\n![{filename}]({rel_path})"
-        return ""
+        return f"\n\n![]({rel_path})"

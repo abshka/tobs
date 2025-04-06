@@ -5,7 +5,8 @@
 import os
 import asyncio
 import logging
-from typing import List, Optional
+from typing import List, Optional, Generator
+from datetime import datetime
 
 import aiofiles
 from telethon.tl.types import Message
@@ -34,33 +35,57 @@ class MessageProcessor:
         return sanitized.replace("\n", " ").strip()
 
     async def process_message_group(
-            self, group_key: int, messages: List[Message], pbar: Optional[tqdm] = None
+        self, group_key: int, messages: List[Message], pbar: Optional[tqdm] = None
     ) -> None:
-        """Обрабатывает группу сообщений."""
+        """Обрабатывает группу сообщений и сохраняет в папку года."""
         try:
             # Определяем дату поста (самая ранняя среди сообщений группы)
-            post_date = min(m.date for m in messages)
+            # Фильтруем сообщения без даты
+            valid_dates_gen: Generator[datetime, None, None] = (m.date for m in messages if m.date)
+            try:
+                post_date = min(valid_dates_gen)
+            except ValueError:
+                # Если нет сообщений с датой в группе, пропускаем
+                logger.warning(
+                    f"Группа {group_key} не содержит сообщений с валидной датой. Пропуск."
+                )
+                if pbar:
+                    pbar.update(1)
+                return
+
+            year_str = str(post_date.year)
             date_str = post_date.strftime("%Y-%m-%d")
 
-            # Находим первый непустой текст
+            # Определяем путь к папке года внутри obsidian_path
+            year_dir_path = os.path.join(self.config.obsidian_path, year_str)
+            # Создаем папку года, если она не существует
+            # Используем синхронный метод, т.к. создание папки - быстрая операция
+            # и происходит до основной асинхронной работы с файлами/медиа.
+            os.makedirs(year_dir_path, exist_ok=True)
+
+            # Находим первый непустой текст (используем message, как более типичный атрибут)
             post_text = next(
-                (m.text.strip() for m in messages if m.text and m.text.strip()), ""
+                (m.message.strip() for m in messages if m.message and m.message.strip()), ""
             )
             # Формируем имя файла
             if post_text:
                 first_line = post_text.splitlines()[0].strip()
                 safe_first_line = self.sanitize_filename(first_line)[
-                                  :50
-                                  ]  # Увеличили лимит до 50 символов
+                    :50
+                ]  # Увеличили лимит до 50 символов
                 filename = f"{date_str}.{safe_first_line}.md"
             else:
                 filename = f"{date_str}.media_only.md"
+                # Устанавливаем текст по умолчанию, если его не было
                 post_text = f"Медиа за {date_str}\n"
 
-            filepath = os.path.join(self.config.obsidian_path, filename)
+            # Формируем полный путь к файлу в папке года
+            filepath = os.path.join(year_dir_path, filename)
 
             # Если файл уже существует, пропускаем
+            # Используем os.path.exists, т.к. это быстрая проверка перед IO
             if os.path.exists(filepath):
+                logger.debug(f"Файл {filepath} уже существует. Пропуск.")
                 if pbar:
                     pbar.update(1)
                 return
@@ -69,21 +94,27 @@ class MessageProcessor:
             media_tasks = [
                 self.media_processor.download_media_item(m)
                 for m in messages
-                if m.media or hasattr(m, "video_note")
+                if m.media or hasattr(m, "video_note") # Проверяем на наличие медиа
             ]
 
             # Параллельная загрузка всех медиа
-            media_markdown = await asyncio.gather(*media_tasks)
+            media_markdown_results = await asyncio.gather(*media_tasks)
 
             # Запись в файл за один раз с использованием aiofiles
-            media_content = "".join([md for md in media_markdown if md])
+            media_content = "".join([md for md in media_markdown_results if md])
+            full_content = post_text + "\n" + media_content if media_content else post_text
+
             async with aiofiles.open(filepath, "w", encoding="utf-8") as f:
-                await f.write(post_text + media_content)
+                await f.write(full_content.strip() + "\n") # Убираем лишние пробелы в конце и добавляем одну новую строку
 
             if pbar:
-                pbar.set_postfix(файл=os.path.basename(filename))
+                # Отображаем относительный путь для краткости
+                relative_path = os.path.join(year_str, filename)
+                pbar.set_postfix(файл=relative_path)
                 pbar.update(1)
+            logger.info(f"Создан файл: {filepath}")
+
         except Exception as e:
-            logger.error(f"Ошибка обработки группы {group_key}: {e}")
+            logger.error(f"Ошибка обработки группы {group_key}: {e}", exc_info=True)
             if pbar:
-                pbar.update(1)
+                pbar.update(1) # Обновляем счетчик даже при ошибке, чтобы прогресс-бар дошел до конца

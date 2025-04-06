@@ -26,18 +26,21 @@ class TelegramExporter:
     def __init__(self, config: Config):
         self.config = config
         self.cache_file = os.path.join(
-            os.path.dirname(config.obsidian_path), ".telegram_cache.json"
+            config.obsidian_path, ".telegram_cache.json"
         )
         self.cache = Cache(self.cache_file, config.cache_ttl)
         self.client = TelegramClient("session_name", config.api_id, config.api_hash)
         self.media_processor = MediaProcessor(
-            config, 
-            self.cache, 
+            config,
+            self.cache,
             optimize_images=getattr(config, 'optimize_images', False),
             optimize_videos=getattr(config, 'optimize_videos', False)
         )
+        # Передаем флаг сортировки по годам в MessageProcessor
         self.message_processor = MessageProcessor(
-            config, self.cache, self.media_processor
+            config,
+            self.cache,
+            self.media_processor
         )
         self.memory_usage_warning_issued = False
 
@@ -125,19 +128,41 @@ class TelegramExporter:
         memory_task = asyncio.create_task(self._monitor_memory_usage())
 
         try:
-            logger.info("Получение сообщений из канала...")
+            logger.info("Получение информации о канале...")
             try:
-                channel_entity = await self.client.get_entity(self.config.channel)
+                # Проверка и преобразование ID канала, если необходимо
+                channel_input = self.config.channel
+                try:
+                    # Попытка преобразовать в int, если это числовой ID
+                    if isinstance(channel_input, str) and channel_input.lstrip('-').isdigit():
+                         channel_input = int(channel_input)
+                except ValueError:
+                     # Оставляем как строку, если это username
+                     pass
+
+                channel_entity = await self.client.get_entity(channel_input)
                 logger.info(
                     f"Успешное подключение к каналу: {getattr(channel_entity, 'title', self.config.channel)}"
                 )
-            except Exception as e:
-                logger.error(f"Не удалось получить доступ к каналу: {e}")
-                if str(e).find("Cannot find any entity") != -1:
+            except ValueError as e:
+                 logger.error(f"Не удалось получить доступ к каналу '{self.config.channel}': {e}")
+                 if "Cannot find any entity corresponding to" in str(e):
+                     logger.info(
+                         f"Убедитесь, что ID канала ('{self.config.channel}') указан верно. "
+                         f"Для частных каналов ID обычно начинается с '-100', и вы должны быть участником этого канала."
+                     )
+                 elif "Could not find the input entity for" in str(e):
                     logger.info(
-                        "Попробуйте добавить префикс '-100' к ID канала, если это приватный канал"
+                        f"Убедитесь, что юзернейм канала ('{self.config.channel}') указан верно и канал публичный, "
+                        f"или используйте числовой ID для частных каналов."
                     )
+                 return
+            except Exception as e:
+                # Общая обработка других ошибок Telethon или сети
+                logger.error(f"Не удалось получить доступ к каналу '{self.config.channel}': {e}")
+                logger.info("Проверьте подключение к интернету и правильность API ID/Hash.")
                 return
+
 
             # Счетчики для статистики
             stats = {"processed": 0, "skipped": 0, "groups": 0, "files_created": 0}
@@ -150,8 +175,9 @@ class TelegramExporter:
             with tqdm(desc="Загрузка сообщений") as msg_pbar:
                 # Ограничение загрузки по количеству сообщений (если указано)
                 iter_messages_kwargs = {"limit": limit} if limit else {}
+                # Используем channel_entity, полученный ранее
                 async for message in self.client.iter_messages(
-                        self.config.channel, **iter_messages_kwargs
+                        channel_entity, **iter_messages_kwargs
                 ):
                     msg_pbar.update(1)
 
@@ -167,10 +193,15 @@ class TelegramExporter:
 
                     try:
                         # Группировка сообщений по grouped_id или по одиночным сообщениям
+                        # Важно: сортируем сообщения в группе по ID, чтобы первое было самым ранним
+                        group_key = message.grouped_id if message.grouped_id else message.id
+                        if group_key not in groups:
+                            groups[group_key] = []
+                        groups[group_key].append(message)
+                        # Сортировка нужна, чтобы определить год группы по первому сообщению
                         if message.grouped_id:
-                            groups.setdefault(message.grouped_id, []).append(message)
-                        else:
-                            groups[message.id] = [message]
+                           groups[group_key].sort(key=lambda m: m.id)
+
                     except Exception as e:
                         logger.error(
                             f"Ошибка группировки сообщения {getattr(message, 'id', 'unknown')}: {e}"
@@ -198,15 +229,35 @@ class TelegramExporter:
 
             # Работаем с группами для экономии памяти
             with tqdm(total=len(groups), desc="Обработка постов") as pbar:
-                group_items = list(groups.items())
+                # Сортируем группы по ID первого сообщения (для примерного хронологического порядка)
+                # Это не строго обязательно для функционала, но может быть полезно для логов/прогресса
+                try:
+                    group_items = sorted(groups.items(), key=lambda item: item[1][0].id)
+                except IndexError: # На случай пустой группы (маловероятно)
+                    group_items = list(groups.items())
+
+
                 for i in range(0, len(group_items), self.config.batch_size):
                     batch = group_items[i: i + self.config.batch_size]
-                    batch_tasks = [
-                        self.message_processor.process_message_group(key, msgs, pbar)
-                        for key, msgs in batch
-                    ]
+                    batch_tasks = []
+                    for key, msgs in batch:
+                        if not msgs: # Пропускаем пустые группы, если такие вдруг образовались
+                            logger.warning(f"Обнаружена пустая группа с ключом {key}, пропуск.")
+                            continue
+
+                        # Передаем группу на обработку
+                        batch_tasks.append(
+                            self.message_processor.process_message_group(key, msgs, pbar)
+                        )
+
+                    if not batch_tasks: # Если все группы в батче были пропущены
+                         continue
+
                     # Запускаем batch_tasks параллельно и ждем их завершения
-                    await asyncio.gather(*batch_tasks)
+                    processed_results = await asyncio.gather(*batch_tasks)
+
+                    # Обновляем статистику по созданным файлам (по количеству успешно обработанных групп)
+                    stats["files_created"] += sum(1 for result in processed_results if result) # Считаем только успешные
 
                     # Очистка обработанных групп для экономии памяти
                     for key, _ in batch:
@@ -216,15 +267,12 @@ class TelegramExporter:
                     # Принудительный сбор мусора каждые несколько пакетов
                     if i % (self.config.batch_size * 5) == 0 and i > 0:
                         import gc
-
                         gc.collect()
 
                     # Периодически сохраняем кэш для возможности восстановления после сбоя
                     if i % (self.config.batch_size * 2) == 0 and i > 0:
                         await self.cache.save()
 
-                    # Обновляем статистику для файлов
-                    stats["files_created"] = len(batch)
 
             # Окончательное сохранение кэша
             await self.cache.save()
@@ -239,7 +287,7 @@ class TelegramExporter:
                 f"пропущено: {stats['skipped']}"
             )
         except Exception as e:
-            logger.error(f"Общая ошибка: {e}")
+            logger.exception(f"Произошла непредвиденная ошибка во время экспорта: {e}")
             # Сохраняем кэш даже при ошибке
             await self.cache.save()
 
@@ -251,4 +299,3 @@ class TelegramExporter:
                     await memory_task
                 except asyncio.CancelledError:
                     pass
-
