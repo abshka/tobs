@@ -30,7 +30,12 @@ class TelegramExporter:
         )
         self.cache = Cache(self.cache_file, config.cache_ttl)
         self.client = TelegramClient("session_name", config.api_id, config.api_hash)
-        self.media_processor = MediaProcessor(config, self.cache)
+        self.media_processor = MediaProcessor(
+            config, 
+            self.cache, 
+            optimize_images=getattr(config, 'optimize_images', False),
+            optimize_videos=getattr(config, 'optimize_videos', False)
+        )
         self.message_processor = MessageProcessor(
             config, self.cache, self.media_processor
         )
@@ -54,7 +59,6 @@ class TelegramExporter:
 
             # Проверка доступности памяти
             try:
-
 
                 memory_available_mb = psutil.virtual_memory().available / (1024 * 1024)
                 if memory_available_mb < 100:  # Меньше 100 МБ
@@ -112,7 +116,7 @@ class TelegramExporter:
         resource_check = await self._check_resources()
         if not resource_check:
             if not await self._confirm_continue(
-                "Обнаружена нехватка системных ресурсов. Продолжить?"
+                    "Обнаружена нехватка системных ресурсов. Продолжить?"
             ):
                 logger.info("Операция отменена пользователем из-за нехватки ресурсов")
                 return
@@ -147,13 +151,13 @@ class TelegramExporter:
                 # Ограничение загрузки по количеству сообщений (если указано)
                 iter_messages_kwargs = {"limit": limit} if limit else {}
                 async for message in self.client.iter_messages(
-                    self.config.channel, **iter_messages_kwargs
+                        self.config.channel, **iter_messages_kwargs
                 ):
                     msg_pbar.update(1)
 
                     # Пропускаем уже обработанные сообщения
                     if self.config.skip_processed and self.cache.is_processed(
-                        message.id
+                            message.id
                     ):
                         stats["skipped"] += 1
                         continue
@@ -196,7 +200,7 @@ class TelegramExporter:
             with tqdm(total=len(groups), desc="Обработка постов") as pbar:
                 group_items = list(groups.items())
                 for i in range(0, len(group_items), self.config.batch_size):
-                    batch = group_items[i : i + self.config.batch_size]
+                    batch = group_items[i: i + self.config.batch_size]
                     batch_tasks = [
                         self.message_processor.process_message_group(key, msgs, pbar)
                         for key, msgs in batch
@@ -247,3 +251,4 @@ class TelegramExporter:
                     await memory_task
                 except asyncio.CancelledError:
                     pass
+

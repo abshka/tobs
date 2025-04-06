@@ -34,7 +34,7 @@ class MessageProcessor:
         return sanitized.replace("\n", " ").strip()
 
     async def process_message_group(
-        self, group_key: int, messages: List[Message], pbar: Optional[tqdm] = None
+            self, group_key: int, messages: List[Message], pbar: Optional[tqdm] = None
     ) -> None:
         """Обрабатывает группу сообщений."""
         try:
@@ -50,8 +50,8 @@ class MessageProcessor:
             if post_text:
                 first_line = post_text.splitlines()[0].strip()
                 safe_first_line = self.sanitize_filename(first_line)[
-                    :50
-                ]  # Увеличили лимит до 50 символов
+                                  :50
+                                  ]  # Увеличили лимит до 50 символов
                 filename = f"{date_str}.{safe_first_line}.md"
             else:
                 filename = f"{date_str}.media_only.md"

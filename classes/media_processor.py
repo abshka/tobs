@@ -83,7 +83,7 @@ class MediaProcessor:
                     continue
 
                 if attempt < retries - 1:
-                    wait_time = delay * (2**attempt)  # Экспоненциальная задержка
+                    wait_time = delay * (2 ** attempt)  # Экспоненциальная задержка
                     logger.warning(
                         f"Попытка {attempt + 1}/{retries} не удалась: {e}. "
                         f"Повторная попытка через {wait_time} сек."

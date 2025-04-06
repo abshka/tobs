@@ -2,3 +2,10 @@
 session_name.session
 telegram_export.log
 .idea/
+.python-version
+pyproject.toml
+telegram_export.log
+.ropeproject
+telegram_session.session
+uv.lock
+classes/__pycache__/
