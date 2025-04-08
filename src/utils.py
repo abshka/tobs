@@ -1,6 +1,9 @@
 import re
 import os
 import logging
+import concurrent.futures
+import asyncio
+from functools import partial
 from pathlib import Path
 from loguru import logger
 import sys
@@ -54,3 +57,25 @@ def get_relative_path(target_path: Path, base_path: Path) -> str:
 def ensure_dir_exists(path: Path):
     """Creates a directory if it doesn't exist."""
     path.mkdir(parents=True, exist_ok=True)
+
+async def run_in_thread_pool(func, *args, **kwargs):
+    """Run a CPU-bound function in a thread pool."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, partial(func, *args, **kwargs)
+    )
+
+def process_files_in_parallel(file_processor_func, files, max_workers=None):
+    """Process multiple files in parallel using a thread pool.
+
+    Args:
+        file_processor_func: Function that processes a single file
+        files: List of files to process
+        max_workers: Maximum number of worker threads (None = auto)
+
+    Returns:
+        List of results from processing each file
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(file_processor_func, files))
+    return results

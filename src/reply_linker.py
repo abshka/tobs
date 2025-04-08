@@ -1,21 +1,26 @@
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Tuple
 from src.config import Config
 from src.cache_manager import CacheManager
 from src.utils import logger, get_relative_path
 import aiofiles
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 class ReplyLinker:
     def __init__(self, config: Config, cache_manager: CacheManager):
         self.config = config
         self.cache_manager = cache_manager
+        self.max_workers = getattr(config, 'max_workers', 10)  # Default to 10 workers if not specified
 
     async def link_replies(self):
         """Iterates through cached messages and adds reply links to parent notes."""
         logger.info("Starting reply linking process...")
         processed_messages = self.cache_manager.get_all_processed_messages()
-        link_tasks = []
+
+        # Collect all linking operations to be performed
+        linking_operations = []
+        unresolved_operations = []
 
         # We iterate through messages that *have* a reply_to field
         for child_id_str, msg_data in processed_messages.items():
@@ -32,32 +37,70 @@ class ReplyLinker:
                         child_note_path = self._find_note_path(child_filename)
 
                         if parent_note_path and child_note_path and parent_note_path.exists():
-                            # Schedule the linking task
-                            link_tasks.append(
-                                self._add_reply_link(child_note_path, parent_note_path)
-                            )
+                            # Add to linking operations list
+                            linking_operations.append((parent_note_path, child_note_path))
                         else:
                             logger.warning(f"Could not find note files for reply link: Parent={parent_filename}, Child={child_filename}. Skipping link.")
-                            # Optionally add "Reply to Unresolved" to the *child* note here if desired
-                            await self._add_unresolved_reply_link(child_filename)
-
+                            # Add to unresolved operations
+                            unresolved_operations.append(child_filename)
                     else:
                          logger.warning(f"Filename missing in cache for reply pair: Parent ID {parent_id_str}, Child ID {child_id_str}")
-                         await self._add_unresolved_reply_link(child_filename) # Add unresolved to child
+                         if child_filename:
+                             unresolved_operations.append(child_filename)
                 else:
                     # Parent message wasn't processed (e.g., deleted, outside scope)
                     logger.warning(f"Parent message {parent_id} for reply {child_id_str} not found in processed cache. Marking as unresolved.")
                     child_filename = msg_data.get("filename")
-                    await self._add_unresolved_reply_link(child_filename) # Add unresolved to child
+                    if child_filename:
+                        unresolved_operations.append(child_filename)
 
-
-        if link_tasks:
-            logger.info(f"Attempting to add {len(link_tasks)} reply links...")
-            await asyncio.gather(*link_tasks)
+        if linking_operations:
+            logger.info(f"Attempting to add {len(linking_operations)} reply links...")
+            await self._process_links_in_batches(linking_operations)
         else:
             logger.info("No reply links to process.")
 
+        if unresolved_operations:
+            logger.info(f"Processing {len(unresolved_operations)} unresolved links...")
+            await self._process_unresolved_in_batches(unresolved_operations)
+
         logger.info("Reply linking process finished.")
+
+    async def _process_links_in_batches(self, operations: List[Tuple[Path, Path]], batch_size: int = 50):
+        """Process reply links in batches using a thread pool for I/O operations."""
+        total_ops = len(operations)
+        logger.info(f"Processing {total_ops} reply links in batches with {self.max_workers} workers")
+
+        # Process in batches to avoid creating too many tasks at once
+        for i in range(0, total_ops, batch_size):
+            batch = operations[i:i+batch_size]
+            tasks = []
+
+            # Create task for each operation in the batch
+            for parent_path, child_path in batch:
+                tasks.append(self._add_reply_link(parent_path, child_path))
+
+            # Process the batch concurrently
+            if tasks:
+                await asyncio.gather(*tasks)
+                logger.info(f"Processed batch of {len(tasks)} reply links ({i+len(tasks)}/{total_ops})")
+
+    async def _process_unresolved_in_batches(self, child_filenames: List[str], batch_size: int = 50):
+        """Process unresolved links in batches."""
+        total_ops = len(child_filenames)
+        logger.info(f"Processing {total_ops} unresolved links in batches")
+
+        # Process in batches
+        for i in range(0, total_ops, batch_size):
+            batch = child_filenames[i:i+batch_size]
+            tasks = []
+
+            for child_filename in batch:
+                tasks.append(self._add_unresolved_reply_link(child_filename))
+
+            if tasks:
+                await asyncio.gather(*tasks)
+                logger.info(f"Processed batch of {len(tasks)} unresolved links ({i+len(tasks)}/{total_ops})")
 
     def _find_note_path(self, filename: str) -> Optional[Path]:
         """Finds the full path of a note given its filename (including year)."""

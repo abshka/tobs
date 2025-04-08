@@ -1,12 +1,12 @@
 import asyncio
-from typing import Optional, List, AsyncGenerator
+import concurrent.futures
+from typing import Optional, AsyncGenerator, List
 from telethon import TelegramClient
 from telethon.tl.types import Message
 from telethon.errors import (
     FloodWaitError, ChannelPrivateError, UserDeactivatedBanError,
     AuthKeyError, RpcCallFailError, ChannelInvalidError, SessionPasswordNeededError
 )
-from telethon.sessions import StringSession # Or use file session
 from src.config import Config
 from src.utils import logger
 
@@ -20,11 +20,12 @@ class TelegramManager:
             config.session_name,
             config.api_id,
             config.api_hash,
-            # system_version="4.16.30-vxCUSTOM", # Optional: Mimic official client
-            # device_model="Desktop",            # Optional
-            # app_version="4.8.1 x64"            # Optional
         )
         self.target_entity = None
+        # Thread pool for parallel downloads
+        self.thread_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=config.max_workers if hasattr(config, 'max_workers') else 5
+        )
 
     async def connect(self):
         """Connects and authenticates the Telegram client."""
@@ -60,7 +61,7 @@ class TelegramManager:
             logger.info("Telegram client connected and authorized.")
             # Resolve target entity
             self.target_entity = await self.client.get_entity(self.config.telegram_channel)
-            logger.info(f"Target channel resolved: {getattr(self.target_entity, 'title', self.target_entity.id)}")
+            logger.info(f"Target channel resolved: {getattr(self.target_entity, 'title', getattr(self.target_entity, 'id', 'unknown'))}")
 
         except (AuthKeyError, UserDeactivatedBanError) as e:
              logger.error(f"Authentication error: {e}. Session might be invalid or account banned. Delete session file ('{self.config.session_name}.session') and try again.")
@@ -77,6 +78,7 @@ class TelegramManager:
         if self.client and self.client.is_connected():
             logger.info("Disconnecting Telegram client...")
             await self.client.disconnect()
+            self.thread_pool.shutdown(wait=True)
             logger.info("Telegram client disconnected.")
 
     async def fetch_messages(self, min_id: Optional[int] = None) -> AsyncGenerator[Message, None]:
@@ -101,8 +103,8 @@ class TelegramManager:
             # Note: Telethon's batch_size parameter was removed/changed.
             # Control is mainly through wait_time now. limit=None fetches all.
             async for message in self.client.iter_messages(
-                self.target_entity,
-                limit=None, # Fetch all messages matching criteria
+                entity=self.target_entity,
+                limit=100000,  # Large limit instead of None for type compatibility
                 offset_id=0, # Start from the beginning
                 reverse=True, # Fetch oldest first
                 min_id=min_id or 0, # Start from min_id if specified
@@ -134,6 +136,43 @@ class TelegramManager:
         except Exception as e:
             logger.error(f"An unexpected error occurred during message fetching: {e}", exc_info=self.config.verbose)
             raise
+
+    async def fetch_messages_batch(self, min_id: Optional[int] = None, batch_size: int = 100) -> AsyncGenerator[List[Message], None]:
+        """Fetch messages in batches for parallel processing"""
+        messages = []
+        async for message in self.fetch_messages(min_id=min_id):
+            messages.append(message)
+            if len(messages) >= batch_size:
+                yield messages
+                messages = []
+
+        if messages:  # Don't forget the last batch
+            yield messages
+
+    async def download_media_parallel(self, messages, download_folder):
+        """Download media from multiple messages in parallel"""
+        tasks = []
+        for message in messages:
+            if message.media:
+                task = asyncio.create_task(self._download_single_media(message, download_folder))
+                tasks.append(task)
+
+        if tasks:
+            return await asyncio.gather(*tasks)
+        return []
+
+    async def _download_single_media(self, message, download_folder):
+        """Download media from a single message using a thread pool"""
+        try:
+            # Run the potentially blocking download in a thread pool
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.thread_pool,
+                lambda: self.client.download_media(message.media, download_folder)
+            )
+        except Exception as e:
+            logger.error(f"Failed to download media from message {message.id}: {e}")
+            return None
 
     # Expose the client instance for direct use if needed (e.g., media download)
     def get_client(self) -> TelegramClient:
