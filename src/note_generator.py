@@ -8,6 +8,7 @@ import aiofiles
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import functools
+import os
 
 class NoteGenerator:
     def __init__(self, config: Config):
@@ -16,6 +17,7 @@ class NoteGenerator:
         self.io_executor = ThreadPoolExecutor(max_workers=config.max_workers if hasattr(config, 'max_workers') else 5)
         self.cpu_executor = ProcessPoolExecutor(max_workers=max(1, (config.max_workers // 2) if hasattr(config, 'max_workers') else 2))
         self.semaphore = asyncio.Semaphore(10)  # Limit concurrent file operations
+        self.file_locks = {}  # Dictionary to store locks for each file
 
     async def _sanitize_title_async(self, text, max_length):
         """Run sanitize_filename in the process pool as it's CPU-bound."""
@@ -34,12 +36,44 @@ class NoteGenerator:
             path
         )
 
+    async def _read_file_async(self, path):
+        """Read file content asynchronously if it exists."""
+        if not os.path.exists(path):
+            return ""
+
+        async with self.semaphore:
+            try:
+                async with aiofiles.open(path, 'r', encoding='utf-8') as f:
+                    return await f.read()
+            except Exception as e:
+                logger.error(f"Error reading file {path}: {e}")
+                return ""
+
     async def _write_file_async(self, path, content):
         """Write to file using aiofiles for true async I/O."""
-        async with self.semaphore:
-            async with aiofiles.open(path, 'w', encoding='utf-8') as f:
-                await f.write(content)
-            return path
+        # Get or create a lock for this specific file
+        if path not in self.file_locks:
+            self.file_locks[path] = asyncio.Lock()
+
+        # Use the lock to prevent concurrent writes to the same file
+        async with self.file_locks[path]:
+            async with self.semaphore:
+                async with aiofiles.open(path, 'w', encoding='utf-8') as f:
+                    await f.write(content)
+                return path
+
+    async def _append_file_async(self, path, content):
+        """Append to file using aiofiles for true async I/O."""
+        # Get or create a lock for this specific file
+        if path not in self.file_locks:
+            self.file_locks[path] = asyncio.Lock()
+
+        # Use the lock to prevent concurrent writes to the same file
+        async with self.file_locks[path]:
+            async with self.semaphore:
+                async with aiofiles.open(path, 'a', encoding='utf-8') as f:
+                    await f.write(content)
+                return path
 
     async def _generate_markdown_content(self, message, media_links):
         """Generate markdown content in a separate task."""
@@ -74,9 +108,6 @@ class NoteGenerator:
             # Run tasks concurrently
             sanitized_title = await sanitize_task
 
-            # Start content generation early
-            content_task = self._generate_markdown_content(message, media_links)
-
             # Prepare directory while content is being generated
             dir_task = self._ensure_dir_exists_async(year_dir)
 
@@ -88,13 +119,22 @@ class NoteGenerator:
             # Wait for directory to be ready
             await dir_task
 
-            # Wait for content to be ready
-            content = await content_task
+            # Check if file already exists and read its content if it does
+            existing_content = await self._read_file_async(note_path)
 
-            # Write the file asynchronously
-            await self._write_file_async(note_path, content)
+            # Generate new content
+            new_content = await self._generate_markdown_content(message, media_links)
 
-            logger.info(f"Created note: {note_path}")
+            if existing_content and os.path.exists(note_path):
+                # Append new content to existing file
+                logger.info(f"Appending content to existing note: {note_path}")
+                await self._append_file_async(note_path, new_content)
+            else:
+                # Create new file with content
+                logger.info(f"Creating new note: {note_path}")
+                await self._write_file_async(note_path, new_content)
+
+            logger.info(f"Updated note: {note_path}")
             return note_path
 
         except Exception as e:

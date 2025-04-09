@@ -143,53 +143,54 @@ async def run_export(config: Config):
         logger.info(f"Running in 'only_new' mode. Will fetch messages after ID: {last_processed_id}")
 
     try:
-        # Prefetch messages in chunks to optimize memory usage while maintaining parallelism
-        prefetch_size = getattr(config, 'prefetch_size', 100)
-        batch_size = getattr(config, 'batch_size', 20)
+        # Get the maximum number of concurrent workers
+        max_workers = getattr(config, 'max_concurrent_processes', 8)
+        # Create a semaphore to limit the number of concurrent tasks
+        semaphore = asyncio.Semaphore(max_workers)
 
-        # Stream messages and process in dynamic batches
-        message_buffer = []
+        # Create a queue of tasks that are being processed
+        active_tasks = set()
         processed_count = 0
-        semaphore = asyncio.Semaphore(getattr(config, 'max_concurrent_processes', 50))
 
+        # Use this to periodically save cache
+        last_cache_save = 0
+        cache_save_interval = getattr(config, 'cache_save_interval', 50)  # Save every 50 messages by default
+
+        logger.info(f"Starting continuous processing with {max_workers} concurrent workers")
+
+        # Process messages as they come in, continuously assigning new tasks as workers become available
         async for message in telegram_manager.fetch_messages(min_id=last_processed_id):
             # Double check against cache even if min_id is used, in case of partial runs
             if not cache_manager.is_processed(message.id):
-                message_buffer.append(message)
+                # Create a new task for processing this message
+                async with semaphore:
+                    task = asyncio.create_task(
+                        process_message(message, media_processor, note_generator,
+                                       cache_manager, config, thread_executor, process_pool_executor)
+                    )
+
+                    # Add callback to remove the task from active_tasks when complete
+                    task.add_done_callback(lambda t: active_tasks.discard(t))
+                    active_tasks.add(task)
+
                 processed_count += 1
 
-                # When buffer reaches prefetch size, start processing in batches
-                if len(message_buffer) >= prefetch_size:
-                    await process_message_buffer(
-                        message_buffer,
-                        media_processor,
-                        note_generator,
-                        cache_manager,
-                        config,
-                        thread_executor,
-                        process_pool_executor,
-                        batch_size,
-                        semaphore
-                    )
-                    message_buffer = []
-                    # Save cache periodically after processing large chunks
+                # Periodically save cache
+                if processed_count - last_cache_save >= cache_save_interval:
                     await cache_manager.save_cache()
+                    last_cache_save = processed_count
+                    logger.info(f"Saved cache after processing {processed_count} messages")
+
+                    # Log progress
+                    completed = processed_count - len(active_tasks)
+                    logger.info(f"Progress: {completed} messages completed, {len(active_tasks)} messages in progress")
             else:
                 logger.trace(f"Message {message.id} already in cache, skipping processing.")
 
-        # Process any remaining messages
-        if message_buffer:
-            await process_message_buffer(
-                message_buffer,
-                media_processor,
-                note_generator,
-                cache_manager,
-                config,
-                thread_executor,
-                process_pool_executor,
-                batch_size,
-                semaphore
-            )
+        # Wait for all remaining tasks to complete
+        if active_tasks:
+            logger.info(f"Waiting for {len(active_tasks)} remaining tasks to complete")
+            await asyncio.gather(*active_tasks)
 
         logger.info(f"Processed total of {processed_count} messages.")
 
@@ -223,43 +224,6 @@ async def preload_resources(config):
     """Preload any resources needed for processing."""
     # Placeholder for potential resource preloading
     await asyncio.sleep(0.1)  # Simulate some async work
-
-async def process_message_buffer(message_buffer, media_processor, note_generator, cache_manager,
-                               config, thread_executor, process_executor, batch_size, semaphore):
-    """Process a buffer of messages with optimal parallelism."""
-    logger.info(f"Processing {len(message_buffer)} messages in optimized batches")
-
-    # Process messages in batches to control memory usage
-    tasks = []
-    for i in range(0, len(message_buffer), batch_size):
-        batch = message_buffer[i:i+batch_size]
-        logger.info(f"Starting batch {i//batch_size + 1}/{(len(message_buffer) + batch_size - 1)//batch_size} ({len(batch)} messages)")
-
-        # Process messages in parallel within each batch with semaphore to limit concurrent work
-        batch_tasks = []
-        for message in batch:
-            # Use semaphore to limit concurrency
-            async with semaphore:
-                task = asyncio.create_task(
-                    process_message(message, media_processor, note_generator, cache_manager, config, thread_executor, process_executor)
-                )
-                batch_tasks.append(task)
-
-        # Add all batch tasks to overall tasks list
-        tasks.extend(batch_tasks)
-
-        # Option 1: Wait for each batch to complete before starting next batch
-        if getattr(config, 'sequential_batches', False):
-            batch_results = await asyncio.gather(*batch_tasks)
-            logger.info(f"Completed batch {i//batch_size + 1}, processed messages: {batch_results}")
-
-    # If not using sequential batches, wait for all tasks to complete here
-    if not getattr(config, 'sequential_batches', False):
-        await asyncio.gather(*tasks)
-
-    # Periodically save cache
-    await cache_manager.save_cache()
-    logger.info(f"Completed processing {len(message_buffer)} messages, cache saved")
 
 async def main():
     try:
