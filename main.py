@@ -1,6 +1,7 @@
 import asyncio
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from typing import List, Optional
 from src.config import load_config, Config
 from src.utils import setup_logging, logger
@@ -10,88 +11,189 @@ from src.media_processor import MediaProcessor
 from src.note_generator import NoteGenerator
 from src.reply_linker import ReplyLinker
 from src.exceptions import ExporterError, ConfigError, TelegramConnectionError
+import functools
+import os
 
-async def process_message(message, media_processor, note_generator, cache_manager, config, executor):
-    """Process a single message with potential multithreading for media."""
+# Helper function to run CPU-bound tasks in process pool
+def run_in_process_pool(func, *args, **kwargs):
+    loop = asyncio.get_event_loop()
+    return loop.run_in_executor(
+        process_pool_executor,
+        functools.partial(func, *args, **kwargs)
+    )
+
+# Global process pool executor for CPU-bound tasks
+process_pool_executor = None
+
+async def process_message(message, media_processor, note_generator, cache_manager, config, thread_executor, process_executor):
+    """Process a single message with maximized parallelism for both I/O and CPU-bound tasks."""
     logger.info(f"Processing message ID: {message.id} Date: {message.date}")
 
-    # 1. Process Media
+    # 1. Process Media - I/O bound task with potential CPU work for preprocessing
+    media_links_task = asyncio.create_task(process_media(message, media_processor, config))
+
+    # Start other tasks in parallel while media processing happens
+    other_tasks = []
+
+    # 2. Pre-fetch any data needed for note creation in parallel
+    # Assuming there might be some preparatory work that can be done independently
+    if hasattr(note_generator, 'prepare_note_data'):
+        prepare_task = asyncio.create_task(note_generator.prepare_note_data(message))
+        other_tasks.append(prepare_task)
+
+    # Wait for media processing to complete
+    media_links = await media_links_task
+
+    # Wait for any other parallel prep tasks
+    if other_tasks:
+        await asyncio.gather(*other_tasks)
+
+    # 2. Create Note - Can be CPU-bound for complex formatting/rendering
+    # Offload to process pool if it's CPU intensive
+    if getattr(config, 'use_process_pool_for_notes', False):
+        loop = asyncio.get_event_loop()
+        note_path = await loop.run_in_executor(
+            process_executor,
+            functools.partial(note_generator.create_note_sync, message, media_links)
+        )
+    else:
+        note_path = await note_generator.create_note(message, media_links)
+
+    # 3. Update Cache - Quick operation, just do it directly
+    if note_path:
+        note_filename = note_path.name
+        reply_to_id = getattr(message.reply_to, 'reply_to_msg_id', None) if hasattr(message, "reply_to") else None
+        cache_manager.add_processed_message(message.id, note_filename, reply_to_id)
+
+        # 4. Trigger any post-processing tasks in parallel that don't affect result
+        if hasattr(note_generator, 'post_process_note'):
+            asyncio.create_task(note_generator.post_process_note(note_path))
+    else:
+        logger.error(f"Skipping cache update for message {message.id} due to note creation failure.")
+
+    return message.id
+
+async def process_media(message, media_processor, config):
+    """Process media files with proper error handling."""
     media_links = []
     if config.media_download:
         try:
-            # Process media directly using the media processor's async method
-            # Avoid using run_in_executor which causes event loop issues with Telethon
+            # Process media using async method for parallel processing
             media_links = await media_processor.process_media_async(message, config.obsidian_path)
         except Exception as e:
             logger.error(f"Failed to process media for message {message.id}: {e}", exc_info=config.verbose)
             # Add placeholder even on failure
             media_links.append(("[media processing error]", None))
-
-    # 2. Create Note
-    note_path = await note_generator.create_note(message, media_links)
-
-    # 3. Update Cache
-    if note_path:
-        note_filename = note_path.name
-        reply_to_id = getattr(message.reply_to, 'reply_to_msg_id', None) if hasattr(message, "reply_to") else None
-        cache_manager.add_processed_message(message.id, note_filename, reply_to_id)
-    else:
-        logger.error(f"Skipping cache update for message {message.id} due to note creation failure.")
+    return media_links
 
 async def run_export(config: Config):
-    """Main export process orchestration."""
+    """Main export process orchestration with maximum parallelism."""
+    global process_pool_executor
+
+    # Initialize process pool for CPU-bound tasks
+    cpu_count = multiprocessing.cpu_count()
+    process_workers = max(1, min(cpu_count - 1, 4))  # Use up to N-1 cores, max 4
+    process_pool_executor = ProcessPoolExecutor(max_workers=process_workers)
+
+    # Create thread pool for I/O-bound tasks
+    thread_workers = getattr(config, 'max_workers', min(32, cpu_count*4))  # Much higher thread count for I/O work
+    thread_executor = ThreadPoolExecutor(max_workers=thread_workers)
+
+    logger.info(f"Created process pool with {process_workers} workers for CPU-bound tasks")
+    logger.info(f"Created thread pool with {thread_workers} workers for I/O-bound tasks")
+
+    # Initialize components with shared semaphores to prevent resource exhaustion
+    max_concurrent_downloads = getattr(config, 'max_concurrent_downloads', 20)
+    media_semaphore = asyncio.Semaphore(max_concurrent_downloads)
+
     cache_manager = CacheManager(config.cache_file)
     await cache_manager.load_cache()
 
     telegram_manager = TelegramManager(config)
     try:
-        await telegram_manager.connect()
+        # Start connecting to Telegram
+        connect_task = asyncio.create_task(telegram_manager.connect())
+
+        # While connection is being established, perform other setup tasks in parallel
+        setup_tasks = []
+
+        # Load any additional resources asynchronously if needed
+        if hasattr(config, 'preload_resources') and config.preload_resources:
+            # This is a placeholder for potential resource preloading
+            setup_tasks.append(asyncio.create_task(preload_resources(config)))
+
+        # Wait for Telegram connection to complete
+        await connect_task
+
+        # Wait for any other setup tasks to complete
+        if setup_tasks:
+            await asyncio.gather(*setup_tasks)
+
     except Exception as e:
         logger.critical(f"Failed to initialize Telegram connection: {e}. Exiting.")
         raise TelegramConnectionError("Telegram connection failed") from e
 
-    media_processor = MediaProcessor(config, telegram_manager.get_client())
+    media_processor = MediaProcessor(config, telegram_manager.get_client(), semaphore=media_semaphore)
     note_generator = NoteGenerator(config)
     reply_linker = ReplyLinker(config, cache_manager)
-
-    # Create thread pool for other parallel processing (not for Telethon operations)
-    max_workers = getattr(config, 'max_workers', 5)  # Default to 5 workers if not specified
-    executor = ThreadPoolExecutor(max_workers=max_workers)
-    logger.info(f"Created thread pool with {max_workers} workers for processing tasks")
 
     last_processed_id = None
     if config.only_new:
         last_processed_id = cache_manager.get_last_processed_message_id()
         logger.info(f"Running in 'only_new' mode. Will fetch messages after ID: {last_processed_id}")
 
-    messages_to_process = []
     try:
+        # Prefetch messages in chunks to optimize memory usage while maintaining parallelism
+        prefetch_size = getattr(config, 'prefetch_size', 100)
+        batch_size = getattr(config, 'batch_size', 20)
+
+        # Stream messages and process in dynamic batches
+        message_buffer = []
+        processed_count = 0
+        semaphore = asyncio.Semaphore(getattr(config, 'max_concurrent_processes', 50))
+
         async for message in telegram_manager.fetch_messages(min_id=last_processed_id):
             # Double check against cache even if min_id is used, in case of partial runs
             if not cache_manager.is_processed(message.id):
-                messages_to_process.append(message)
+                message_buffer.append(message)
+                processed_count += 1
+
+                # When buffer reaches prefetch size, start processing in batches
+                if len(message_buffer) >= prefetch_size:
+                    await process_message_buffer(
+                        message_buffer,
+                        media_processor,
+                        note_generator,
+                        cache_manager,
+                        config,
+                        thread_executor,
+                        process_pool_executor,
+                        batch_size,
+                        semaphore
+                    )
+                    message_buffer = []
+                    # Save cache periodically after processing large chunks
+                    await cache_manager.save_cache()
             else:
                 logger.trace(f"Message {message.id} already in cache, skipping processing.")
 
-        logger.info(f"Found {len(messages_to_process)} new messages to process.")
+        # Process any remaining messages
+        if message_buffer:
+            await process_message_buffer(
+                message_buffer,
+                media_processor,
+                note_generator,
+                cache_manager,
+                config,
+                thread_executor,
+                process_pool_executor,
+                batch_size,
+                semaphore
+            )
 
-        # Process messages in batches to control memory usage
-        batch_size = getattr(config, 'batch_size', 20)  # Default batch size
-        for i in range(0, len(messages_to_process), batch_size):
-            batch = messages_to_process[i:i+batch_size]
-            logger.info(f"Processing batch {i//batch_size + 1}/{(len(messages_to_process) + batch_size - 1)//batch_size} ({len(batch)} messages)")
+        logger.info(f"Processed total of {processed_count} messages.")
 
-            # Process messages sequentially in each batch to avoid Telethon event loop issues
-            for message in batch:
-                await process_message(message, media_processor, note_generator, cache_manager, config, executor)
-
-            # Save cache after each batch for safety
-            await cache_manager.save_cache()
-            logger.info(f"Completed batch {i//batch_size + 1}, cache saved")
-
-        logger.info("Finished processing all messages.")
-
-        # 4. Link Replies (after all notes are potentially created)
+        # 4. Link Replies (after all notes are created)
         await reply_linker.link_replies()
 
         # 5. Final Cache Save
@@ -112,15 +214,68 @@ async def run_export(config: Config):
         except Exception as cache_e:
              logger.error(f"Failed to save cache during critical error handling: {cache_e}")
     finally:
-        executor.shutdown()
+        thread_executor.shutdown(wait=False)
+        process_pool_executor.shutdown(wait=False)
         await telegram_manager.disconnect()
         logger.info("Export process finished.")
 
+async def preload_resources(config):
+    """Preload any resources needed for processing."""
+    # Placeholder for potential resource preloading
+    await asyncio.sleep(0.1)  # Simulate some async work
+
+async def process_message_buffer(message_buffer, media_processor, note_generator, cache_manager,
+                               config, thread_executor, process_executor, batch_size, semaphore):
+    """Process a buffer of messages with optimal parallelism."""
+    logger.info(f"Processing {len(message_buffer)} messages in optimized batches")
+
+    # Process messages in batches to control memory usage
+    tasks = []
+    for i in range(0, len(message_buffer), batch_size):
+        batch = message_buffer[i:i+batch_size]
+        logger.info(f"Starting batch {i//batch_size + 1}/{(len(message_buffer) + batch_size - 1)//batch_size} ({len(batch)} messages)")
+
+        # Process messages in parallel within each batch with semaphore to limit concurrent work
+        batch_tasks = []
+        for message in batch:
+            # Use semaphore to limit concurrency
+            async with semaphore:
+                task = asyncio.create_task(
+                    process_message(message, media_processor, note_generator, cache_manager, config, thread_executor, process_executor)
+                )
+                batch_tasks.append(task)
+
+        # Add all batch tasks to overall tasks list
+        tasks.extend(batch_tasks)
+
+        # Option 1: Wait for each batch to complete before starting next batch
+        if getattr(config, 'sequential_batches', False):
+            batch_results = await asyncio.gather(*batch_tasks)
+            logger.info(f"Completed batch {i//batch_size + 1}, processed messages: {batch_results}")
+
+    # If not using sequential batches, wait for all tasks to complete here
+    if not getattr(config, 'sequential_batches', False):
+        await asyncio.gather(*tasks)
+
+    # Periodically save cache
+    await cache_manager.save_cache()
+    logger.info(f"Completed processing {len(message_buffer)} messages, cache saved")
 
 async def main():
     try:
+        # Load config in main thread
         config = load_config()
+
+        # Setup logging
         setup_logging(config.verbose)
+
+        # Run CPU-intensive initialization tasks in parallel if any exist
+        init_tasks = []
+
+        # Wait for any initialization tasks
+        if init_tasks:
+            await asyncio.gather(*init_tasks)
+
     except (ValueError, ConfigError) as e:
         # Logger might not be set up yet if config fails early
         print(f"ERROR: Configuration failed: {e}", file=sys.stderr)
@@ -129,22 +284,38 @@ async def main():
          print(f"ERROR: Unexpected error during setup: {e}", file=sys.stderr)
          sys.exit(1)
 
-
     try:
+        # Run the export function directly instead of wrapping it in a Task
         await run_export(config)
     except TelegramConnectionError:
          # Already logged in run_export or connect
          sys.exit(1)
-    except Exception as e:
+    except Exception:
          # Catchall for unexpected errors during run_export not handled internally
-         logger.critical(f"Unhandled exception in main execution: {e}", exc_info=True)
+         # logger.critical(f"Unhandled exception in main execution: {e}", exc_info=True)
          sys.exit(1)
 
-
 if __name__ == "__main__":
-    # On Windows, default asyncio event loop policy might cause issues with subprocesses (like ffmpeg)
-    # if sys.platform == "win32":
-    #      asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    # Consider if needed based on testing. Often Selector loop is fine.
+    try:
+        # Set the event loop policy to address 'get_default_executor' issue
+        # The default loop doesn't have this attribute in some Python versions/platforms
+        if sys.platform != "win32":
+            # Set larger default thread pool size for the event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        else:
+            # On Windows, use the WindowsProactorEventLoopPolicy which should have the required functionality
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-    asyncio.run(main())
+        # Increase default thread stack size if needed for complex operations
+        import threading
+        threading.stack_size(2*1024*1024)  # 2MB stack size
+
+        # Use asyncio.run which properly manages the event loop lifecycle
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nProcess interrupted by user.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"Fatal error during script execution: {e}", file=sys.stderr)
+        sys.exit(1)

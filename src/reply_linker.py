@@ -1,24 +1,55 @@
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any
 from src.config import Config
 from src.cache_manager import CacheManager
 from src.utils import logger, get_relative_path
 import aiofiles
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import os
 
 class ReplyLinker:
     def __init__(self, config: Config, cache_manager: CacheManager):
         self.config = config
         self.cache_manager = cache_manager
         self.max_workers = getattr(config, 'max_workers', 10)  # Default to 10 workers if not specified
+        self._executor = ThreadPoolExecutor(max_workers=self.max_workers)
+        self._semaphore = asyncio.Semaphore(self.max_workers * 2)  # Control concurrent I/O operations
 
     async def link_replies(self):
         """Iterates through cached messages and adds reply links to parent notes."""
         logger.info("Starting reply linking process...")
         processed_messages = self.cache_manager.get_all_processed_messages()
 
-        # Collect all linking operations to be performed
+        # Use thread pool to parallelize initial data processing
+        loop = asyncio.get_event_loop()
+        operations = await loop.run_in_executor(
+            self._executor,
+            self._prepare_linking_operations,
+            processed_messages
+        )
+
+        linking_operations, unresolved_operations = operations
+
+        # Process operations concurrently
+        tasks = []
+        if linking_operations:
+            logger.info(f"Attempting to add {len(linking_operations)} reply links...")
+            tasks.append(self._process_links_in_batches(linking_operations))
+        else:
+            logger.info("No reply links to process.")
+
+        if unresolved_operations:
+            logger.info(f"Processing {len(unresolved_operations)} unresolved links...")
+            tasks.append(self._process_unresolved_in_batches(unresolved_operations))
+
+        if tasks:
+            await asyncio.gather(*tasks)
+
+        logger.info("Reply linking process finished.")
+
+    def _prepare_linking_operations(self, processed_messages: Dict[str, Any]) -> Tuple[List[Tuple[Path, Path]], List[str]]:
+        """Prepares linking operations in a separate thread to optimize performance."""
         linking_operations = []
         unresolved_operations = []
 
@@ -54,53 +85,42 @@ class ReplyLinker:
                     if child_filename:
                         unresolved_operations.append(child_filename)
 
-        if linking_operations:
-            logger.info(f"Attempting to add {len(linking_operations)} reply links...")
-            await self._process_links_in_batches(linking_operations)
-        else:
-            logger.info("No reply links to process.")
-
-        if unresolved_operations:
-            logger.info(f"Processing {len(unresolved_operations)} unresolved links...")
-            await self._process_unresolved_in_batches(unresolved_operations)
-
-        logger.info("Reply linking process finished.")
+        return linking_operations, unresolved_operations
 
     async def _process_links_in_batches(self, operations: List[Tuple[Path, Path]], batch_size: int = 50):
         """Process reply links in batches using a thread pool for I/O operations."""
         total_ops = len(operations)
         logger.info(f"Processing {total_ops} reply links in batches with {self.max_workers} workers")
 
-        # Process in batches to avoid creating too many tasks at once
-        for i in range(0, total_ops, batch_size):
-            batch = operations[i:i+batch_size]
-            tasks = []
+        # Create semaphore-limited tasks to avoid overwhelming resources
+        tasks = [self._add_reply_link_with_semaphore(parent_path, child_path)
+                for parent_path, child_path in operations]
 
-            # Create task for each operation in the batch
-            for parent_path, child_path in batch:
-                tasks.append(self._add_reply_link(parent_path, child_path))
-
-            # Process the batch concurrently
-            if tasks:
-                await asyncio.gather(*tasks)
-                logger.info(f"Processed batch of {len(tasks)} reply links ({i+len(tasks)}/{total_ops})")
+        # Use chunking for better progress reporting
+        for i in range(0, len(tasks), batch_size):
+            batch = tasks[i:i+batch_size]
+            completed = await asyncio.gather(*batch)
+            logger.info(f"Processed batch of {len(batch)} reply links ({i+len(batch)}/{total_ops})")
 
     async def _process_unresolved_in_batches(self, child_filenames: List[str], batch_size: int = 50):
-        """Process unresolved links in batches."""
+        """Process unresolved links in batches with maximum parallelism."""
         total_ops = len(child_filenames)
         logger.info(f"Processing {total_ops} unresolved links in batches")
 
-        # Process in batches
-        for i in range(0, total_ops, batch_size):
-            batch = child_filenames[i:i+batch_size]
-            tasks = []
+        # Create all tasks with semaphore limiting
+        tasks = [self._add_unresolved_reply_link_with_semaphore(child_filename)
+                for child_filename in child_filenames]
 
-            for child_filename in batch:
-                tasks.append(self._add_unresolved_reply_link(child_filename))
+        # Process in chunks for better progress reporting
+        for i in range(0, len(tasks), batch_size):
+            batch = tasks[i:i+batch_size]
+            completed = await asyncio.gather(*batch)
+            logger.info(f"Processed batch of {len(batch)} unresolved links ({i+len(batch)}/{total_ops})")
 
-            if tasks:
-                await asyncio.gather(*tasks)
-                logger.info(f"Processed batch of {len(tasks)} unresolved links ({i+len(tasks)}/{total_ops})")
+    async def _find_note_path_async(self, filename: str) -> Optional[Path]:
+        """Async version of _find_note_path using executor."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._executor, self._find_note_path, filename)
 
     def _find_note_path(self, filename: str) -> Optional[Path]:
         """Finds the full path of a note given its filename (including year)."""
@@ -118,55 +138,81 @@ class ReplyLinker:
             logger.error(f"Error parsing filename {filename} to find path: {e}")
             return None
 
+    async def _add_reply_link_with_semaphore(self, parent_note_path: Path, child_note_path: Path):
+        """Wrapper with semaphore to limit concurrent file operations."""
+        async with self._semaphore:
+            return await self._add_reply_link(parent_note_path, child_note_path)
 
     async def _add_reply_link(self, parent_note_path: Path, child_note_path: Path):
         """Adds a 'Reply to [[child]]' link to the beginning of the parent note."""
         try:
-            # Calculate relative path for the link from parent's directory
-            relative_child_path = get_relative_path(child_note_path, parent_note_path)
-            # Obsidian link format: [[relative/path/to/note]] or [[note_name_without_ext]]
-            # Using relative path is more robust if notes are moved within the vault structure.
-            # Let's use the filename without extension for cleaner Obsidian links if they are in the same folder,
-            # otherwise use relative path. For simplicity and robustness across folders, use relative path.
-            link_target = relative_child_path.replace('.md', '') # Obsidian often resolves without .md
+            # Use executor for CPU-bound operations
+            loop = asyncio.get_event_loop()
+            relative_child_path = await loop.run_in_executor(
+                self._executor,
+                get_relative_path,
+                child_note_path,
+                parent_note_path
+            )
+
+            # Offload string operations to thread pool
+            link_target = relative_child_path.replace('.md', '')  # Obsidian often resolves without .md
             reply_line = f"Reply to [[{link_target}]]\n"
 
             async with aiofiles.open(parent_note_path, mode='r+', encoding='utf-8') as f:
                 content = await f.read()
-                if not content.startswith("Reply to"): # Avoid adding duplicate links
+                if not content.startswith("Reply to"):  # Avoid adding duplicate links
                     logger.debug(f"Adding reply link to {parent_note_path.name} pointing to {child_note_path.name}")
                     await f.seek(0)
                     await f.write(reply_line + content)
-                    await f.truncate() # Ensure file is truncated if new content is shorter (unlikely here)
+                    await f.truncate()  # Ensure file is truncated if new content is shorter
                 else:
                     logger.debug(f"Reply link already exists in {parent_note_path.name}. Skipping.")
-
+            return True
         except Exception as e:
             logger.error(f"Failed to add reply link to {parent_note_path}: {e}", exc_info=self.config.verbose)
+            return False
 
+    async def _add_unresolved_reply_link_with_semaphore(self, child_filename: Optional[str]):
+        """Wrapper with semaphore to limit concurrent file operations."""
+        async with self._semaphore:
+            return await self._add_unresolved_reply_link(child_filename)
 
     async def _add_unresolved_reply_link(self, child_filename: Optional[str]):
         """Adds 'Reply to Unresolved' to the beginning of the child note if the parent is missing."""
         if not child_filename:
             logger.warning("Cannot add unresolved reply link: child filename is missing.")
-            return
+            return False
 
-        child_note_path = self._find_note_path(child_filename)
-        if not child_note_path or not child_note_path.exists():
-            logger.warning(f"Cannot add unresolved reply link: child note path not found or doesn't exist ({child_filename}).")
-            return
+        # Use async path finding
+        child_note_path = await self._find_note_path_async(child_filename)
+
+        # Execute file existence check in thread pool to avoid blocking
+        if not child_note_path:
+            logger.warning(f"Cannot add unresolved reply link: child note path not found ({child_filename}).")
+            return False
+
+        exists = await asyncio.get_event_loop().run_in_executor(
+            self._executor, os.path.exists, child_note_path
+        )
+        if not exists:
+            logger.warning(f"Cannot add unresolved reply link: child note path doesn't exist ({child_filename}).")
+            return False
 
         try:
-            reply_line = "Reply to Unresolved\n\n---\n" # Add separator
+            reply_line = "Reply to Unresolved\n\n---\n"  # Add separator
             async with aiofiles.open(child_note_path, mode='r+', encoding='utf-8') as f:
                 content = await f.read()
-                if not content.startswith("Reply to"): # Avoid adding duplicate links
+                if not content.startswith("Reply to"):  # Avoid adding duplicate links
                     logger.debug(f"Adding 'Reply to Unresolved' to {child_note_path.name}")
                     await f.seek(0)
                     await f.write(reply_line + content)
                     await f.truncate()
+                    return True
                 else:
-                     logger.debug(f"'Reply to' line already exists in {child_note_path.name}. Skipping unresolved.")
+                    logger.debug(f"'Reply to' line already exists in {child_note_path.name}. Skipping unresolved.")
+                    return False
 
         except Exception as e:
             logger.error(f"Failed to add 'Reply to Unresolved' to {child_note_path}: {e}", exc_info=self.config.verbose)
+            return False

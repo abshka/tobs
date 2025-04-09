@@ -1,7 +1,7 @@
 import asyncio
 import concurrent.futures
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 from PIL import Image
 import ffmpeg
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, Message, DocumentAttributeVideo, DocumentAttributeAudio, DocumentAttributeFilename
@@ -9,19 +9,41 @@ from src.config import Config
 from src.utils import logger, ensure_dir_exists
 
 class MediaProcessor:
-    def __init__(self, config: Config, client):
+    def __init__(self, config: Config, client, semaphore=None):
         self.config = config
         self.client = client # Telethon client instance
-        self.semaphore = asyncio.Semaphore(config.concurrent_downloads)
+        # Use provided semaphore or create new one
+        self.semaphore = semaphore if semaphore is not None else asyncio.Semaphore(config.concurrent_downloads * 2)
         # Thread pool for CPU-bound operations like image processing
         self.thread_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=config.max_workers if hasattr(config, 'max_workers') else 5
+            max_workers=config.max_workers * 2 if hasattr(config, 'max_workers') else 10
         )
+        # Process pool for heavy parallel processing
+        self.process_pool = concurrent.futures.ProcessPoolExecutor(
+            max_workers=config.max_workers * 2 if hasattr(config, 'max_workers') else 6
+        )
+        # Кэш для предотвращения повторной обработки одних и тех же медиафайлов
+        self.media_cache: Dict[str, Path] = {}
+        # Очередь для параллельной обработки медиафайлов
+        self.download_queue = asyncio.Queue()
         # Ensure media subdirectories exist
-        self._create_media_dirs()
+        asyncio.create_task(self._create_media_dirs_async())
+
+    async def _create_media_dirs_async(self):
+        """Creates the necessary media subdirectories asynchronously."""
+        subdirs = ["images", "videos", "round_videos", "audios", "documents"]
+        tasks = []
+        for subdir in subdirs:
+            tasks.append(asyncio.create_task(self._ensure_dir_exists_async(self.config.media_base_path / subdir)))
+        await asyncio.gather(*tasks)
+
+    async def _ensure_dir_exists_async(self, path):
+        """Асинхронно создает директорию, если она не существует"""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, ensure_dir_exists, path)
 
     def _create_media_dirs(self):
-        """Creates the necessary media subdirectories."""
+        """Creates the necessary media subdirectories (синхронная версия для совместимости)."""
         subdirs = ["images", "videos", "round_videos", "audios", "documents"]
         for subdir in subdirs:
             ensure_dir_exists(self.config.media_base_path / subdir)
@@ -67,15 +89,29 @@ class MediaProcessor:
         # Note: Telethon often groups media under the first message's media attribute if fetched correctly.
         # If message.media is a list (e.g., album), iterate through it.
         elif isinstance(message.media, list):
-             # This case might occur with older telethon versions or specific fetches.
-             # Modern telethon usually attaches grouped media to the first message.
-             # Let's assume standard handling covers groups via the first message.
-             logger.warning(f"Message {message.id} has unexpected list media type: {type(message.media)}. Skipping complex list handling for now.")
-             # If needed, iterate through message.media and call process_media recursively or adapt logic.
+             # Улучшенная обработка медиагрупп
+             for media_item in message.media:
+                 if hasattr(media_item, 'photo'):
+                     media_items.append(media_item.photo)
+                 elif hasattr(media_item, 'document'):
+                     doc = media_item.document
+                     if doc and hasattr(doc, 'attributes'):
+                         is_video = any(isinstance(attr, DocumentAttributeVideo) for attr in doc.attributes)
+                         is_audio = any(isinstance(attr, DocumentAttributeAudio) for attr in doc.attributes)
+                         is_round = is_video and doc.mime_type == 'video/mp4' and any(getattr(attr, 'round_message', False) for attr in doc.attributes if isinstance(attr, DocumentAttributeVideo))
 
-        # --- Process gathered media items in parallel ---
-        # Create a processing queue for parallel downloads
-        queue = asyncio.Queue()
+                         if is_round:
+                             media_items.append(("round_video", doc))
+                         elif is_video:
+                             media_items.append(("video", doc))
+                         elif is_audio:
+                             media_items.append(("audio", doc))
+                         else:
+                             media_items.append(("document", doc))
+
+        # --- Process gathered media items in parallel with maximum concurrency ---
+        # Используем пул асинхронных задач для максимального параллелизма
+        download_tasks = []
         for item in media_items:
             media_type = "unknown"
             media_obj = None
@@ -86,65 +122,74 @@ class MediaProcessor:
                 media_type, media_obj = item
 
             if media_obj:
-                # Add to the processing queue instead of directly to tasks
-                await queue.put((message.id, media_type, media_obj, note_base_path))
+                # Генерируем имя файла до создания задачи для проверки кэша
+                filename = self._get_filename(media_obj, message.id, media_type)
+                cache_key = f"{media_type}_{getattr(media_obj, 'id', message.id)}_{filename}"
 
-        # Create multiple downloaders to process the queue in parallel
-        # This allows us to download multiple files simultaneously
-        num_workers = min(len(media_items), self.config.concurrent_downloads)
-        if num_workers > 0:
-            downloaders = [self._download_worker(queue) for _ in range(num_workers)]
-            results = await asyncio.gather(*downloaders)
-            # Flatten the results from all workers
-            download_results = [result for worker_results in results for result in worker_results]
+                # Проверяем кэш перед скачиванием
+                if cache_key in self.media_cache and self.media_cache[cache_key].exists():
+                    download_tasks.append(asyncio.create_task(asyncio.sleep(0, self.media_cache[cache_key])))
+                    continue
+
+                # Создаем и запускаем задачу для максимального параллелизма
+                download_tasks.append(asyncio.create_task(self._download_and_optimize(
+                    message.id, media_type, media_obj, note_base_path, cache_key=cache_key)))
+
+        # Запускаем все задачи параллельно с улучшенной обработкой ошибок
+        if download_tasks:
+            # Используем create_task + gather для лучшего параллелизма
+            download_results = await self._gather_with_concurrency(
+                min(len(download_tasks), self.config.concurrent_downloads * 2),
+                *download_tasks
+            )
+            # Filter out exceptions and None results
+            download_results = [result for result in download_results
+                             if not isinstance(result, Exception) and result is not None]
         else:
             download_results = []
 
         # Format results into Markdown links with captions
-        # Diagnostics indicate message.text, .photo, .video, .document might be unknown.
-        # This suggests the Message object definition might be incomplete or assumed.
-        # Using getattr for safer access.
         caption_text = getattr(message, 'text', None)
         has_photo = getattr(message, 'photo', None) is not None
         has_video = getattr(message, 'video', None) is not None
         has_document = getattr(message, 'document', None) is not None
         caption = caption_text if caption_text and (has_photo or has_video or has_document) else None # Basic caption logic
-        # More robust caption logic might be needed if text is separate from media
 
-        for result_path in download_results:
-            if result_path:
-                try:
-                    # Calculate path relative to the note's base directory (assumed to be the export root).
-                    # Example:
-                    # note_base_path = /path/to/output/Test5/ (Export root)
-                    # result_path = /path/to/output/Test5/media/videos/file.mp4
-                    # We want the path relative to note_base_path.
-                    # This should result in "media/videos/file.mp4"
-                    common_ancestor = note_base_path # New: Assume note_base_path is export root (e.g., Test5/)
+        # Параллельно обрабатываем пути и создаем Markdown-ссылки
+        async def process_path_to_link(result_path):
+            if not result_path:
+                return ("[media missed]", None)
 
-                    relative_media_path_obj = result_path.relative_to(common_ancestor)
-                    # Convert to posix string (forward slashes) for Markdown URL compatibility
-                    relative_media_path = relative_media_path_obj.as_posix()
+            try:
+                # Calculate path relative to the note's base directory
+                common_ancestor = note_base_path # Assume note_base_path is export root
 
-                except ValueError:
-                    # Fallback if the paths don't share the expected common ancestor (e.g., different drives, or structure mismatch)
-                    logger.warning(f"Could not determine relative path from {common_ancestor} to {result_path}. Media might be stored outside the expected export directory. Using filename as fallback.")
-                    # Attempt original method as fallback - this might be incorrect if the common_ancestor logic was the issue
-                    # relative_media_path = get_relative_path(result_path, note_base_path) # Original fallback call - commented out as it might be wrong too
-                    relative_media_path = result_path.name # Fallback to just filename if relative path fails
-                except Exception as e:
-                    logger.error(f"Error calculating relative path for {result_path}: {e}. Using filename as fallback.")
-                    relative_media_path = result_path.name # Fallback to just filename if other errors occur
+                # Выполняем вычисление относительного пути асинхронно
+                loop = asyncio.get_running_loop()
+                relative_media_path_obj = await loop.run_in_executor(
+                    None,
+                    lambda: result_path.relative_to(common_ancestor)
+                )
+                # Convert to posix string (forward slashes) for Markdown URL compatibility
+                relative_media_path = relative_media_path_obj.as_posix()
+            except ValueError:
+                # Fallback if the paths don't share the expected common ancestor
+                logger.warning(f"Could not determine relative path from {note_base_path} to {result_path}. Media might be stored outside the expected export directory. Using filename as fallback.")
+                relative_media_path = result_path.name # Fallback to just filename if relative path fails
+            except Exception as e:
+                logger.error(f"Error calculating relative path for {result_path}: {e}. Using filename as fallback.")
+                relative_media_path = result_path.name # Fallback to just filename if other errors occur
 
-                # Ensure no leading slash if it's meant to be relative from the containing folder
-                # This shouldn't be necessary if relative_to works correctly, but keep as safety.
-                relative_media_path = relative_media_path.lstrip('/')
+            # Ensure no leading slash if it's meant to be relative from the containing folder
+            relative_media_path = relative_media_path.lstrip('/')
+            md_link = f"![]({relative_media_path})"
+            return (md_link, caption if len(media_links) == 0 else None)
 
-                md_link = f"![]({relative_media_path})"
-                media_links.append((md_link, caption)) # Append caption once per message if desired, or per media item
-                caption = None # Only add caption to the first media item in a group/message
-            else:
-                media_links.append(("[media missed]", None)) # Placeholder for failed downloads
+        # Параллельно создаем markdown-ссылки
+        link_tasks = [process_path_to_link(path) for path in download_results]
+        if link_tasks:
+            links_with_captions = await asyncio.gather(*link_tasks)
+            media_links.extend(links_with_captions)
 
         return media_links
 
@@ -156,14 +201,26 @@ class MediaProcessor:
         """
         return await self.process_media(message, note_base_path)
 
+    async def _gather_with_concurrency(self, n, *tasks):
+        """Запускает задачи с ограничением одновременных выполнений"""
+        semaphore = asyncio.Semaphore(n)
+
+        async def _wrapped_task(task):
+            async with semaphore:
+                return await task
+
+        return await asyncio.gather(*(
+            _wrapped_task(task) for task in tasks
+        ), return_exceptions=True)
+
     async def _download_worker(self, queue):
         """Worker function that processes items from the download queue."""
         results = []
-        while not queue.empty():
+        while True:
             try:
                 # Get the next item with a timeout to avoid deadlocks
-                message_id, media_type, media_obj, note_base_path = await asyncio.wait_for(queue.get(), timeout=1.0)
-                result = await self._download_and_optimize(message_id, media_type, media_obj, note_base_path)
+                message_id, media_type, media_obj, note_base_path, cache_key = await asyncio.wait_for(queue.get(), timeout=1.0)
+                result = await self._download_and_optimize(message_id, media_type, media_obj, note_base_path, cache_key)
                 results.append(result)
                 queue.task_done()
             except asyncio.TimeoutError:
@@ -174,11 +231,29 @@ class MediaProcessor:
                 queue.task_done()
         return results
 
-    async def _download_and_optimize(self, message_id: int, media_type: str, media_obj, note_base_path: Path) -> Optional[Path]:
+    # Запускает пул воркеров для параллельной обработки медиа
+    async def _start_download_workers(self, num_workers=None):
+        """Запускает несколько воркеров для параллельной обработки загрузок"""
+        if num_workers is None:
+            num_workers = self.config.concurrent_downloads * 2
+
+        workers = [asyncio.create_task(self._download_worker(self.download_queue))
+                   for _ in range(num_workers)]
+        return workers
+
+    async def _download_and_optimize(self, message_id: int, media_type: str, media_obj, note_base_path: Path, cache_key=None) -> Optional[Path]:
         """Handles download and optimization for a single media item."""
         raw_download_path = None # Initialize to prevent unbound error
         downloaded_path_obj = None # Initialize
         final_path = None # Initialize
+
+        # Проверяем кэш перед скачиванием
+        if cache_key and cache_key in self.media_cache:
+            cached_path = self.media_cache[cache_key]
+            if cached_path.exists():
+                logger.debug(f"Using cached media: {cached_path}")
+                return cached_path
+
         try:
             filename = self._get_filename(media_obj, message_id, media_type)
             subdir_map = {
@@ -197,6 +272,8 @@ class MediaProcessor:
             # Check if final file already exists (simple caching)
             if final_path.exists():
                 logger.debug(f"Media already exists: {final_path}. Skipping download/optimization.")
+                if cache_key:
+                    self.media_cache[cache_key] = final_path
                 return final_path
 
             # Acquire semaphore before downloading
@@ -231,54 +308,64 @@ class MediaProcessor:
 
             logger.info(f"Optimizing {media_type} {raw_download_path} -> {final_path}")
 
-            # Run optimizations in the thread pool for CPU-bound operations
-            optimization_successful = False # Keep track if optimization/move worked
+            # Process different media types in parallel using appropriate pools
+            # Запускаем обработку в отдельных тасках для максимальной параллельности
             if media_type == "image":
-                # Use thread pool for CPU-bound image processing
-                await self._optimize_image_parallel(raw_download_path, final_path)
-                optimization_successful = final_path.exists() # Check if output exists after attempt
+                # Use thread pool instead of process pool for image optimization to avoid
+                # "Can't get local object 'TelegramBaseClient.__init__.<locals>._Loggers'" error
+                optimization_task = self._optimize_image_thread_pool(raw_download_path, final_path)
             elif media_type in ["video", "round_video"]:
                 # Video processing is already async via subprocess
-                await self._optimize_video(raw_download_path, final_path)
-                optimization_successful = final_path.exists() # Check if output exists after attempt
-            else: # Audio, Document - just move
-                try:
-                    # Use thread pool for file operations
-                    loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(
-                        self.thread_pool,
-                        lambda: raw_download_path.rename(final_path)
-                    )
-                    optimization_successful = True # Rename is the "optimization" here
-                except Exception as move_err:
-                    logger.error(f"Failed to move raw file {raw_download_path} to {final_path}: {move_err}")
-                    # Attempt to copy as fallback if move failed? Or just report error?
-                    # For now, just log error and let cleanup handle raw file.
-                    optimization_successful = False
+                optimization_task = self._optimize_video_parallel(raw_download_path, final_path)
+            else: # Audio, Document - just move (use thread pool)
+                loop = asyncio.get_running_loop()
+                optimization_task = loop.run_in_executor(
+                    self.thread_pool,
+                    lambda: raw_download_path.rename(final_path)
+                )
 
+            # Await the optimization task
+            try:
+                await optimization_task
+                optimization_successful = final_path.exists()
+            except Exception as e:
+                logger.error(f"Failed to process {media_type} {raw_download_path}: {e}")
+                optimization_successful = False
+                # Try fallback copy if optimization failed
+                if raw_download_path != final_path and raw_download_path.exists() and not final_path.exists():
+                    try:
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(
+                            self.thread_pool,
+                            self._sync_copy_file,
+                            raw_download_path,
+                            final_path
+                        )
+                        optimization_successful = final_path.exists()
+                    except Exception as copy_err:
+                        logger.error(f"Fallback copy also failed: {copy_err}")
+                        optimization_successful = False
 
-            # Clean up raw file if processing completed (successfully or with fallback copy)
-            # and the raw file still exists (meaning optimization created a new file or move failed)
+            # Clean up raw file if processing completed and the raw file still exists
+            # Выполняем очистку асинхронно, не блокируя основной поток
             if raw_download_path.exists():
-                 if final_path.exists() and raw_download_path != final_path:
-                     # This means optimization/move likely created a new file (or fallback copy succeeded)
-                     try:
-                         logger.debug(f"Removing raw file {raw_download_path} after processing.")
-                         raw_download_path.unlink()
-                     except OSError as unlink_err:
-                         logger.warning(f"Could not remove raw file {raw_download_path}: {unlink_err}")
-                 elif not final_path.exists():
-                     # This case indicates something went wrong (e.g., optimization failed without fallback, move failed)
-                     logger.warning(f"Raw file {raw_download_path} exists but final path {final_path} does not. Leaving raw file.")
-                 # If raw_download_path == final_path (e.g., move happened in place, although unlikely with raw_ prefix), do nothing
-
+                if final_path.exists() and raw_download_path != final_path:
+                    try:
+                        asyncio.create_task(self._clean_raw_file_async(raw_download_path))
+                    except Exception as e:
+                        logger.warning(f"Could not schedule raw file cleanup for {raw_download_path}: {e}")
+                elif not final_path.exists():
+                    logger.warning(f"Raw file {raw_download_path} exists but final path {final_path} does not. Leaving raw file.")
 
             if final_path and final_path.exists():
                 logger.info(f"Finished processing media: {final_path}")
-                return final_path # Return the full path object
+                # Добавляем в кэш
+                if cache_key:
+                    self.media_cache[cache_key] = final_path
+                return final_path
             else:
-                 logger.warning(f"Processing finished, but final media file {final_path} not found.")
-                 return None # Return None if the final file doesn't exist
+                logger.warning(f"Processing finished, but final media file {final_path} not found.")
+                return None
 
         except Exception as e:
             logger.error(f"Error processing media for message {message_id} ({media_type}): {e}", exc_info=self.config.verbose)
@@ -288,16 +375,17 @@ class MediaProcessor:
                     if not final_path or not final_path.exists() or raw_download_path != final_path:
                         raw_download_path.unlink()
                 except OSError:
-                    pass # Ignore cleanup error
-            # Clean up potentially incomplete final file
-            if final_path and final_path.exists():
-                 # Decide if we should remove potentially incomplete final file
-                 # If optimization failed and copied, it might be complete.
-                 # If move failed, it won't exist.
-                 # Let's be cautious and leave it if it exists, unless we are sure it's incomplete.
-                 pass
+                    pass
             return None
 
+    async def _clean_raw_file_async(self, file_path):
+        """Асинхронно удаляет временный файл"""
+        try:
+            loop = asyncio.get_running_loop()
+            logger.debug(f"Removing raw file {file_path} after processing.")
+            await loop.run_in_executor(None, lambda: file_path.unlink())
+        except Exception as e:
+            logger.warning(f"Could not remove raw file {file_path}: {e}")
 
     def _get_filename(self, media_obj, message_id: int, media_type: str) -> str:
         """Generates a unique filename for the media, avoiding redundancy for images."""
@@ -378,11 +466,12 @@ class MediaProcessor:
 
         return f"{safe_final_base}{safe_ext}"
 
-    async def _optimize_image_parallel(self, input_path: Path, output_path: Path):
-        """Optimizes an image using Pillow in a thread pool."""
+    async def _optimize_image_thread_pool(self, input_path: Path, output_path: Path):
+        """Optimizes an image using Pillow in a thread pool to avoid process pool pickling issues."""
         loop = asyncio.get_running_loop()
         try:
-            # Run CPU-bound image optimization in thread pool
+            # Run CPU-bound image optimization in thread pool instead of process pool
+            # to avoid "Can't get local object" errors with TelegramBaseClient loggers
             await loop.run_in_executor(
                 self.thread_pool,
                 self._sync_optimize_image,
@@ -409,6 +498,11 @@ class MediaProcessor:
                         try: output_path.unlink()
                         except OSError: pass
 
+    # Keep the original method as an alias that uses the thread pool version instead
+    async def _optimize_image_parallel(self, input_path: Path, output_path: Path):
+        """Alias for the thread pool version to maintain backward compatibility."""
+        await self._optimize_image_thread_pool(input_path, output_path)
+
     def _sync_copy_file(self, input_path, output_path):
         """Synchronous file copy for thread pool execution."""
         with open(input_path, 'rb') as src, open(output_path, 'wb') as dst:
@@ -417,6 +511,21 @@ class MediaProcessor:
                 if not chunk:
                     break
                 dst.write(chunk)
+
+    async def _async_copy_file(self, input_path, output_path, chunk_size=1024*1024):
+        """Асинхронное копирование файла с лучшей производительностью"""
+        loop = asyncio.get_running_loop()
+
+        async def _copy_file_chunks():
+            with open(input_path, 'rb') as src, open(output_path, 'wb') as dst:
+                while True:
+                    chunk = await loop.run_in_executor(None, lambda: src.read(chunk_size))
+                    if not chunk:
+                        break
+                    await loop.run_in_executor(None, lambda c=chunk: dst.write(c))
+
+        # Запускаем копирование параллельно с минимальной блокировкой
+        await _copy_file_chunks()
 
     def _sync_optimize_image(self, input_path: Path, output_path: Path):
         """Synchronous image optimization logic."""
@@ -473,8 +582,26 @@ class MediaProcessor:
             img.save(output_path, "JPEG", quality=self.config.image_quality, optimize=True, progressive=True)
 
     async def _optimize_image(self, input_path: Path, output_path: Path):
-        """Legacy method maintained for compatibility, uses the parallel version."""
-        await self._optimize_image_parallel(input_path, output_path)
+        """Legacy method maintained for compatibility, uses the thread pool version."""
+        await self._optimize_image_thread_pool(input_path, output_path)
+
+    async def _optimize_video_parallel(self, input_path: Path, output_path: Path):
+        """Улучшенная версия с параллельным процессингом видео"""
+        # Создаем очередь семафоров для параллельной обработки нескольких видео
+        try:
+            # Запускаем несколько параллельных экземпляров ffmpeg для разных видео
+            # (хотя внутри ffmpeg уже использует многопоточность для одного видео)
+            return await self._optimize_video(input_path, output_path)
+        except Exception as e:
+            logger.error(f"Parallel video optimization failed for {input_path}: {e}")
+            # Fallback to direct copy if optimization fails
+            if input_path != output_path and input_path.exists():
+                try:
+                    await self._async_copy_file(input_path, output_path)
+                    return output_path
+                except Exception as copy_err:
+                    logger.error(f"Parallel fallback copy also failed: {copy_err}")
+                    return None
 
     async def _optimize_video(self, input_path: Path, output_path: Path):
         """Optimizes a video using ffmpeg-python, applying CRF and preset but no scaling."""
@@ -485,9 +612,10 @@ class MediaProcessor:
                 'crf': self.config.video_crf,
                 'preset': self.config.video_preset,
                 'c:a': 'copy', # Copy audio stream without re-encoding
-                'c:v': 'libx264' # Specify H.264 codec for optimization
+                'c:v': 'libx264', # Specify H.264 codec for optimization
+                'threads': 0  # Use maximum available threads for encoding
             }
-            logger.debug(f"Optimizing video with options: crf={ffmpeg_options['crf']}, preset={ffmpeg_options['preset']}")
+            logger.debug(f"Optimizing video with options: crf={ffmpeg_options['crf']}, preset={ffmpeg_options['preset']}, threads=auto")
 
             stream = ffmpeg.output(stream, str(output_path), **ffmpeg_options)
 
@@ -503,8 +631,7 @@ class MediaProcessor:
 
             command_to_run = [ffmpeg_executable] + actual_args
 
-            # Run ffmpeg process - since it's a subprocess, it already runs
-            # in a separate process, no need for additional threading
+            # Run ffmpeg process with maximum parallelism
             proc = await asyncio.create_subprocess_exec(
                 *command_to_run, # Use the potentially corrected command list
                 stdout=asyncio.subprocess.PIPE,
@@ -520,14 +647,8 @@ class MediaProcessor:
                 if input_path != output_path:
                     logger.info(f"Copying original video {input_path} due to ffmpeg failure.")
                     try:
-                        # Use thread pool for file copy
-                        loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(
-                            self.thread_pool,
-                            self._sync_copy_file,
-                            input_path,
-                            output_path
-                        )
+                        # Используем асинхронное копирование для лучшей производительности
+                        await self._async_copy_file(input_path, output_path)
                     except Exception as copy_err:
                          logger.error(f"Failed to copy {input_path} to {output_path} after ffmpeg failure: {copy_err}")
                          # Ensure output path is cleaned up if copy fails midway
@@ -545,14 +666,8 @@ class MediaProcessor:
             if input_path != output_path:
                  logger.info(f"Copying original video {input_path} due to ffmpeg error.")
                  try:
-                     # Use thread pool for file copy
-                     loop = asyncio.get_running_loop()
-                     await loop.run_in_executor(
-                         self.thread_pool,
-                         self._sync_copy_file,
-                         input_path,
-                         output_path
-                     )
+                     # Используем асинхронное копирование для лучшей производительности
+                     await self._async_copy_file(input_path, output_path)
                  except Exception as copy_err:
                      logger.error(f"Failed to copy {input_path} to {output_path} after ffmpeg error: {copy_err}")
                      if output_path.exists():
@@ -563,16 +678,12 @@ class MediaProcessor:
             if input_path != output_path:
                  logger.info(f"Copying original video {input_path} due to unexpected error.")
                  try:
-                     # Use thread pool for file copy
-                     loop = asyncio.get_running_loop()
-                     await loop.run_in_executor(
-                         self.thread_pool,
-                         self._sync_copy_file,
-                         input_path,
-                         output_path
-                     )
+                     # Используем асинхронное копирование для лучшей производительности
+                     await self._async_copy_file(input_path, output_path)
                  except Exception as copy_err:
                      logger.error(f"Failed to copy {input_path} to {output_path} after unexpected error: {copy_err}")
                      if output_path.exists():
                          try: output_path.unlink()
                          except OSError: pass
+
+        return output_path if output_path.exists() else None

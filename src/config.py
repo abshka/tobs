@@ -24,6 +24,7 @@ class Config:
     concurrent_downloads: int = 5
     max_workers: int = 5  # Maximum number of worker threads for parallel operations
     batch_size: int = 20  # Number of messages to process in a batch
+    preload_resources: bool = False  # Whether to preload additional resources asynchronously
 
     # API Limits
     request_delay: float = 1.0
@@ -77,6 +78,7 @@ def load_config(env_path: str = ".env") -> Config:
             "concurrent_downloads": int(os.getenv("CONCURRENT_DOWNLOADS", 5)),
             "max_workers": int(os.getenv("MAX_WORKERS", 5)),
             "batch_size": int(os.getenv("BATCH_SIZE", 20)),
+            "preload_resources": os.getenv("PRELOAD_RESOURCES", "false").lower() == "true",
             "request_delay": float(os.getenv("REQUEST_DELAY", 1.0)),
             "message_batch_size": int(os.getenv("MESSAGE_BATCH_SIZE", 100)),
             "image_quality": int(os.getenv("IMAGE_QUALITY", 85)),
