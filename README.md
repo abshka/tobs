@@ -6,7 +6,7 @@ A powerful tool for exporting messages and media from Telegram channels directly
 
 - Export text messages from Telegram channels to markdown files
 - Download and organize media files (images, videos, voice messages, documents)
-- Support for grouped messages (albums)
+- Smart handling of media groups (albums) - all photos/videos in an album appear in a single note
 - Smart caching to avoid re-downloading content
 - Configurable media size limits
 - Concurrent downloads for better performance
@@ -56,8 +56,9 @@ python main.py
 2. It downloads messages from the specified channel
 3. Text contents are formatted as markdown
 4. Media files are downloaded and organized by type (images, videos, etc.)
-5. All content is saved to your Obsidian vault with proper markdown linking
-6. A cache system prevents re-downloading content on subsequent runs
+5. Messages with multiple photos/videos (albums) are intelligently grouped into a single note
+6. All content is saved to your Obsidian vault with proper markdown linking
+7. A cache system prevents re-downloading content on subsequent runs
 
 ## License
 
