@@ -32,34 +32,15 @@ A powerful tool for exporting messages and media from Telegram channels directly
 
 ## Configuration
 
-Before running the script, you must configure your environment variables in the **.env** file:
+Before running the script, you must configure your environment variables in the **.env** file. You can copy .env.example to .env and fill in the required values.
 
-    # Telegram API credentials
-    TELEGRAM_API_ID=your_api_id_here
-    TELEGRAM_API_HASH=your_api_hash_here
-
-    # Channel ID (for private channels, use -100 prefix)
-    TELEGRAM_CHANNEL_ID=-1001234567890
-
-    # Path to your Obsidian vault or export directory
-    OBSIDIAN_PATH=/path/to/your/obsidian/vault
-
-    # Optional settings (defaults shown)
-    MAX_VIDEO_SIZE_MB=50
-    MAX_CONCURRENT_DOWNLOADS=5
-    CACHE_TTL=86400
-    SKIP_PROCESSED=True
-    BATCH_SIZE=50
+```bash
+cp .env.example .env
+```
 
 ### How to get the necessary credentials:
 
 1. **API ID and API Hash**: Visit https://my.telegram.org, log in and create an application to get these values.
-
-2. **Channel ID**:
-
-   - For public channels: use the username (e.g., channelname)
-   - For private channels: you need the numeric ID with -100 prefix (e.g., -1001234567890)
-   - To get a private channel ID, forward a message from the channel to @userinfobot or use a third-party Telegram client
 
 ## Usage
 
@@ -67,19 +48,6 @@ Run the script:
 
 ```bash
 python main.py
-```
-
-### Command-line arguments:
-
-- --debug: Enable debug logging mode
-- --skip-cache: Ignore cache and reprocess all messages
-- --limit NUMBER: Process only a specific number of recent messages
-- --interactive: Interactive way to use script
-
-Example:
-
-```bash
-python main.py --debug --limit 100
 ```
 
 ## How It Works
@@ -98,12 +66,3 @@ This project is licensed under CC0 1.0 Universal - see the LICENSE file for deta
 ## First-Time Run
 
 On first run, you'll need to authenticate with Telegram. Follow the prompts to enter your phone number and the authentication code sent to your Telegram account.
-
-## TODO
-
-1. [x] The interactive interface
-2. [x] Make videos visible by default
-3. [x] Move classes into modules
-4. [ ] Make interactive way default when running script without .env
-5. [ ] Create subfolders for notes based on year of posting?
-6. [ ] Create links to another posts like as reply in telegram (what an idea hit me)
