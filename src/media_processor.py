@@ -44,7 +44,6 @@ class MediaProcessor:
         media_items_to_process: List[Tuple[str, Union[Photo, Document]]] = []
         entity_id_str = str(entity_id)
 
-        # Try to process media in the messageЕсть ошибка в ходе работы скрипта: представим, что есть пост, внутри которого 4 фотографии. При обработке данного поста на выходе получится 2 заметки, одна формата Media-only, вторая с текстом поста. Фотографий всего будет 2, по одной в каждой заметке. Эталоном и требованием является 1 заметка, внутри которой 4 фотографии. По сути нужно обработать Media Group, насколько я знаю
         try:
             # Process this message's media
             await self._add_media_from_message(message, media_items_to_process, entity_id_str)
@@ -269,49 +268,51 @@ class MediaProcessor:
         )
 
     def _sync_optimize_image(self, input_path: Path, output_path: Path):
-        """Synchronous image optimization logic using Pillow."""
+        """Synchronous image optimization logic using Pillow with advanced optimization."""
         try:
             with Image.open(input_path) as img:
                 img_format = img.format
                 logger.debug(f"Optimizing image {input_path.name} (Format: {img_format}, Mode: {img.mode})")
 
+                # Process image based on its mode
+                has_alpha = False
                 if img.mode in ('RGBA', 'P', 'LA'):
                     try:
-                        has_alpha = False
                         if img.mode in ('RGBA', 'LA'):
                             alpha = img.getchannel('A')
                             has_alpha = any(p < 255 for p in alpha.getdata())
                         elif img.mode == 'P' and 'transparency' in img.info:
-                             has_alpha = True
+                            has_alpha = True
 
                         if has_alpha:
-                            logger.debug(f"Image {input_path.name} has transparency, converting to RGB with white background.")
-                            bg = Image.new("RGB", img.size, (255, 255, 255))
-                            img_rgba = img.convert('RGBA')
-                            bg.paste(img_rgba, (0, 0), img_rgba)
-                            img_to_save = bg
+                            logger.debug(f"Image {input_path.name} has transparency, preserving alpha channel.")
+                            img_to_save = img.convert('RGBA')
                         else:
                             if img.mode != 'RGB':
-                                 img_to_save = img.convert('RGB')
+                                img_to_save = img.convert('RGB')
                             else:
-                                 img_to_save = img
+                                img_to_save = img
                     except Exception as convert_err:
-                         logger.warning(f"Error during transparency handling/conversion for {input_path.name}: {convert_err}. Saving as is.")
-                         img_to_save = img
+                        logger.warning(f"Error during transparency handling/conversion for {input_path.name}: {convert_err}. Saving as is.")
+                        img_to_save = img
                 else:
-                     img_to_save = img
+                    img_to_save = img
 
-                if img_to_save.mode != 'RGB':
-                    img_to_save = img_to_save.convert('RGB')
+                # Create a temporary WebP path
+                webp_path = output_path.with_suffix('.webp')
 
+                # Save as WebP for better compression
                 img_to_save.save(
-                    output_path,
-                    "JPEG",
+                    webp_path,
+                    "WEBP",
                     quality=self.config.image_quality,
-                    optimize=True,
-                    progressive=True
+                    method=6  # Higher quality compression (0-6)
                 )
-                logger.debug(f"Saved optimized image to {output_path.name}")
+                logger.debug(f"Saved optimized WebP image to {webp_path.name}")
+
+                # Rename the WebP file back to the original format extension
+                webp_path.rename(output_path)
+                logger.debug(f"Renamed WebP to original format {output_path.name} for compatibility")
 
         except UnidentifiedImageError:
              logger.error(f"Cannot identify image file (corrupted or unsupported format): {input_path}. Skipping optimization.")
