@@ -331,19 +331,63 @@ class MediaProcessor:
         """Synchronous video optimization logic using ffmpeg-python."""
         try:
             logger.debug(f"Optimizing video {input_path.name} with CRF={self.config.video_crf}, Preset={self.config.video_preset}")
+
+            # Get video information first to make intelligent decisions
+            probe = ffmpeg.probe(str(input_path))
+            video_stream = next((stream for stream in probe['streams']
+                                if stream['codec_type'] == 'video'), None)
+
+            if not video_stream:
+                logger.warning(f"No video stream found in {input_path.name}, copying file directly")
+                stream = ffmpeg.input(str(input_path))
+                stream = ffmpeg.output(stream, str(output_path), c='copy')
+                ffmpeg.run(stream, capture_stderr=True, overwrite_output=True)
+                return
+
+
+            # Input stream
             stream = ffmpeg.input(str(input_path))
 
+            # Base optimization options
             ffmpeg_options = {
                 'c:v': 'libx264',
                 'crf': str(self.config.video_crf),
                 'preset': self.config.video_preset,
-                'c:a': 'copy',
                 'pix_fmt': 'yuv420p',
                 'threads': '0'
             }
 
+            # Add advanced encoding parameters
+            ffmpeg_options.update({
+                # These flags help with compression efficiency
+                'profile:v': 'high',
+                'level': '4.1',
+                'tune': 'film',  # Optimize for general film content (most Telegram videos)
+                'maxrate': '2M',
+                'bufsize': '4M'
+            })
+
+            # Detect if video has audio stream
+            audio_stream = next((stream for stream in probe['streams']
+                               if stream['codec_type'] == 'audio'), None)
+
+            if audio_stream:
+                # Audio optimization - re-encode only if it would save space
+                audio_codec = audio_stream.get('codec_name', '').lower()
+                if audio_codec in ['pcm_s16le', 'pcm_s24le', 'pcm_f32le', 'flac']:
+                    # Convert lossless audio to AAC with good quality
+                    ffmpeg_options.update({
+                        'c:a': 'aac',
+                        'b:a': '128k',
+                    })
+                else:
+                    # Copy audio stream for already compressed formats
+                    ffmpeg_options['c:a'] = 'copy'
+
+            # Apply all options
             stream = ffmpeg.output(stream, str(output_path), **ffmpeg_options)
 
+            # Execute ffmpeg
             stdout, stderr = ffmpeg.run(stream, capture_stdout=False, capture_stderr=True, overwrite_output=True)
 
             logger.debug(f"ffmpeg optimization successful for {output_path.name}")
