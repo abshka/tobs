@@ -2,6 +2,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Dict
+import urllib.parse
 
 import aiofiles
 
@@ -142,7 +143,8 @@ class ReplyLinker:
                 logger.error(f"[{entity_id}] Failed to calculate relative path from {parent_note_path} to {child_note_path}")
                 return False
 
-            link_target = relative_child_path_str.replace('.md', '')
+            # Fix: Use urllib.parse.unquote to decode URL-encoded characters in the path
+            link_target = urllib.parse.unquote(relative_child_path_str.replace('.md', ''))
             reply_line = f"Reply to: [[{link_target}]]\n"
 
             file_lock = await self._get_file_lock(parent_note_path)
