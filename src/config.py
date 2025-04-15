@@ -61,6 +61,8 @@ class Config:
     image_quality: int = 85
     video_crf: int = 28
     video_preset: str = "fast"
+    hw_acceleration: str = "none"  # Options: none, nvidia, amd, intel
+    use_h265: bool = False
 
     # Caching
     cache_file: Path = field(default=DEFAULT_CACHE_PATH)
@@ -96,9 +98,7 @@ class Config:
             logger.warning("No export targets specified (EXPORT_TARGETS in .env is empty or missing) "
                            "and interactive mode is disabled. No chats will be processed.")
 
-        logger.debug(f"Configuration loaded. Base export path: {self.obsidian_path}")
-        logger.debug(f"Cache file path: {self.cache_file}")
-        logger.debug(f"Initial targets: {[t.id for t in self.export_targets]}")
+
 
     def _update_target_paths(self):
         """(Re)calculates export and media paths for all current targets."""
@@ -141,8 +141,7 @@ class Config:
             self.export_targets.append(target)
             self._update_target_paths()
             logger.info(f"Added export target: {target.id}. Paths updated.")
-        else:
-            logger.debug(f"Target {target.id} already exists.")
+
 
     def get_export_path_for_entity(self, entity_id: Union[str, int]) -> Path:
         """Get the base export path for a specific entity ID."""
@@ -209,6 +208,8 @@ def load_config(env_path: Union[str, Path] = ".env") -> Config:
             "image_quality": int(os.getenv("IMAGE_QUALITY", 85)),
             "video_crf": int(os.getenv("VIDEO_CRF", 28)),
             "video_preset": os.getenv("VIDEO_PRESET", "fast"),
+            "hw_acceleration": os.getenv("HW_ACCELERATION", "none"),
+            "use_h265": _parse_bool(os.getenv("USE_H265"), default=False),
 
             # Caching
             "cache_file": Path(os.getenv("CACHE_FILE", DEFAULT_CACHE_PATH)),

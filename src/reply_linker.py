@@ -151,7 +151,6 @@ class ReplyLinker:
                     async with aiofiles.open(parent_note_path, mode='r+', encoding='utf-8') as f:
                         content = await f.read()
                         if not content.lstrip().startswith("Reply to:"):
-                            logger.debug(f"[{entity_id}] Adding reply link to {parent_note_path.name} -> {child_note_path.name}")
                             await f.seek(0)
                             await f.write(reply_line + content)
                             await f.truncate()
@@ -173,7 +172,6 @@ class ReplyLinker:
                     async with aiofiles.open(child_note_path, mode='r+', encoding='utf-8') as f:
                         content = await f.read()
                         if not content.lstrip().startswith("Replied to:") and not content.lstrip().startswith("Reply to:"):
-                            logger.debug(f"[{entity_id}] Adding 'Replied to: [Unresolved Message]' to {child_note_path.name}")
                             await f.seek(0)
                             await f.write(reply_line + content)
                             await f.truncate()

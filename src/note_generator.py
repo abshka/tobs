@@ -124,7 +124,6 @@ class NoteGenerator:
                     try:
                         async with aiofiles.open(note_path, 'w', encoding='utf-8') as f:
                             await f.write(new_content)
-                        logger.debug(f"Created note: {note_path} for msg {message.id} in entity {entity_id}")
                         return note_path
                     except Exception as e:
                         logger.error(f"Failed to write note {note_path}: {e}", exc_info=self.config.verbose)
@@ -143,10 +142,8 @@ class NoteGenerator:
         entity_export_path: Path
     ) -> Optional[Path]:
         """Synchronous wrapper for create_note."""
-        # Don't create a new event loop - instead create a fresh NoteGenerator
-        # with new locks that aren't bound to any event loop yet
         temp_generator = NoteGenerator(self.config)
-        
+
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)

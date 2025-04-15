@@ -6,7 +6,7 @@ from functools import partial
 from pathlib import Path
 from loguru import logger
 import sys
-from typing import List, Callable, Any, TypeVar, Coroutine, Optional, Union, Sequence
+from typing import List, Callable, Any, TypeVar, Coroutine, Optional, Union
 import urllib.parse
 
 T = TypeVar('T')

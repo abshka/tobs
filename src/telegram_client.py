@@ -139,10 +139,9 @@ class TelegramManager:
 
         if entity_identifier_str in self.entity_cache:
             cached_entity = self.entity_cache[entity_identifier_str]
-            logger.debug(f"Using cached entity for '{entity_identifier_str}'")
             return cached_entity
 
-        logger.debug(f"Resolving entity: {entity_identifier_str}")
+
         attempts = 0
         max_attempts = 2
 
@@ -159,8 +158,6 @@ class TelegramManager:
                         raise
 
                 if entity:
-                    entity_name = getattr(entity, 'title', getattr(entity, 'username', getattr(entity, 'id', 'unknown')))
-                    logger.debug(f"Resolved '{entity_identifier_str}' to entity: {entity_name}")
                     self.entity_cache[entity_identifier_str] = entity
                     return entity
 
@@ -203,15 +200,6 @@ class TelegramManager:
         last_logged_count = 0
         log_interval = 500
 
-        # Check access level first
-        try:
-            logger.debug(f"Testing access to entity {entity_id} by fetching one message...")
-            test_message = await self.client.get_messages(entity=entity, limit=1)
-            logger.debug(f"Access test result: {'Message found' if test_message else 'No messages found'}")
-        except Exception as e:
-            logger.error(f"Access test for entity {entity_id} failed: {type(e).__name__}: {e}")
-            raise TelegramConnectionError(f"Access error in preliminary test: {e}") from e
-
         try:
             async for message in self.client.iter_messages(
                 entity=entity,
@@ -221,14 +209,14 @@ class TelegramManager:
                 min_id=min_id or 0,
                 wait_time=self.config.request_delay
             ):
-                logger.debug(f"Raw message received: type={type(message).__name__}, id={getattr(message, 'id', 'unknown')}")
+
 
                 if not isinstance(message, Message):
-                    logger.debug(f"Skipping non-Message item: {type(message).__name__}")
+
                     continue
 
                 if getattr(message, 'action', None):
-                    logger.debug(f"Skipping action message: {message.id}")
+
                     continue
 
                 total_fetched += 1

@@ -205,10 +205,6 @@ async def export_single_target(
                     # Only add if not already processed
                     if not await cache_manager.is_processed_async(message.id, entity_id_str):
                         grouped_messages_buffer[message.grouped_id].append(message)
-                    else:
-                        logger.debug(f"[{target.name}] Message {message.id} (group {message.grouped_id}) already in cache, skipping.")
-                else:
-                    logger.debug(f"[{target.name}] Group {message.grouped_id} already processed, skipping message {message.id}.")
             else:
                 # Process standalone message
                 if not await cache_manager.is_processed_async(message.id, entity_id_str):
@@ -240,8 +236,6 @@ async def export_single_target(
                                 active_tasks.discard(fut)
 
                         task.add_done_callback(task_done_callback)
-                else:
-                    logger.debug(f"[{target.name}] Standalone message {message.id} already processed, skipping.")
 
             last_message_time = current_time
 
@@ -369,10 +363,9 @@ async def main():
         soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
         new_soft = min(hard, 16 * 1024 * 1024)
         resource.setrlimit(resource.RLIMIT_STACK, (new_soft, hard))
-        logger.debug(f"Set stack limit to {new_soft / 1024 / 1024} MB")
-    except (ImportError, ValueError, OSError) as e:
-         logger.debug(f"Could not adjust stack limit: {e} (Not available on Windows)")
-
+    except Exception as e:
+        logger.critical(f"Unhandled exception during main execution: {e}", exc_info=True)
+        sys.exit(1)
     try:
         await run_export(config)
     except Exception as e:
