@@ -95,9 +95,7 @@ class MediaProcessor:
                 media_type = self._get_document_type(doc)
                 media_items.append((media_type, doc))
 
-        # Log what we found
-        if media_items:
-            logger.debug(f"[Entity: {entity_id_str}] Found {len(media_items)} media items in message {message.id}")
+
 
     def _get_document_type(self, doc: Document) -> str:
         """Determines the type (video, audio, document, etc.) from Document attributes."""
@@ -145,7 +143,6 @@ class MediaProcessor:
             async with self.download_semaphore:
                 logger.info(f"[{entity_id_str}] Downloading {media_type} for msg {message_id} -> {raw_download_path.name}...")
 
-                # Don't create dummy message - simply use the media object directly
 
                 # Convert Path to string for telethon
                 download_result = await self.client.download_media(
@@ -210,7 +207,7 @@ class MediaProcessor:
             def _remove_if_exists(p: Path):
                 if p.exists():
                     p.unlink()
-                    logger.debug(f"Cleaned up temporary file: {p}")
+
             await run_in_thread_pool(_remove_if_exists, file_path)
         except Exception as e:
             logger.warning(f"Could not clean up file {file_path}: {e}")
@@ -272,7 +269,7 @@ class MediaProcessor:
         try:
             with Image.open(input_path) as img:
                 img_format = img.format
-                logger.debug(f"Optimizing image {input_path.name} (Format: {img_format}, Mode: {img.mode})")
+
 
                 # Process image based on its mode
                 has_alpha = False
@@ -285,7 +282,7 @@ class MediaProcessor:
                             has_alpha = True
 
                         if has_alpha:
-                            logger.debug(f"Image {input_path.name} has transparency, preserving alpha channel.")
+
                             img_to_save = img.convert('RGBA')
                         else:
                             if img.mode != 'RGB':
@@ -308,11 +305,11 @@ class MediaProcessor:
                     quality=self.config.image_quality,
                     method=6  # Higher quality compression (0-6)
                 )
-                logger.debug(f"Saved optimized WebP image to {webp_path.name}")
+
 
                 # Rename the WebP file back to the original format extension
                 webp_path.rename(output_path)
-                logger.debug(f"Renamed WebP to original format {output_path.name} for compatibility")
+
 
         except UnidentifiedImageError:
              logger.error(f"Cannot identify image file (corrupted or unsupported format): {input_path}. Skipping optimization.")
@@ -330,7 +327,8 @@ class MediaProcessor:
     def _sync_optimize_video(self, input_path: Path, output_path: Path):
         """Synchronous video optimization logic using ffmpeg-python."""
         try:
-            logger.debug(f"Optimizing video {input_path.name} with CRF={self.config.video_crf}, Preset={self.config.video_preset}")
+            hw_acceleration = getattr(self.config, 'hw_acceleration', 'none').lower()
+            use_h265 = getattr(self.config, 'use_h265', True)  # Prefer H.265 for better compression
 
             # Get video information first to make intelligent decisions
             probe = ffmpeg.probe(str(input_path))
@@ -344,45 +342,141 @@ class MediaProcessor:
                 ffmpeg.run(stream, capture_stderr=True, overwrite_output=True)
                 return
 
+            # Get video dimensions and bitrate for smart optimization
+            width = int(video_stream.get('width', 0))
+            height = int(video_stream.get('height', 0))
+
+            # Calculate optimal bitrate based on resolution
+            # Lower bitrate for better compression but maintaining reasonable quality
+            optimal_bitrate = self._calculate_optimal_bitrate(width, height)
 
             # Input stream
             stream = ffmpeg.input(str(input_path))
 
-            # Base optimization options
+            # Base optimization options with more aggressive settings
             ffmpeg_options = {
-                'c:v': 'libx264',
-                'crf': str(self.config.video_crf),
-                'preset': self.config.video_preset,
                 'pix_fmt': 'yuv420p',
-                'threads': '0'
+                'threads': '0',
+                'movflags': '+faststart',  # Enables progressive download
             }
 
-            # Add advanced encoding parameters
-            ffmpeg_options.update({
-                # These flags help with compression efficiency
-                'profile:v': 'high',
-                'level': '4.1',
-                'tune': 'film',  # Optimize for general film content (most Telegram videos)
-                'maxrate': '2M',
-                'bufsize': '4M'
-            })
+            # Set CRF higher (less quality but smaller size) than default
+            base_crf = getattr(self.config, 'video_crf', 23)
+            compression_crf = min(base_crf + 5, 35)  # Increase CRF but cap at 35 to avoid too much quality loss
+
+            # Configure encoder based on hardware acceleration and h265 preference
+            if hw_acceleration == 'nvidia':
+                if use_h265:
+                    ffmpeg_options['c:v'] = 'hevc_nvenc'
+                    ffmpeg_options['preset'] = 'p6'  # Better compression
+                    ffmpeg_options['rc:v'] = 'vbr_hq'  # Higher quality VBR mode
+                    ffmpeg_options['cq'] = str(compression_crf)
+                    ffmpeg_options['b:v'] = optimal_bitrate
+                else:
+                    ffmpeg_options['c:v'] = 'h264_nvenc'
+                    ffmpeg_options['preset'] = 'p7'  # Slowest preset for best compression
+                    ffmpeg_options['rc:v'] = 'vbr_hq'
+                    ffmpeg_options['cq'] = str(compression_crf)
+                    ffmpeg_options['b:v'] = optimal_bitrate
+
+                # Additional NVENC options for better compression
+                ffmpeg_options['spatial-aq'] = '1'  # Spatial adaptive quantization
+                ffmpeg_options['temporal-aq'] = '1'  # Temporal adaptive quantization
+
+            elif hw_acceleration == 'amd':
+                if use_h265:
+                    ffmpeg_options['c:v'] = 'hevc_amf'
+                    ffmpeg_options['quality'] = 'quality'
+                    ffmpeg_options['qp_i'] = str(compression_crf)
+                    ffmpeg_options['qp_p'] = str(compression_crf + 2)  # Higher QP for P-frames
+                    ffmpeg_options['bitrate'] = optimal_bitrate.replace('k', '000')
+                else:
+                    ffmpeg_options['c:v'] = 'h264_amf'
+                    ffmpeg_options['quality'] = 'quality'
+                    ffmpeg_options['qp_i'] = str(compression_crf)
+                    ffmpeg_options['qp_p'] = str(compression_crf + 2)
+                    ffmpeg_options['bitrate'] = optimal_bitrate.replace('k', '000')
+
+            elif hw_acceleration == 'intel':
+                if use_h265:
+                    ffmpeg_options['c:v'] = 'hevc_qsv'
+                    ffmpeg_options['preset'] = 'slower'
+                    ffmpeg_options['b:v'] = optimal_bitrate
+                    ffmpeg_options['look_ahead'] = '1'  # Enable lookahead for better compression
+                else:
+                    ffmpeg_options['c:v'] = 'h264_qsv'
+                    ffmpeg_options['preset'] = 'slower'
+                    ffmpeg_options['b:v'] = optimal_bitrate
+                    ffmpeg_options['look_ahead'] = '1'
+
+            else:  # software encoding
+                if use_h265:
+                    ffmpeg_options['c:v'] = 'libx265'
+                    ffmpeg_options['crf'] = str(compression_crf)
+                    ffmpeg_options['preset'] = self.config.video_preset
+
+                    # x265 specific parameters for better compression
+                    x265_params = [
+                        "profile=main",
+                        "level=5.1",
+                        "no-sao=1",
+                        "bframes=8",  # More B-frames for better compression
+                        "rd=4",       # Higher rate-distortion optimization
+                        "psy-rd=1.0", # Psychovisual optimization
+                        "rect=1",     # Enable rectangular partitions
+                        "aq-mode=3",  # Advanced AQ mode
+                        "aq-strength=0.8", # AQ strength
+                        "deblock=-1:-1" # Deblocking filter control
+                    ]
+                    ffmpeg_options['x265-params'] = ":".join(x265_params)
+                else:
+                    ffmpeg_options['c:v'] = 'libx264'
+                    ffmpeg_options['crf'] = str(compression_crf)
+                    ffmpeg_options['preset'] = self.config.video_preset
+                    ffmpeg_options['profile:v'] = 'high'
+                    ffmpeg_options['level'] = '4.1'
+
+                    # x264 tuning for maximum compression
+                    ffmpeg_options['tune'] = 'film'
+                    ffmpeg_options['subq'] = '9'      # Sub-pixel motion estimation quality
+                    ffmpeg_options['trellis'] = '2'   # Trellis quantization
+                    ffmpeg_options['partitions'] = 'all'  # Use all partition types
+                    ffmpeg_options['direct-pred'] = 'auto'
+                    ffmpeg_options['me_method'] = 'umh'  # Uneven multi-hexagon search
+                    ffmpeg_options['g'] = '250'  # Keyframe interval
+
+                # Bitrate constraints for both encoders
+                ffmpeg_options['maxrate'] = optimal_bitrate
+                ffmpeg_options['bufsize'] = f"{int(optimal_bitrate.replace('k', '')) * 2}k"
+
+            # Scale down high bitrate videos from their original size, but maintain aspect ratio
+            # removed as per request to not change resolution
 
             # Detect if video has audio stream
             audio_stream = next((stream for stream in probe['streams']
                                if stream['codec_type'] == 'audio'), None)
 
             if audio_stream:
-                # Audio optimization - re-encode only if it would save space
+                # More aggressive audio optimization
                 audio_codec = audio_stream.get('codec_name', '').lower()
-                if audio_codec in ['pcm_s16le', 'pcm_s24le', 'pcm_f32le', 'flac']:
-                    # Convert lossless audio to AAC with good quality
-                    ffmpeg_options.update({
-                        'c:a': 'aac',
-                        'b:a': '128k',
-                    })
-                else:
-                    # Copy audio stream for already compressed formats
-                    ffmpeg_options['c:a'] = 'copy'
+                audio_bitrate = self._calculate_audio_bitrate(
+                    audio_stream.get('bit_rate'),
+                    audio_stream.get('channels', 2)
+                )
+
+                # Always re-encode audio for maximum compression
+                ffmpeg_options.update({
+                    'c:a': 'aac',
+                    'b:a': audio_bitrate,
+                    'ar': '44100',  # Downsample to 44.1kHz
+                    'ac': '2'       # Convert to stereo if more channels
+                })
+
+                # Special case for voice content - use even lower bitrate
+                duration = float(video_stream.get('duration', 0))
+                if duration > 0 and 'voice' in input_path.name.lower():
+                    ffmpeg_options['b:a'] = '64k'
+                    ffmpeg_options['ac'] = '1'  # Mono for voice
 
             # Apply all options
             stream = ffmpeg.output(stream, str(output_path), **ffmpeg_options)
@@ -390,7 +484,15 @@ class MediaProcessor:
             # Execute ffmpeg
             stdout, stderr = ffmpeg.run(stream, capture_stdout=False, capture_stderr=True, overwrite_output=True)
 
-            logger.debug(f"ffmpeg optimization successful for {output_path.name}")
+            # Verify the output is smaller than input
+            if output_path.exists() and input_path.exists():
+                input_size = input_path.stat().st_size
+                output_size = output_path.stat().st_size
+
+                if output_size >= input_size:
+                    logger.info(f"Optimized file ({output_size/1024/1024:.2f}MB) is not smaller than original ({input_size/1024/1024:.2f}MB). Using original.")
+                    # If our optimization didn't reduce size, use the original
+                    ffmpeg.input(str(input_path)).output(str(output_path), c='copy').run(capture_stderr=True, overwrite_output=True)
 
         except ffmpeg.Error as e:
             stderr_output = e.stderr.decode('utf-8', errors='ignore') if e.stderr else "No stderr"
@@ -399,3 +501,41 @@ class MediaProcessor:
         except Exception as e:
             logger.error(f"Video optimization failed unexpectedly for {input_path.name}: {e}")
             raise
+
+    def _calculate_optimal_bitrate(self, width: int, height: int) -> str:
+        """Calculate optimal bitrate based on resolution for maximum compression."""
+        pixels = width * height
+
+        if pixels <= 0:
+            return "500k"  # Default fallback
+
+        # Very aggressive bitrate allocation based on resolution
+        if pixels >= 2073600:  # 1080p or higher
+            return "1500k"
+        elif pixels >= 921600:  # 720p
+            return "800k"
+        elif pixels >= 409920:  # 480p
+            return "500k"
+        else:  # SD or lower
+            return "400k"
+
+    def _calculate_audio_bitrate(self, current_bitrate, channels: int) -> str:
+        """Calculate optimal audio bitrate."""
+        if not current_bitrate:
+            # Default based on channels
+            return "96k" if channels > 1 else "64k"
+
+        try:
+            # Convert string bitrate to int if needed
+            if isinstance(current_bitrate, str):
+                current_bitrate = int(current_bitrate)
+
+            # Reduce bitrate but keep reasonable quality
+            if current_bitrate > 320000:
+                return "128k"
+            elif current_bitrate > 128000:
+                return "96k"
+            else:
+                return "64k"
+        except:
+            return "96k"  # Default fallback
