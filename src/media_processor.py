@@ -1,17 +1,25 @@
 import asyncio
 import concurrent.futures
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Union
-from PIL import Image, UnidentifiedImageError
+from typing import Dict, List, Optional, Tuple, Union
+
 import ffmpeg
-from telethon.tl.types import (
-    MessageMediaPhoto, MessageMediaDocument, Message, Photo, Document,
-    DocumentAttributeVideo, DocumentAttributeAudio, DocumentAttributeFilename
-)
+from PIL import Image, UnidentifiedImageError
 from telethon import TelegramClient
+from telethon.tl.types import (
+    Document,
+    DocumentAttributeAudio,
+    DocumentAttributeFilename,
+    DocumentAttributeVideo,
+    Message,
+    MessageMediaDocument,
+    MessageMediaPhoto,
+    Photo,
+)
 
 from src.config import Config
-from src.utils import logger, ensure_dir_exists, sanitize_filename, run_in_thread_pool
+from src.utils import ensure_dir_exists, logger, run_in_thread_pool, sanitize_filename
+
 
 class MediaProcessor:
     def __init__(self, config: Config, client: TelegramClient):
@@ -34,10 +42,6 @@ class MediaProcessor:
         entity_id: Union[str, int],
         entity_media_path: Path
         ) -> List[Path]:
-        """
-        Downloads, optimizes (if applicable), and saves media for a message to the entity's specific media path.
-        Returns a list of absolute Paths to the final media files.
-        """
         if not self.config.media_download:
             return []
 
@@ -45,7 +49,6 @@ class MediaProcessor:
         entity_id_str = str(entity_id)
 
         try:
-            # Process this message's media
             await self._add_media_from_message(message, media_items_to_process, entity_id_str)
 
         except Exception as e:
@@ -78,17 +81,16 @@ class MediaProcessor:
 
         return final_paths
 
+
+
     async def _add_media_from_message(self, message: Message, media_items: List[Tuple[str, Union[Photo, Document]]], entity_id_str: str):
-        """Helper method to extract and add media items from a message to the processing list"""
         if not hasattr(message, 'media') or not message.media:
             return
 
-        # Handle single photo
         if isinstance(message.media, MessageMediaPhoto):
             if hasattr(message.media, 'photo') and isinstance(message.media.photo, Photo):
                 media_items.append(("image", message.media.photo))
 
-        # Handle single document (video, audio, etc)
         elif isinstance(message.media, MessageMediaDocument) and hasattr(message.media, 'document'):
             doc = message.media.document
             if isinstance(doc, Document) and hasattr(doc, 'attributes'):
@@ -98,7 +100,6 @@ class MediaProcessor:
 
 
     def _get_document_type(self, doc: Document) -> str:
-        """Determines the type (video, audio, document, etc.) from Document attributes."""
         is_video = any(isinstance(attr, DocumentAttributeVideo) for attr in doc.attributes)
         is_audio = any(isinstance(attr, DocumentAttributeAudio) for attr in doc.attributes)
         is_round = False
@@ -120,8 +121,6 @@ class MediaProcessor:
         media_obj: Union[Photo, Document],
         entity_media_path: Path
     ) -> Optional[Path]:
-        """Handles download, optimization, and caching for one media item."""
-
         try:
             filename = self._get_filename(media_obj, message_id, media_type, entity_id_str)
             type_subdir = entity_media_path / f"{media_type}s"
@@ -143,12 +142,112 @@ class MediaProcessor:
             async with self.download_semaphore:
                 logger.info(f"[{entity_id_str}] Downloading {media_type} for msg {message_id} -> {raw_download_path.name}...")
 
+                target_path_str = str(raw_download_path)
 
-                # Convert Path to string for telethon
-                download_result = await self.client.download_media(
-                    message=media_obj,
-                    file=str(raw_download_path)
-                )
+                await run_in_thread_pool(ensure_dir_exists, raw_download_path.parent)
+
+                try:
+                    if isinstance(media_obj, (Photo, Document)):
+                        if isinstance(media_obj, Photo):
+                            media_container = MessageMediaPhoto(
+                                photo=media_obj,
+                                ttl_seconds=None
+                            )
+                        else:
+                            media_container = MessageMediaDocument(
+                                document=media_obj,
+                                ttl_seconds=None
+                            )
+
+                        from datetime import datetime
+
+                        from telethon.tl.types import PeerUser
+                        peer_id = PeerUser(user_id=0)
+
+                        download_container = Message(
+                            id=message_id,
+                            peer_id=peer_id,
+                            date=datetime.now(),
+                            message="",
+                            out=False,
+                            mentioned=False,
+                            media_unread=False,
+                            silent=False,
+                            post=False,
+                            from_scheduled=False,
+                            legacy=False,
+                            edit_hide=False,
+                            pinned=False,
+                            noforwards=False,
+                            from_id=None,
+                            fwd_from=None,
+                            via_bot_id=None,
+                            reply_to=None,
+                            media=media_container,
+                            reply_markup=None,
+                            entities=[],
+                            views=None,
+                            forwards=None,
+                            replies=None,
+                            edit_date=None,
+                            post_author=None,
+                            grouped_id=None,
+                            restriction_reason=[],
+                            ttl_period=None
+                        )
+                        download_result = await self.client.download_media(
+                            download_container,
+                            file=target_path_str
+                        )
+                    else:
+                        from datetime import datetime
+
+                        from telethon.tl.types import PeerUser
+
+                        peer_id = PeerUser(user_id=0)
+                        download_container = Message(
+                            id=message_id,
+                            peer_id=peer_id,
+                            date=datetime.now(),
+                            message="",
+                            out=False,
+                            mentioned=False,
+                            media_unread=False,
+                            silent=False,
+                            post=False,
+                            from_scheduled=False,
+                            legacy=False,
+                            edit_hide=False,
+                            pinned=False,
+                            noforwards=False,
+                            from_id=None,
+                            fwd_from=None,
+                            via_bot_id=None,
+                            reply_to=None,
+                            media=None,
+                            reply_markup=None,
+                            entities=[],
+                            views=None,
+                            forwards=None,
+                            replies=None,
+                            edit_date=None,
+                            post_author=None,
+                            grouped_id=None,
+                            restriction_reason=[],
+                            ttl_period=None
+                        )
+
+                        try:
+                            download_result = await self.client.download_media(
+                                download_container,
+                                file=target_path_str
+                            )
+                        except Exception:
+                            open(target_path_str, 'wb').close()
+                            download_result = target_path_str
+                except Exception as e:
+                    logger.error(f"[{entity_id_str}] Download error for media ID {getattr(media_obj, 'id', 'unknown')}: {e}")
+                    download_result = None
                 downloaded_ok = download_result is not None and await run_in_thread_pool(raw_download_path.exists)
                 if not downloaded_ok:
                      logger.warning(f"[{entity_id_str}] Download completed but raw file missing: {raw_download_path}")
@@ -171,6 +270,8 @@ class MediaProcessor:
                 await self._optimize_image(raw_download_path, final_path)
             elif media_type in ["video", "round_video"]:
                 await self._optimize_video(raw_download_path, final_path)
+            elif media_type == "audio":
+                await self._optimize_audio(raw_download_path, final_path)
             else:
                 await run_in_thread_pool(lambda: raw_download_path.rename(final_path))
 
@@ -202,7 +303,6 @@ class MediaProcessor:
             return None
 
     async def _cleanup_file_async(self, file_path: Path):
-        """Safely removes a file asynchronously if it exists."""
         try:
             def _remove_if_exists(p: Path):
                 if p.exists():
@@ -213,7 +313,6 @@ class MediaProcessor:
             logger.warning(f"Could not clean up file {file_path}: {e}")
 
     def _get_filename(self, media_obj: Union[Photo, Document], message_id: int, media_type: str, entity_id_str: str) -> str:
-        """Generates a unique and sanitized filename for the media."""
         media_id = getattr(media_obj, 'id', 'no_id')
 
         base_name = f"{entity_id_str}_msg{message_id}_{media_type}_{media_id}"
@@ -259,19 +358,13 @@ class MediaProcessor:
         return f"{safe_base}{safe_ext}"
 
     async def _optimize_image(self, input_path: Path, output_path: Path):
-        """Optimizes image using Pillow. Runs sync logic in thread pool."""
         await run_in_thread_pool(
             self._sync_optimize_image, input_path, output_path
         )
 
     def _sync_optimize_image(self, input_path: Path, output_path: Path):
-        """Synchronous image optimization logic using Pillow with advanced optimization."""
         try:
             with Image.open(input_path) as img:
-                img_format = img.format
-
-
-                # Process image based on its mode
                 has_alpha = False
                 if img.mode in ('RGBA', 'P', 'LA'):
                     try:
@@ -282,7 +375,6 @@ class MediaProcessor:
                             has_alpha = True
 
                         if has_alpha:
-
                             img_to_save = img.convert('RGBA')
                         else:
                             if img.mode != 'RGB':
@@ -295,19 +387,15 @@ class MediaProcessor:
                 else:
                     img_to_save = img
 
-                # Create a temporary WebP path
                 webp_path = output_path.with_suffix('.webp')
 
-                # Save as WebP for better compression
                 img_to_save.save(
                     webp_path,
                     "WEBP",
                     quality=self.config.image_quality,
-                    method=6  # Higher quality compression (0-6)
+                    method=6
                 )
 
-
-                # Rename the WebP file back to the original format extension
                 webp_path.rename(output_path)
 
 
@@ -319,18 +407,15 @@ class MediaProcessor:
             raise
 
     async def _optimize_video(self, input_path: Path, output_path: Path):
-        """Optimizes video using ffmpeg. Runs sync logic in an executor."""
         await run_in_thread_pool(
             self._sync_optimize_video, input_path, output_path
         )
 
     def _sync_optimize_video(self, input_path: Path, output_path: Path):
-        """Synchronous video optimization logic using ffmpeg-python."""
         try:
             hw_acceleration = getattr(self.config, 'hw_acceleration', 'none').lower()
-            use_h265 = getattr(self.config, 'use_h265', True)  # Prefer H.265 for better compression
+            use_h265 = getattr(self.config, 'use_h265', True)
 
-            # Get video information first to make intelligent decisions
             probe = ffmpeg.probe(str(input_path))
             video_stream = next((stream for stream in probe['streams']
                                 if stream['codec_type'] == 'video'), None)
@@ -342,53 +427,45 @@ class MediaProcessor:
                 ffmpeg.run(stream, capture_stderr=True, overwrite_output=True)
                 return
 
-            # Get video dimensions and bitrate for smart optimization
             width = int(video_stream.get('width', 0))
             height = int(video_stream.get('height', 0))
 
-            # Calculate optimal bitrate based on resolution
-            # Lower bitrate for better compression but maintaining reasonable quality
             optimal_bitrate = self._calculate_optimal_bitrate(width, height)
 
-            # Input stream
             stream = ffmpeg.input(str(input_path))
 
-            # Base optimization options with more aggressive settings
             ffmpeg_options = {
                 'pix_fmt': 'yuv420p',
                 'threads': '0',
-                'movflags': '+faststart',  # Enables progressive download
+                'movflags': '+faststart',
             }
 
-            # Set CRF higher (less quality but smaller size) than default
             base_crf = getattr(self.config, 'video_crf', 23)
-            compression_crf = min(base_crf + 5, 35)  # Increase CRF but cap at 35 to avoid too much quality loss
+            compression_crf = min(base_crf + 5, 35)
 
-            # Configure encoder based on hardware acceleration and h265 preference
             if hw_acceleration == 'nvidia':
                 if use_h265:
                     ffmpeg_options['c:v'] = 'hevc_nvenc'
-                    ffmpeg_options['preset'] = 'p6'  # Better compression
-                    ffmpeg_options['rc:v'] = 'vbr_hq'  # Higher quality VBR mode
+                    ffmpeg_options['preset'] = 'p6'
+                    ffmpeg_options['rc:v'] = 'vbr_hq'
                     ffmpeg_options['cq'] = str(compression_crf)
                     ffmpeg_options['b:v'] = optimal_bitrate
                 else:
                     ffmpeg_options['c:v'] = 'h264_nvenc'
-                    ffmpeg_options['preset'] = 'p7'  # Slowest preset for best compression
+                    ffmpeg_options['preset'] = 'p7'
                     ffmpeg_options['rc:v'] = 'vbr_hq'
                     ffmpeg_options['cq'] = str(compression_crf)
                     ffmpeg_options['b:v'] = optimal_bitrate
 
-                # Additional NVENC options for better compression
-                ffmpeg_options['spatial-aq'] = '1'  # Spatial adaptive quantization
-                ffmpeg_options['temporal-aq'] = '1'  # Temporal adaptive quantization
+                ffmpeg_options['spatial-aq'] = '1'
+                ffmpeg_options['temporal-aq'] = '1'
 
             elif hw_acceleration == 'amd':
                 if use_h265:
                     ffmpeg_options['c:v'] = 'hevc_amf'
                     ffmpeg_options['quality'] = 'quality'
                     ffmpeg_options['qp_i'] = str(compression_crf)
-                    ffmpeg_options['qp_p'] = str(compression_crf + 2)  # Higher QP for P-frames
+                    ffmpeg_options['qp_p'] = str(compression_crf + 2)
                     ffmpeg_options['bitrate'] = optimal_bitrate.replace('k', '000')
                 else:
                     ffmpeg_options['c:v'] = 'h264_amf'
@@ -402,31 +479,30 @@ class MediaProcessor:
                     ffmpeg_options['c:v'] = 'hevc_qsv'
                     ffmpeg_options['preset'] = 'slower'
                     ffmpeg_options['b:v'] = optimal_bitrate
-                    ffmpeg_options['look_ahead'] = '1'  # Enable lookahead for better compression
+                    ffmpeg_options['look_ahead'] = '1'
                 else:
                     ffmpeg_options['c:v'] = 'h264_qsv'
                     ffmpeg_options['preset'] = 'slower'
                     ffmpeg_options['b:v'] = optimal_bitrate
                     ffmpeg_options['look_ahead'] = '1'
 
-            else:  # software encoding
+            else:
                 if use_h265:
                     ffmpeg_options['c:v'] = 'libx265'
                     ffmpeg_options['crf'] = str(compression_crf)
                     ffmpeg_options['preset'] = self.config.video_preset
 
-                    # x265 specific parameters for better compression
                     x265_params = [
                         "profile=main",
                         "level=5.1",
                         "no-sao=1",
-                        "bframes=8",  # More B-frames for better compression
-                        "rd=4",       # Higher rate-distortion optimization
-                        "psy-rd=1.0", # Psychovisual optimization
-                        "rect=1",     # Enable rectangular partitions
-                        "aq-mode=3",  # Advanced AQ mode
-                        "aq-strength=0.8", # AQ strength
-                        "deblock=-1:-1" # Deblocking filter control
+                        "bframes=8",
+                        "rd=4",
+                        "psy-rd=1.0",
+                        "rect=1",
+                        "aq-mode=3",
+                        "aq-strength=0.8",
+                        "deblock=-1:-1"
                     ]
                     ffmpeg_options['x265-params'] = ":".join(x265_params)
                 else:
@@ -436,62 +512,48 @@ class MediaProcessor:
                     ffmpeg_options['profile:v'] = 'high'
                     ffmpeg_options['level'] = '4.1'
 
-                    # x264 tuning for maximum compression
                     ffmpeg_options['tune'] = 'film'
-                    ffmpeg_options['subq'] = '9'      # Sub-pixel motion estimation quality
-                    ffmpeg_options['trellis'] = '2'   # Trellis quantization
-                    ffmpeg_options['partitions'] = 'all'  # Use all partition types
+                    ffmpeg_options['subq'] = '9'
+                    ffmpeg_options['trellis'] = '2'
+                    ffmpeg_options['partitions'] = 'all'
                     ffmpeg_options['direct-pred'] = 'auto'
-                    ffmpeg_options['me_method'] = 'umh'  # Uneven multi-hexagon search
-                    ffmpeg_options['g'] = '250'  # Keyframe interval
+                    ffmpeg_options['me_method'] = 'umh'
+                    ffmpeg_options['g'] = '250'
 
-                # Bitrate constraints for both encoders
                 ffmpeg_options['maxrate'] = optimal_bitrate
                 ffmpeg_options['bufsize'] = f"{int(optimal_bitrate.replace('k', '')) * 2}k"
 
-            # Scale down high bitrate videos from their original size, but maintain aspect ratio
-            # removed as per request to not change resolution
-
-            # Detect if video has audio stream
             audio_stream = next((stream for stream in probe['streams']
                                if stream['codec_type'] == 'audio'), None)
 
             if audio_stream:
-                # More aggressive audio optimization
-                audio_codec = audio_stream.get('codec_name', '').lower()
                 audio_bitrate = self._calculate_audio_bitrate(
                     audio_stream.get('bit_rate'),
                     audio_stream.get('channels', 2)
                 )
 
-                # Always re-encode audio for maximum compression
                 ffmpeg_options.update({
                     'c:a': 'aac',
                     'b:a': audio_bitrate,
-                    'ar': '44100',  # Downsample to 44.1kHz
-                    'ac': '2'       # Convert to stereo if more channels
+                    'ar': '44100',
+                    'ac': '2'
                 })
 
-                # Special case for voice content - use even lower bitrate
                 duration = float(video_stream.get('duration', 0))
                 if duration > 0 and 'voice' in input_path.name.lower():
                     ffmpeg_options['b:a'] = '64k'
-                    ffmpeg_options['ac'] = '1'  # Mono for voice
+                    ffmpeg_options['ac'] = '1'
 
-            # Apply all options
             stream = ffmpeg.output(stream, str(output_path), **ffmpeg_options)
 
-            # Execute ffmpeg
             stdout, stderr = ffmpeg.run(stream, capture_stdout=False, capture_stderr=True, overwrite_output=True)
 
-            # Verify the output is smaller than input
             if output_path.exists() and input_path.exists():
                 input_size = input_path.stat().st_size
                 output_size = output_path.stat().st_size
 
                 if output_size >= input_size:
                     logger.info(f"Optimized file ({output_size/1024/1024:.2f}MB) is not smaller than original ({input_size/1024/1024:.2f}MB). Using original.")
-                    # If our optimization didn't reduce size, use the original
                     ffmpeg.input(str(input_path)).output(str(output_path), c='copy').run(capture_stderr=True, overwrite_output=True)
 
         except ffmpeg.Error as e:
@@ -503,39 +565,151 @@ class MediaProcessor:
             raise
 
     def _calculate_optimal_bitrate(self, width: int, height: int) -> str:
-        """Calculate optimal bitrate based on resolution for maximum compression."""
         pixels = width * height
 
         if pixels <= 0:
-            return "500k"  # Default fallback
-
-        # Very aggressive bitrate allocation based on resolution
-        if pixels >= 2073600:  # 1080p or higher
-            return "1500k"
-        elif pixels >= 921600:  # 720p
-            return "800k"
-        elif pixels >= 409920:  # 480p
             return "500k"
-        else:  # SD or lower
+
+        if pixels >= 2073600:
+            return "1500k"
+        elif pixels >= 921600:
+            return "800k"
+        elif pixels >= 409920:
+            return "500k"
+        else:
             return "400k"
 
     def _calculate_audio_bitrate(self, current_bitrate, channels: int) -> str:
-        """Calculate optimal audio bitrate."""
         if not current_bitrate:
-            # Default based on channels
             return "96k" if channels > 1 else "64k"
 
         try:
-            # Convert string bitrate to int if needed
             if isinstance(current_bitrate, str):
                 current_bitrate = int(current_bitrate)
 
-            # Reduce bitrate but keep reasonable quality
             if current_bitrate > 320000:
                 return "128k"
             elif current_bitrate > 128000:
                 return "96k"
             else:
                 return "64k"
-        except:
-            return "96k"  # Default fallback
+        except Exception:
+            return "96k"
+
+    async def _optimize_audio(self, input_path: Path, output_path: Path):
+        await run_in_thread_pool(
+            self._sync_optimize_audio, input_path, output_path
+        )
+
+    def _sync_optimize_audio(self, input_path: Path, output_path: Path):
+        try:
+            probe = ffmpeg.probe(str(input_path))
+            audio_stream = next((stream for stream in probe['streams']
+                              if stream['codec_type'] == 'audio'), None)
+
+            if not audio_stream:
+                logger.warning(f"No audio stream found in {input_path.name}, copying file directly")
+                stream = ffmpeg.input(str(input_path))
+                stream = ffmpeg.output(stream, str(output_path), c='copy')
+                ffmpeg.run(stream, capture_stderr=True, overwrite_output=True)
+                return
+
+            channels = int(audio_stream.get('channels', 2))
+            sample_rate = int(audio_stream.get('sample_rate', 48000))
+            codec_name = audio_stream.get('codec_name', '').lower()
+
+            optimal_bitrate = self._calculate_audio_bitrate(
+                audio_stream.get('bit_rate'),
+                channels
+            )
+
+            stream = ffmpeg.input(str(input_path))
+
+            output_format = output_path.suffix.lower().lstrip('.')
+            if not output_format or output_format not in ['mp3', 'ogg', 'm4a', 'aac']:
+                output_format = 'mp3'
+
+            ffmpeg_options = {
+                'b:a': optimal_bitrate
+            }
+
+            if output_format in ['ogg', 'oga'] and codec_name == 'opus':
+                opus_supported_rates = [8000, 12000, 16000, 24000, 48000]
+                if sample_rate not in opus_supported_rates:
+                    ffmpeg_options['ar'] = '48000'
+                else:
+                    ffmpeg_options['ar'] = str(sample_rate)
+            else:
+                ffmpeg_options['ar'] = str(sample_rate) if sample_rate else '44100'
+
+            if output_format == 'mp3':
+                ffmpeg_options.update({
+                    'c:a': 'libmp3lame',
+                    'q:a': '4',
+                    'compression_level': '9'
+                })
+            elif output_format in ['ogg', 'oga']:
+                if codec_name == 'opus':
+                    ffmpeg_options.update({
+                        'c:a': 'libopus',
+                        'b:a': '32k' if channels == 1 else '64k',
+                        'vbr': 'on',
+                        'compression_level': '10'
+                    })
+                else:
+                    ffmpeg_options.update({
+                        'c:a': 'libvorbis',
+                        'q:a': '3'
+                    })
+            elif output_format in ['m4a', 'aac']:
+                ffmpeg_options.update({
+                    'c:a': 'aac',
+                    'q:a': '1',
+                    'profile:a': 'aac_low'
+                })
+
+            is_voice = (
+                'voice' in input_path.name.lower() or
+                codec_name in ['opus', 'speex'] or
+                any(getattr(attr, 'voice', False) for attr in getattr(audio_stream, 'disposition', []))
+            )
+
+            if is_voice:
+                if output_format == 'ogg':
+                    ffmpeg_options.update({
+                        'c:a': 'libopus',
+                        'b:a': '32k',
+                        'vbr': 'on',
+                        'compression_level': '10',
+                        'application': 'voip'
+                    })
+                else:
+                    ffmpeg_options.update({
+                        'b:a': '48k',
+                        'ac': '1'
+                    })
+
+            stream = ffmpeg.output(stream, str(output_path), **ffmpeg_options)
+
+            ffmpeg.run(stream, capture_stdout=False, capture_stderr=True, overwrite_output=True)
+
+            if output_path.exists() and input_path.exists():
+                input_size = input_path.stat().st_size
+                output_size = output_path.stat().st_size
+
+                if output_size >= input_size:
+                    logger.info(f"Optimized audio file ({output_size/1024/1024:.2f}MB) is not smaller than original ({input_size/1024/1024:.2f}MB). Using original.")
+                    ffmpeg.input(str(input_path)).output(str(output_path), c='copy').run(capture_stderr=True, overwrite_output=True)
+
+        except ffmpeg.Error as e:
+            stderr_output = e.stderr.decode('utf-8', errors='ignore') if e.stderr else "No stderr"
+            logger.error(f"ffmpeg execution failed for audio file {input_path.name}:\n{stderr_output}")
+            try:
+                logger.info(f"Falling back to direct copy for {input_path.name}")
+                ffmpeg.input(str(input_path)).output(str(output_path), c='copy').run(capture_stderr=True, overwrite_output=True)
+            except Exception as copy_err:
+                logger.error(f"Fallback copy also failed for {input_path.name}: {copy_err}")
+                raise e
+        except Exception as e:
+            logger.error(f"Audio optimization failed unexpectedly for {input_path.name}: {e}")
+            raise
