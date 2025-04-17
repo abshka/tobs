@@ -1,185 +1,219 @@
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from typing import Optional, Dict
 import urllib.parse
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 import aiofiles
 
-from src.config import Config
 from src.cache_manager import CacheManager
-from src.utils import logger, get_relative_path
+from src.config import Config
+from src.utils import get_relative_path, logger, run_in_thread_pool
+
 
 class ReplyLinker:
     def __init__(self, config: Config, cache_manager: CacheManager):
         self.config = config
         self.cache_manager = cache_manager
-        self.executor = ThreadPoolExecutor(max_workers=config.max_workers)
         self.io_semaphore = asyncio.Semaphore(20)
         self.file_locks: Dict[Path, asyncio.Lock] = {}
 
-    async def _get_file_lock(self, path: Path) -> asyncio.Lock:
-        """Gets or creates an asyncio Lock for a specific file path."""
-        if path not in self.file_locks:
-            self.file_locks[path] = asyncio.Lock()
-        return self.file_locks[path]
-
     async def link_replies(self, entity_id: str, entity_export_path: Path):
-        """
-        Iterates through cached messages for a specific entity and adds reply links
-        to the corresponding note files within the entity's export path.
-        """
+        """Adds reply links between messages for a specific entity."""
         logger.info(f"[{entity_id}] Starting reply linking process...")
 
         processed_messages = await self.cache_manager.get_all_processed_messages_async(entity_id)
-
         if not processed_messages:
             logger.info(f"[{entity_id}] No processed messages found in cache. Skipping reply linking.")
             return
 
-        link_tasks = []
-        unresolved_tasks = []
+        # Collect all the reply relationships to process
+        links_to_add: List[Tuple[str, str]] = []  # (parent_filename, child_filename)
+        unresolved_child_files: Set[str] = set()  # child files with missing parent
 
-        for child_id_str, msg_data in processed_messages.items():
+        for child_id, msg_data in processed_messages.items():
             parent_id = msg_data.get("reply_to")
             child_filename = msg_data.get("filename")
 
             if not child_filename:
-                logger.warning(f"[{entity_id}] Child message {child_id_str} missing filename in cache. Cannot process replies.")
                 continue
 
-            child_note_path_coro = self._resolve_note_path(entity_export_path, child_filename)
-            child_note_path_task = asyncio.create_task(child_note_path_coro)
-
+            # If this message replies to another message
             if parent_id:
                 parent_id_str = str(parent_id)
-                parent_msg_data = processed_messages.get(parent_id_str)
+                parent_data = processed_messages.get(parent_id_str)
 
-                if parent_msg_data:
-                    parent_filename = parent_msg_data.get("filename")
-                    if parent_filename:
-                        parent_note_path_coro = self._resolve_note_path(entity_export_path, parent_filename)
-                        parent_note_path_task = asyncio.create_task(parent_note_path_coro)
-                        link_tasks.append(
-                            self._schedule_link_addition(parent_note_path_task, child_note_path_task, entity_id)
-                        )
-                    else:
-                        logger.warning(f"[{entity_id}] Parent message {parent_id_str} missing filename. Marking reply in {child_filename} as unresolved.")
-                        unresolved_tasks.append(
-                            self._schedule_unresolved_mark(child_note_path_task, entity_id)
-                        )
+                if parent_data and parent_data.get("filename"):
+                    # We have both parent and child - add this relationship
+                    links_to_add.append((parent_data["filename"], child_filename))
                 else:
-                    unresolved_tasks.append(
-                         self._schedule_unresolved_mark(child_note_path_task, entity_id)
-                     )
+                    # Parent message not found or has no filename - mark as unresolved
+                    unresolved_child_files.add(child_filename)
 
-        logger.info(f"[{entity_id}] Processing {len(link_tasks)} potential reply links and {len(unresolved_tasks)} unresolved links...")
-        all_tasks = link_tasks + unresolved_tasks
-        if all_tasks:
-            results = await asyncio.gather(*all_tasks, return_exceptions=True)
-            success_count = 0
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    task_type = "link" if i < len(link_tasks) else "unresolved"
-                    logger.error(f"[{entity_id}] Error processing {task_type} task: {result}")
-                elif result:
-                    success_count +=1
-            logger.info(f"[{entity_id}] Finished processing reply links. {success_count}/{len(all_tasks)} operations successful.")
-        else:
-            logger.info(f"[{entity_id}] No reply links or unresolved messages to process.")
+        # Process all links in parallel
+        logger.info(f"[{entity_id}] Processing {len(links_to_add)} reply links and {len(unresolved_child_files)} unresolved links")
 
-    async def _resolve_note_path(self, entity_export_path: Path, filename: str) -> Optional[Path]:
-        """Resolves the full path to a note file within the entity's export directory."""
-        loop = asyncio.get_running_loop()
+        # Process organized in two batches: normal links and unresolved markers
+        results = await asyncio.gather(
+            self._process_reply_links(links_to_add, entity_export_path, entity_id),
+            self._process_unresolved_replies(unresolved_child_files, entity_export_path, entity_id),
+            return_exceptions=True
+        )
 
-        note_path = entity_export_path / filename
-        exists = await loop.run_in_executor(self.executor, note_path.exists)
-        if exists:
+        # Log results
+        if isinstance(results[0], Exception):
+            logger.error(f"[{entity_id}] Error processing reply links: {results[0]}")
+        if isinstance(results[1], Exception):
+            logger.error(f"[{entity_id}] Error processing unresolved links: {results[1]}")
+
+        logger.info(f"[{entity_id}] Finished processing reply links")
+
+    async def _process_reply_links(self, links: List[Tuple[str, str]], entity_export_path: Path, entity_id: str) -> int:
+        """Process all normal reply links in parallel."""
+        if not links:
+            return 0
+
+        success_count = 0
+
+        # Process in batches to avoid too many open files
+        batch_size = 20
+        for i in range(0, len(links), batch_size):
+            batch = links[i:i+batch_size]
+
+            tasks = []
+            for parent_filename, child_filename in batch:
+                task = asyncio.create_task(self._link_parent_to_child(
+                    parent_filename, child_filename, entity_export_path, entity_id
+                ))
+                tasks.append(task)
+
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+            success_count += sum(1 for result in batch_results if result is True)
+
+        return success_count
+
+    async def _process_unresolved_replies(self, filenames: Set[str], entity_export_path: Path, entity_id: str) -> int:
+        """Process all unresolved reply markers in parallel."""
+        if not filenames:
+            return 0
+
+        success_count = 0
+
+        # Process in batches to avoid too many open files
+        batch_size = 20
+        filenames_list = list(filenames)
+        for i in range(0, len(filenames_list), batch_size):
+            batch = filenames_list[i:i+batch_size]
+
+            tasks = []
+            for filename in batch:
+                task = asyncio.create_task(self._mark_as_unresolved(
+                    filename, entity_export_path, entity_id
+                ))
+                tasks.append(task)
+
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+            success_count += sum(1 for result in batch_results if result is True)
+
+        return success_count
+
+    async def _link_parent_to_child(
+        self, parent_filename: str, child_filename: str, entity_export_path: Path, entity_id: str
+    ) -> bool:
+        """Link a child note to its parent note."""
+        # Resolve both file paths
+        parent_path = await self._find_note_path(entity_export_path, parent_filename)
+        child_path = await self._find_note_path(entity_export_path, child_filename)
+
+        if not parent_path or not child_path:
+            return False
+
+        # Generate the link and add it to the parent file
+        try:
+            # Calculate relative path from parent to child
+            relative_path = await run_in_thread_pool(
+                get_relative_path, child_path, parent_path.parent
+            )
+
+            if not relative_path:
+                logger.error(f"[{entity_id}] Failed to calculate relative path: {parent_path} -> {child_path}")
+                return False
+
+            # Prepare the link (no file extension in Obsidian links)
+            link_target = urllib.parse.unquote(relative_path.replace('.md', ''))
+            link_text = f"Reply to: [[{link_target}]]\n"
+
+            # Add the link to the parent file
+            return await self._add_line_to_file(parent_path, link_text,
+                                              check_existing="Reply to:", entity_id=entity_id)
+
+        except Exception as e:
+            logger.error(f"[{entity_id}] Error linking {parent_filename} to {child_filename}: {e}")
+            return False
+
+    async def _mark_as_unresolved(self, child_filename: str, entity_export_path: Path, entity_id: str) -> bool:
+        """Mark a note as replying to an unresolved message."""
+        child_path = await self._find_note_path(entity_export_path, child_filename)
+        if not child_path:
+            return False
+
+        try:
+            marker_text = "Replied to: [Unresolved Message]\n"
+            return await self._add_line_to_file(
+                child_path, marker_text,
+                check_existing=("Replied to:", "Reply to:"),
+                entity_id=entity_id
+            )
+        except Exception as e:
+            logger.error(f"[{entity_id}] Error marking {child_filename} as unresolved: {e}")
+            return False
+
+    async def _find_note_path(self, base_path: Path, filename: str) -> Optional[Path]:
+        """Find a note file in the export directory or year subdirectory."""
+        # Try directly in the base path
+        note_path = base_path / filename
+        if await run_in_thread_pool(note_path.exists):
             return note_path
 
+        # Try in year subdirectory (if filename starts with YYYY-)
         try:
             year = filename.split('-')[0]
             if year.isdigit() and len(year) == 4:
-                year_path = entity_export_path / year / filename
-                exists_in_year = await loop.run_in_executor(self.executor, year_path.exists)
-                if exists_in_year:
+                year_path = base_path / year / filename
+                if await run_in_thread_pool(year_path.exists):
                     return year_path
-        except:
+        except Exception:
             pass
 
-        logger.warning(f"Note file '{filename}' not found in '{entity_export_path}' (or subdirs).")
         return None
 
-    async def _schedule_link_addition(self, parent_path_task: asyncio.Task, child_path_task: asyncio.Task, entity_id: str) -> bool:
-        """Waits for path resolutions and schedules the link addition."""
-        parent_note_path = await parent_path_task
-        child_note_path = await child_path_task
+    async def _add_line_to_file(self, file_path: Path, line: str, check_existing: Union[str, Tuple[str, ...]], entity_id: str) -> bool:
+        """Add a line to the beginning of a file if it doesn't already contain the specified text."""
+        # Get or create a lock for this file
+        if file_path not in self.file_locks:
+            self.file_locks[file_path] = asyncio.Lock()
+        file_lock = self.file_locks[file_path]
 
-        if parent_note_path and child_note_path:
-            return await self._add_reply_link(parent_note_path, child_note_path, entity_id)
-        else:
-            return False
+        # Process checks for existing content
+        checks = (check_existing,) if isinstance(check_existing, str) else check_existing
 
-    async def _schedule_unresolved_mark(self, child_path_task: asyncio.Task, entity_id: str) -> bool:
-        """Waits for child path resolution and schedules marking as unresolved."""
-        child_note_path = await child_path_task
-        if child_note_path:
-            return await self._add_unresolved_reply_marker(child_note_path, entity_id)
-        else:
-             return False
-
-    async def _add_reply_link(self, parent_note_path: Path, child_note_path: Path, entity_id: str) -> bool:
-        """Adds a relative 'Reply to [[child]]' link to the parent note."""
-        loop = asyncio.get_running_loop()
-        try:
-            relative_child_path_str = await loop.run_in_executor(
-                self.executor,
-                get_relative_path,
-                child_note_path,
-                parent_note_path.parent
-            )
-
-            if not relative_child_path_str:
-                logger.error(f"[{entity_id}] Failed to calculate relative path from {parent_note_path} to {child_note_path}")
-                return False
-
-            # Fix: Use urllib.parse.unquote to decode URL-encoded characters in the path
-            link_target = urllib.parse.unquote(relative_child_path_str.replace('.md', ''))
-            reply_line = f"Reply to: [[{link_target}]]\n"
-
-            file_lock = await self._get_file_lock(parent_note_path)
-            async with self.io_semaphore:
-                async with file_lock:
-                    async with aiofiles.open(parent_note_path, mode='r+', encoding='utf-8') as f:
+        async with self.io_semaphore:
+            async with file_lock:
+                try:
+                    async with aiofiles.open(file_path, mode='r+', encoding='utf-8') as f:
                         content = await f.read()
-                        if not content.lstrip().startswith("Reply to:"):
-                            await f.seek(0)
-                            await f.write(reply_line + content)
-                            await f.truncate()
-                            return True
-                        else:
-                            return False
-        except Exception as e:
-            logger.error(f"[{entity_id}] Failed to add reply link to {parent_note_path}: {e}", exc_info=self.config.verbose)
-            return False
 
-    async def _add_unresolved_reply_marker(self, child_note_path: Path, entity_id: str) -> bool:
-        """Adds 'Replied to: [Unresolved Message]' at the beginning of the child note."""
-        try:
-            reply_line = "Replied to: [Unresolved Message]\n"
-
-            file_lock = await self._get_file_lock(child_note_path)
-            async with self.io_semaphore:
-                async with file_lock:
-                    async with aiofiles.open(child_note_path, mode='r+', encoding='utf-8') as f:
-                        content = await f.read()
-                        if not content.lstrip().startswith("Replied to:") and not content.lstrip().startswith("Reply to:"):
-                            await f.seek(0)
-                            await f.write(reply_line + content)
-                            await f.truncate()
-                            return True
-                        else:
+                        # Check if any of the specified prefixes already exist
+                        content_start = content.lstrip()
+                        if any(content_start.startswith(check) for check in checks):
                             return False
-        except Exception as e:
-            logger.error(f"[{entity_id}] Failed to add unresolved reply marker to {child_note_path}: {e}", exc_info=self.config.verbose)
-            return False
+
+                        # Add the line to the beginning and rewrite file
+                        await f.seek(0)
+                        await f.write(line + content)
+                        await f.truncate()
+                        return True
+
+                except Exception as e:
+                    log_level = 'error' if self.config.verbose else 'warning'
+                    getattr(logger, log_level)(f"[{entity_id}] Failed to update {file_path}: {e}")
+                    return False

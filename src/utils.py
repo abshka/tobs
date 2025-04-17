@@ -1,24 +1,23 @@
-import re
-import os
-import logging
 import asyncio
+import logging
+import os
+import re
+import sys
+import urllib.parse
 from functools import partial
 from pathlib import Path
+from typing import Any, Callable, List, Optional, TypeVar
+
 from loguru import logger
-import sys
-from typing import List, Callable, Any, TypeVar, Coroutine, Optional, Union
-import urllib.parse
 
 T = TypeVar('T')
 R = TypeVar('R')
 
 def setup_logging(verbose: bool):
     """Configures logging using Loguru."""
+    # Configure console logging
     log_level = "DEBUG" if verbose else "INFO"
-    log_file_level = "DEBUG"
-
     logger.remove()
-
     logger.add(
         sys.stderr,
         level=log_level,
@@ -26,11 +25,12 @@ def setup_logging(verbose: bool):
         colorize=True
     )
 
+    # Configure file logging
     try:
         log_file_path = Path("telegram_exporter.log").resolve()
         logger.add(
             log_file_path,
-            level=log_file_level,
+            level="DEBUG",
             rotation="10 MB",
             retention="7 days",
             compression="zip",
@@ -39,39 +39,36 @@ def setup_logging(verbose: bool):
             backtrace=True,
             diagnose=verbose
         )
-        logger.info(f"Logging initialized. Console Level: {log_level}. Log file: {log_file_path} (Level: {log_file_level})")
+        logger.info(f"Logging initialized. Console: {log_level}, File: {log_file_path}")
     except Exception as e:
-         logger.error(f"Failed to configure file logging: {e}. Logging to console only.")
+        logger.error(f"Failed to configure file logging: {e}")
 
+    # Configure third-party loggers
     logging.getLogger('telethon').setLevel(logging.WARNING if not verbose else logging.INFO)
     logging.getLogger('PIL').setLevel(logging.INFO if not verbose else logging.DEBUG)
 
 def sanitize_filename(text: str, max_length: int = 200, replacement: str = '_') -> str:
-    """
-    Sanitizes text to be used as part of a filename. Replaces invalid chars,
-    controls length, and handles edge cases.
-    Args:
-        text: The input string.
-        max_length: Maximum allowed length of the sanitized string.
-        replacement: Character used to replace invalid sequences.
-    Returns:
-        A filesystem-safe string.
-    """
+    """Sanitizes text to be used as part of a filename."""
     if not text:
         return "Untitled"
 
+    # Replace spaces and invalid characters
     text = re.sub(r'[\s]+', replacement, text)
     text = re.sub(r'[\\/*?:"<>|&!]', '', text)
     text = text.strip('.' + replacement)
 
-    reserved_names = {"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"}
+    # Handle Windows reserved names
+    reserved_names = {"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
+                      "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4",
+                      "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"}
     if text.upper() in reserved_names:
-        text = text + replacement + "file"
+        text = f"{text}{replacement}file"
 
+    # Truncate if too long
     if len(text) > max_length:
         cutoff = text[:max_length].rfind(replacement)
         if cutoff > max_length - 20:
-             text = text[:cutoff]
+            text = text[:cutoff]
         else:
             text = text[:max_length]
         text = text.strip(replacement)
@@ -79,37 +76,29 @@ def sanitize_filename(text: str, max_length: int = 200, replacement: str = '_') 
     return text or "Sanitized"
 
 def get_relative_path(target_path: Path, base_path: Path) -> Optional[str]:
-    """
-    Calculates the relative path from base_path to target_path suitable for Markdown links.
-
-    Args:
-        target_path: Absolute path to the target file (e.g., media file).
-        base_path: Absolute path to the directory containing the source file (e.g., note file's directory).
-
-    Returns:
-        A relative path string (using forward slashes) or None if calculation fails.
-    """
+    """Calculate relative path from base_path to target_path for Markdown links."""
     try:
         target_abs = target_path.resolve()
         base_abs = base_path.resolve()
 
+        # Ensure base is a directory
         if not base_abs.is_dir():
-             logger.warning(f"Base path '{base_abs}' for relative calculation is not a directory. Using its parent.")
-             base_abs = base_abs.parent
+            base_abs = base_abs.parent
 
+        # Calculate relative path
         relative = os.path.relpath(target_abs, base_abs)
+
+        # Convert to forward slashes and URL-encode path components
         posix_relative = relative.replace(os.path.sep, '/')
         encoded_relative = '/'.join(urllib.parse.quote(part) for part in posix_relative.split('/'))
+
         return encoded_relative
-    except ValueError as e:
-        logger.warning(f"Could not determine relative path from '{base_path}' to '{target_path}' (possibly different drives?): {e}")
-        return None
     except Exception as e:
-        logger.error(f"Error calculating relative path from {base_path} to {target_path}: {e}")
+        logger.warning(f"Failed to calculate relative path: {e}")
         return None
 
 def ensure_dir_exists(path: Path):
-    """Creates a directory if it doesn't exist. Raises OSError on failure."""
+    """Creates a directory if it doesn't exist."""
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -117,53 +106,42 @@ def ensure_dir_exists(path: Path):
         raise
 
 async def run_in_thread_pool(func: Callable[..., T], *args, **kwargs) -> T:
-    """Runs a synchronous function in the default asyncio event loop's thread pool."""
+    """Runs a synchronous function in the thread pool."""
     loop = asyncio.get_running_loop()
-    func_partial = partial(func, *args, **kwargs)
-    return await loop.run_in_executor(
-        None,
-        func_partial
-    )
+    return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
 async def process_items_parallel(
-    processor_func: Union[Callable[[T], R], Callable[[T], Coroutine[Any, Any, R]]],
+    processor_func: Callable,
     items: List[T],
     max_concurrency: int,
     desc: str = "items"
-) -> List[Union[R, BaseException]]:
-    """
-    Processes a list of items in parallel using asyncio.Semaphore and asyncio.gather.
-
-    Args:
-        processor_func: A sync or async function to process each item.
-        items: The list of items to process.
-        max_concurrency: Maximum number of items to process concurrently.
-        desc: Description for logging purposes.
-
-    Returns:
-        A list containing the results for each item (or Exceptions on failure).
-    """
+) -> List[Any]:
+    """Process items in parallel with concurrency limit."""
     if not items:
         return []
 
     semaphore = asyncio.Semaphore(max_concurrency)
-    tasks = []
+    results = []
 
-    async def process_with_semaphore(item: T) -> Union[R, BaseException]:
+    async def process_one(item: T) -> Any:
         async with semaphore:
             try:
+                # Handle both coroutine and regular functions
                 if asyncio.iscoroutinefunction(processor_func):
                     return await processor_func(item)
                 else:
                     return await run_in_thread_pool(processor_func, item)
             except Exception as e:
-                 logger.error(f"Error processing {desc} item '{str(item)[:50]}...': {e}", exc_info=True)
-                 raise e
+                logger.error(f"Error processing {desc} item: {e}")
+                return e  # Return exception object
 
-    for item in items:
-        tasks.append(asyncio.create_task(process_with_semaphore(item)))
+    # Create all tasks with semaphore control
+    tasks = [asyncio.create_task(process_one(item)) for item in items]
 
-    logger.info(f"Processing {len(items)} {desc} with max concurrency {max_concurrency}...")
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    logger.info(f"Finished processing {len(items)} {desc}.")
+    # Wait for all tasks to complete
+    logger.info(f"Processing {len(items)} {desc} (max concurrency: {max_concurrency})")
+    for task in tasks:
+        results.append(await task)
+    logger.info(f"Finished processing {len(items)} {desc}")
+
     return results
