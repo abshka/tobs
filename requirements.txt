@@ -1,11 +1,13 @@
 aiofiles==24.1.0
+aiogram==3.3.0
 asyncio==3.4.3
 ffmpeg-python==0.2.0
 future==1.0.0
 loguru==0.7.3
 pillow==11.2.1
 pyaes==1.6.1
-pyasn1==0.6.1
+pyasn1==0.6.0
 python-dotenv==1.1.0
+redis==5.0.1
 rsa==4.9.1
 telethon==1.39.0
