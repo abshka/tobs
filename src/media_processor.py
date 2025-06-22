@@ -1,8 +1,12 @@
 import asyncio
 import concurrent.futures
+import mimetypes
+import os
 from pathlib import Path
 from typing import List, Optional, Union
 
+import aiofiles
+import aiohttp
 import ffmpeg
 from PIL import Image, UnidentifiedImageError
 from telethon import TelegramClient
@@ -20,6 +24,9 @@ from telethon.tl.types import (
 from src.config import Config
 from src.utils import ensure_dir_exists, logger, run_in_thread_pool, sanitize_filename
 
+AIOHTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+}
 
 class MediaProcessor:
     def __init__(self, config: Config, client: TelegramClient):
@@ -51,7 +58,6 @@ class MediaProcessor:
         if not media_items:
             return []
 
-        # Process all media items in parallel
         tasks = [
             asyncio.create_task(self._process_single_item(
                 message.id, entity_id_str, media_type, media_obj, entity_media_path
@@ -72,15 +78,42 @@ class MediaProcessor:
 
         return final_paths
 
+    async def download_external_image(self, session: aiohttp.ClientSession, url: str, media_path: Path) -> Optional[Path]:
+            """Асинхронно скачивает внешнее изображение (например, из Telegra.ph)."""
+            try:
+                async with self.download_semaphore:
+                    logger.debug(f"Downloading external image from: {url}")
+                    async with session.get(url, timeout=30) as response:
+                        if response.status != 200:
+                            logger.error(f"Failed to download image {url}. Status: {response.status}, Reason: {response.reason}")
+                            return None
+
+                        content_type = response.headers.get('Content-Type', '')
+                        ext = mimetypes.guess_extension(content_type) or '.jpg'
+
+                        base_name = sanitize_filename(Path(url).stem)
+                        filename = f"telegraph_{base_name}_{os.urandom(4).hex()}{ext}"
+
+                        images_dir = media_path / "images"
+                        await run_in_thread_pool(ensure_dir_exists, images_dir)
+
+                        file_path = images_dir / filename
+
+                        async with aiofiles.open(file_path, 'wb') as f:
+                            await f.write(await response.read())
+
+                        logger.info(f"Saved external image to: {file_path}")
+                        return file_path
+            except Exception as e:
+                logger.error(f"Failed to download or save external image {url}: {e}", exc_info=True)
+                return None
+
     async def _add_media_from_message(self, message: Message, media_items: List, entity_id_str: str):
         if not hasattr(message, 'media') or not message.media:
             return
 
-        # Handle photo
         if isinstance(message.media, MessageMediaPhoto) and hasattr(message.media, 'photo') and isinstance(message.media.photo, Photo):
             media_items.append(("image", message.media.photo))
-
-        # Handle document (video, audio, etc.)
         elif isinstance(message.media, MessageMediaDocument) and hasattr(message.media, 'document'):
             doc = message.media.document
             if isinstance(doc, Document) and hasattr(doc, 'attributes'):
@@ -93,61 +126,46 @@ class MediaProcessor:
 
         if is_video:
             video_attr = next((attr for attr in doc.attributes if isinstance(attr, DocumentAttributeVideo)), None)
-            if video_attr and getattr(video_attr, 'round_message', False):
-                return "round_video"
-            return "video"
-
-        if is_audio:
-            return "audio"
-
-        return "document"
+            return "round_video" if video_attr and getattr(video_attr, 'round_message', False) else "video"
+        return "audio" if is_audio else "document"
 
     async def _process_single_item(
             self, message_id: int, entity_id_str: str, media_type: str,
             media_obj: Union[Photo, Document], entity_media_path: Path
     ) -> Optional[Path]:
         try:
-            # Generate filenames and paths
             filename = self._get_filename(media_obj, message_id, media_type, entity_id_str)
             type_subdir = entity_media_path / f"{media_type}s"
             final_path = type_subdir / filename
             raw_download_path = type_subdir / f"raw_{filename}"
 
-            # Check cache
             async with self._cache_lock:
                 if final_path in self.processed_cache and final_path.exists():
                     return final_path
 
             await run_in_thread_pool(ensure_dir_exists, type_subdir)
 
-            # Download media
             downloaded_ok = await self._download_media(
                 message_id, entity_id_str, media_type, media_obj, raw_download_path
             )
-
             if not downloaded_ok:
                 await self._cleanup_file_async(raw_download_path)
                 return None
 
-            # Process media based on type
             optimization_success = await self._optimize_media(
                 raw_download_path, final_path, media_type, entity_id_str
             )
 
-            # Cleanup and return
             if optimization_success:
                 if raw_download_path != final_path:
                     await self._cleanup_file_async(raw_download_path)
-
                 async with self._cache_lock:
                     self.processed_cache[final_path] = True
-
-                logger.info(f"[{entity_id_str}] Finished processing media: {final_path}")
+                logger.info(f"Finished processing media: {final_path}")
                 return final_path
             else:
                 logger.error(f"[{entity_id_str}] Media processing failed for msg {message_id}, type {media_type}")
                 return None
-
         except Exception as e:
             logger.error(f"[{entity_id_str}] Error in media processing pipeline: {e}")
             return None
@@ -159,65 +177,9 @@ class MediaProcessor:
         try:
             async with self.download_semaphore:
                 logger.info(f"[{entity_id_str}] Downloading {media_type} for msg {message_id} -> {raw_download_path.name}...")
-
                 await run_in_thread_pool(ensure_dir_exists, raw_download_path.parent)
-
-                # Create a temporary Message container for download
-                from datetime import datetime
-
-                from telethon.tl.types import PeerUser
-
-                peer_id = PeerUser(user_id=0)
-
-                if isinstance(media_obj, (Photo, Document)):
-                    # Create appropriate media container
-                    if isinstance(media_obj, Photo):
-                        media_container = MessageMediaPhoto(photo=media_obj, ttl_seconds=None)
-                    else:
-                        media_container = MessageMediaDocument(document=media_obj, ttl_seconds=None)
-
-                    # Create message container
-                    download_container = Message(
-                        id=message_id, peer_id=peer_id, date=datetime.now(),
-                        message="", out=False, mentioned=False, media_unread=False,
-                        silent=False, post=False, from_scheduled=False, legacy=False,
-                        edit_hide=False, pinned=False, noforwards=False, from_id=None,
-                        fwd_from=None, via_bot_id=None, reply_to=None, media=media_container,
-                        reply_markup=None, entities=[], views=None, forwards=None,
-                        replies=None, edit_date=None, post_author=None, grouped_id=None,
-                        restriction_reason=[], ttl_period=None
-                    )
-
-                    # Download the media
-                    download_result = await self.client.download_media(
-                        download_container, file=str(raw_download_path)
-                    )
-                else:
-                    # Fallback for unknown media types
-                    download_container = Message(
-                        id=message_id, peer_id=peer_id, date=datetime.now(),
-                        message="", out=False, mentioned=False, media_unread=False,
-                        silent=False, post=False, from_scheduled=False, legacy=False,
-                        edit_hide=False, pinned=False, noforwards=False, from_id=None,
-                        fwd_from=None, via_bot_id=None, reply_to=None, media=None,
-                        reply_markup=None, entities=[], views=None, forwards=None,
-                        replies=None, edit_date=None, post_author=None, grouped_id=None,
-                        restriction_reason=[], ttl_period=None
-                    )
-
-                    try:
-                        download_result = await self.client.download_media(
-                            download_container, file=str(raw_download_path)
-                        )
-                    except Exception:
-                        open(str(raw_download_path), 'wb').close()
-                        download_result = str(raw_download_path)
-
+                download_result = await self.client.download_media(media_obj, file=str(raw_download_path))
                 return download_result is not None and await run_in_thread_pool(raw_download_path.exists)
-
-        except asyncio.TimeoutError:
-            logger.error(f"[{entity_id_str}] Timeout downloading media for msg {message_id}")
-            return False
         except Exception as e:
             logger.error(f"[{entity_id_str}] Download failed for msg {message_id} ({media_type}): {e}")
             return False
@@ -226,9 +188,7 @@ class MediaProcessor:
             self, raw_path: Path, final_path: Path, media_type: str, entity_id_str: str
     ) -> bool:
         logger.info(f"[{entity_id_str}] Processing {media_type}: {raw_path.name} -> {final_path.name}")
-
         try:
-            # Process based on media type
             if media_type == "image":
                 await self._optimize_image(raw_path, final_path)
             elif media_type in ["video", "round_video"]:
@@ -236,15 +196,10 @@ class MediaProcessor:
             elif media_type == "audio":
                 await self._optimize_audio(raw_path, final_path)
             else:
-                # For other types, just move the file
                 await run_in_thread_pool(lambda: raw_path.rename(final_path))
-
             return await run_in_thread_pool(final_path.exists)
-
         except Exception as e:
             logger.error(f"[{entity_id_str}] Failed to process {media_type} {raw_path.name}: {e}")
-
-            # Attempt direct copy as fallback
             try:
                 if await run_in_thread_pool(raw_path.exists):
                     logger.warning(f"[{entity_id_str}] Processing failed, attempting direct copy")
@@ -252,65 +207,43 @@ class MediaProcessor:
                     return await run_in_thread_pool(final_path.exists)
             except Exception as move_err:
                 logger.error(f"[{entity_id_str}] Fallback move/copy failed: {move_err}")
-
             return False
 
     async def _cleanup_file_async(self, file_path: Path):
         try:
-            await run_in_thread_pool(
-                lambda p: p.unlink() if p.exists() else None,
-                file_path
-            )
+            if await run_in_thread_pool(file_path.exists):
+                await run_in_thread_pool(file_path.unlink)
         except Exception as e:
             logger.warning(f"Could not clean up file {file_path}: {e}")
 
     def _get_filename(self, media_obj: Union[Photo, Document], message_id: int, media_type: str, entity_id_str: str) -> str:
         media_id = getattr(media_obj, 'id', 'no_id')
         base_name = f"{entity_id_str}_msg{message_id}_{media_type}_{media_id}"
-        ext = ".dat"  # Default extension
-
-        # Determine file extension
+        ext = ".dat"
         if isinstance(media_obj, Photo):
             ext = ".jpg"
         elif isinstance(media_obj, Document):
-            # Try to get extension from original filename
             original_filename = next((
                 attr.file_name for attr in getattr(media_obj, 'attributes', [])
                 if isinstance(attr, DocumentAttributeFilename)
             ), None)
+            if original_filename and Path(original_filename).suffix:
+                ext = Path(original_filename).suffix
+            elif hasattr(media_obj, 'mime_type') and '/' in media_obj.mime_type:
+                ext = mimetypes.guess_extension(media_obj.mime_type) or ext
 
-            if original_filename:
-                original_path = Path(original_filename)
-                if original_path.suffix and len(original_path.suffix) > 1:
-                    ext = original_path.suffix
-
-            # Fallback to mime type
-            if ext == ".dat" and hasattr(media_obj, 'mime_type') and '/' in media_obj.mime_type:
-                mime_suffix = media_obj.mime_type.split('/')[-1].split(';')[0]
-                if mime_suffix:
-                    ext = f".{mime_suffix}"
-
-            # Type-specific extensions
             if media_type in ['video', 'round_video'] and ext.lower() in ['.dat', '.bin']:
                 ext = '.mp4'
             elif media_type == 'audio':
-                is_voice = any(
-                    getattr(attr, 'voice', False)
-                    for attr in media_obj.attributes
-                    if isinstance(attr, DocumentAttributeAudio)
-                )
+                is_voice = any(getattr(attr, 'voice', False) for attr in media_obj.attributes if isinstance(attr, DocumentAttributeAudio))
                 if is_voice and ext.lower() in ['.dat', '.bin', '.oga']:
                     ext = '.ogg'
 
-        # Sanitize and combine
         safe_base = sanitize_filename(base_name, max_length=180, replacement='_')
         safe_ext = sanitize_filename(ext, max_length=10, replacement='')
-        if not safe_ext.startswith('.'):
-            safe_ext = '.' + safe_ext
-        if len(safe_ext) <= 1:
-            safe_ext = ".dat"
-
+        if not safe_ext.startswith('.'): safe_ext = '.' + safe_ext
         return f"{safe_base}{safe_ext}"
+
 
     async def _optimize_image(self, input_path: Path, output_path: Path):
         await run_in_thread_pool(self._sync_optimize_image, input_path, output_path)
@@ -318,7 +251,6 @@ class MediaProcessor:
     def _sync_optimize_image(self, input_path: Path, output_path: Path):
         try:
             with Image.open(input_path) as img:
-                # Handle transparency
                 has_alpha = False
                 if img.mode in ('RGBA', 'P', 'LA'):
                     try:
@@ -334,7 +266,6 @@ class MediaProcessor:
                 else:
                     img_to_save = img
 
-                # Save as WebP
                 webp_path = output_path.with_suffix('.webp')
                 img_to_save.save(
                     webp_path,
@@ -343,7 +274,6 @@ class MediaProcessor:
                     method=6
                 )
 
-                # Rename to final path
                 webp_path.rename(output_path)
 
         except UnidentifiedImageError:

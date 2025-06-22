@@ -1,28 +1,30 @@
+# src/config.py
+
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from dotenv import load_dotenv
 
 from src.exceptions import ConfigError
 from src.utils import logger, sanitize_filename
 
-DEFAULT_CACHE_PATH = Path("./telegram_obsidian_cache.json").resolve()
-DEFAULT_OBSIDIAN_PATH = Path("./obsidian_export").resolve()
+# Пути по умолчанию теперь относительные
+DEFAULT_CACHE_PATH = Path("./telegram_obsidian_cache.json")
+DEFAULT_EXPORT_PATH = Path("./debug_exports")  # Новый путь по умолчанию для экспорта
 
 @dataclass
 class ExportTarget:
-    """Represents a single channel or chat to export."""
+    """Представляет одну цель для экспорта (канал, чат)."""
     id: Union[str, int]
     name: str = ""
     type: str = "unknown"
 
     def __post_init__(self):
         self.id = str(self.id).strip()
-
-        # Auto-detect type from ID format
-        if self.id.startswith('@') or self.id.startswith('-100') or 't.me/' in self.id:
+        # Автоопределение типа по формату ID
+        if self.id.startswith('@') or 't.me/' in self.id or self.id.startswith('-100'):
             self.type = "channel"
         elif self.id.startswith('-') and self.id[1:].isdigit():
             self.type = "chat"
@@ -39,7 +41,7 @@ class Config:
     export_targets: List[ExportTarget] = field(default_factory=list)
 
     # Paths
-    obsidian_path: Path = field(default=DEFAULT_OBSIDIAN_PATH)
+    export_path: Path = field(default=DEFAULT_EXPORT_PATH)
     media_subdir: str = "_media"
     use_entity_folders: bool = True
 
@@ -65,122 +67,95 @@ class Config:
     cache_file: Path = field(default=DEFAULT_CACHE_PATH)
     interactive_mode: bool = False
 
-    # Path mappings
+    # Proxy
+    proxy_type: Optional[str] = None
+    proxy_addr: Optional[str] = None
+    proxy_port: Optional[int] = None
+
+    # Runtime state (не задаются из .env)
     export_paths: Dict[str, Path] = field(default_factory=dict, init=False)
     media_paths: Dict[str, Path] = field(default_factory=dict, init=False)
+    cache: Dict[str, Any] = field(default_factory=dict, init=False)
 
     def __post_init__(self):
-        """Validate config and setup paths."""
+        """Валидация и настройка путей после инициализации."""
         if not self.api_id or not self.api_hash:
-            raise ConfigError("API_ID and API_HASH must be set")
+            raise ConfigError("API_ID and API_HASH must be set in .env file")
 
-        # Normalize paths
-        self.obsidian_path = Path(self.obsidian_path).resolve()
+        self.export_path = Path(self.export_path).resolve()
         self.cache_file = Path(self.cache_file).resolve()
 
-        # Create required directories
-        for path in [self.obsidian_path, self.cache_file.parent]:
+        for path in [self.export_path, self.cache_file.parent]:
             try:
                 path.mkdir(parents=True, exist_ok=True)
             except OSError as e:
                 raise ConfigError(f"Failed to create path {path}: {e}")
 
-        # Setup target paths
         self._update_target_paths()
 
-        # Warn if no targets and not interactive
         if not self.export_targets and not self.interactive_mode:
-            logger.warning("No export targets and interactive mode disabled. Nothing to process.")
+            logger.warning("No export targets defined and interactive mode is off. Nothing to do.")
 
     def _update_target_paths(self):
-        """Setup export and media paths for all targets."""
+        """Настраивает пути для экспорта и медиа для всех целей."""
         self.export_paths = {}
         self.media_paths = {}
-
         for target in self.export_targets:
             target_id = str(target.id)
+            target_name = self._get_entity_folder_name(target)
 
-            # Get base directory name for this target
-            target_name = self._get_entity_folder_name(target) if self.use_entity_folders else ""
+            base_path = self.export_path / target_name if self.use_entity_folders else self.export_path
+            media_path = base_path / self.media_subdir
 
-            # Configure paths
-            if self.use_entity_folders:
-                base_path = self.obsidian_path / target_name
-                media_path = base_path / self.media_subdir
-            else:
-                base_path = self.obsidian_path
-                media_path = base_path / self.media_subdir
-
-            # Store paths
             self.export_paths[target_id] = base_path.resolve()
             self.media_paths[target_id] = media_path.resolve()
 
-            # Create directories
             for path in [base_path, media_path]:
-                try:
-                    path.mkdir(parents=True, exist_ok=True)
-                except OSError as e:
-                    logger.error(f"Failed to create directory for target {target_id}: {e}")
+                path.mkdir(parents=True, exist_ok=True)
 
     def _get_entity_folder_name(self, target: ExportTarget) -> str:
-        """Generate a safe directory name for an entity."""
+        """Генерирует безопасное имя папки для сущности."""
         name = target.name or f"id_{target.id}"
         clean_name = sanitize_filename(name, max_length=100)
-
-        if self.use_entity_folders:
-            type_prefix = target.type if target.type != "unknown" else "entity"
-            return f"{type_prefix}_{clean_name}"
-        return clean_name
+        type_prefix = target.type if target.type != "unknown" else "entity"
+        return f"{type_prefix}_{clean_name}"
 
     def add_export_target(self, target: ExportTarget):
-        """Add a new export target and update paths."""
+        """Добавляет новую цель экспорта и обновляет пути."""
         if str(target.id) not in [str(t.id) for t in self.export_targets]:
             self.export_targets.append(target)
             self._update_target_paths()
-            logger.info(f"Added export target: {target.id}")
+            logger.info(f"Added export target: {target.name or target.id}")
 
     def get_export_path_for_entity(self, entity_id: Union[str, int]) -> Path:
-        """Get export path for an entity, with fallback to base path."""
-        return self.export_paths.get(str(entity_id), self.obsidian_path)
+        """Возвращает путь для экспорта для указанной сущности."""
+        return self.export_paths.get(str(entity_id), self.export_path)
 
     def get_media_path_for_entity(self, entity_id: Union[str, int]) -> Path:
-        """Get media path for an entity, with fallback to base media path."""
-        entity_id = str(entity_id)
-        if entity_id in self.media_paths:
-            return self.media_paths[entity_id]
-        return self.obsidian_path / self.media_subdir
+        """Возвращает путь для медиа для указанной сущности."""
+        return self.media_paths.get(str(entity_id), self.export_path / self.media_subdir)
 
 def _parse_bool(value: Optional[Union[str, bool]], default: bool = False) -> bool:
-    """Convert various inputs to boolean."""
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.lower() in ('true', '1', 'yes', 'y', 'on')
-    return default
+    """Конвертирует строковое значение в boolean."""
+    if value is None: return default
+    if isinstance(value, bool): return value
+    return str(value).lower() in ('true', '1', 'yes', 'y', 'on')
 
 def load_config(env_path: Union[str, Path] = ".env") -> Config:
-    """Load configuration from .env and environment variables."""
-    env_path = Path(env_path)
-    if env_path.exists():
+    """Загружает конфигурацию из .env файла и переменных окружения."""
+    if Path(env_path).exists():
         load_dotenv(dotenv_path=env_path)
-
     try:
-        # Parse all config values from environment variables
+        proxy_port_str = os.getenv("PROXY_PORT")
+        proxy_port = int(proxy_port_str) if proxy_port_str and proxy_port_str.isdigit() else None
         config_dict = {
-            # Telegram
             "api_id": int(os.getenv("API_ID", 0)),
             "api_hash": os.getenv("API_HASH", ""),
             "phone_number": os.getenv("PHONE_NUMBER"),
             "session_name": os.getenv("SESSION_NAME", "telegram_obsidian_session"),
-
-            # Paths
-            "obsidian_path": Path(os.getenv("OBSIDIAN_PATH", DEFAULT_OBSIDIAN_PATH)),
+            "export_path": Path(os.getenv("EXPORT_PATH", DEFAULT_EXPORT_PATH)),
             "media_subdir": os.getenv("MEDIA_SUBDIR", "_media"),
             "use_entity_folders": _parse_bool(os.getenv("USE_ENTITY_FOLDERS"), True),
-
-            # Processing
             "only_new": _parse_bool(os.getenv("ONLY_NEW"), False),
             "media_download": _parse_bool(os.getenv("MEDIA_DOWNLOAD"), True),
             "verbose": _parse_bool(os.getenv("VERBOSE"), True),
@@ -190,36 +165,26 @@ def load_config(env_path: Union[str, Path] = ".env") -> Config:
             "cache_save_interval": int(os.getenv("CACHE_SAVE_INTERVAL", 50)),
             "request_delay": float(os.getenv("REQUEST_DELAY", 0.5)),
             "message_batch_size": int(os.getenv("MESSAGE_BATCH_SIZE", 100)),
-
-            # Media
             "image_quality": int(os.getenv("IMAGE_QUALITY", 85)),
             "video_crf": int(os.getenv("VIDEO_CRF", 28)),
             "video_preset": os.getenv("VIDEO_PRESET", "fast"),
             "hw_acceleration": os.getenv("HW_ACCELERATION", "none"),
             "use_h265": _parse_bool(os.getenv("USE_H265"), False),
-
-            # Cache and UI
             "cache_file": Path(os.getenv("CACHE_FILE", DEFAULT_CACHE_PATH)),
             "interactive_mode": _parse_bool(os.getenv("INTERACTIVE_MODE"), False),
+            "proxy_type": os.getenv("PROXY_TYPE"),
+            "proxy_addr": os.getenv("PROXY_ADDR"),
+            "proxy_port": proxy_port,
         }
 
-        # Parse export targets
         export_targets = []
         targets_str = os.getenv("EXPORT_TARGETS", "")
-        legacy_channel = os.getenv("TELEGRAM_CHANNEL")
-
         if targets_str:
-            # Parse from EXPORT_TARGETS setting
             for target_id in [t.strip() for t in targets_str.split(',') if t.strip()]:
                 export_targets.append(ExportTarget(id=target_id))
-        elif legacy_channel:
-            # Fallback to legacy setting
-            export_targets = [ExportTarget(id=legacy_channel)]
 
         config_dict["export_targets"] = export_targets
         return Config(**config_dict)
 
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
         raise ConfigError(f"Invalid configuration value: {e}") from e
-    except Exception as e:
-        raise ConfigError(f"Failed to load configuration: {e}") from e

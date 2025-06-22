@@ -1,0 +1,25 @@
+[project]
+name = "telegram-obsidian"
+version = "0.1.0"
+description = "An application to export Telegram channel/chat to Markdown files"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "aiofiles==23.2.1",
+  "aiogram==3.3.0",
+  "aiohttp-proxy>=0.1.2",
+  "asyncio==3.4.3",
+  "beautifulsoup4>=4.13.4",
+  "ffmpeg-python==0.2.0",
+  "future==1.0.0",
+  "loguru==0.7.3",
+  "pillow==11.2.1",
+  "pyaes==1.6.1",
+  "pyasn1==0.6.0",
+  "pysocks>=1.7.1",
+  "python-dotenv==1.1.0",
+  "redis==5.0.1",
+  "requests>=2.32.4",
+  "rsa==4.9.1",
+  "telethon==1.39.0",
+]

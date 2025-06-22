@@ -6,3 +6,5 @@ telegram_obsidian_session.session
 telegram_obsidian_session.session-journal
 src/__pycache__/
 telegram_exporter.log
+.python-version
+uv.lock

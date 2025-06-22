@@ -26,9 +26,8 @@ class ReplyLinker:
             logger.info(f"[{entity_id}] No processed messages found in cache. Skipping reply linking.")
             return
 
-        # Collect all the reply relationships to process
-        links_to_add: List[Tuple[str, str]] = []  # (parent_filename, child_filename)
-        unresolved_child_files: Set[str] = set()  # child files with missing parent
+        links_to_add: List[Tuple[str, str]] = []
+        unresolved_child_files: Set[str] = set()
 
         for child_id, msg_data in processed_messages.items():
             parent_id = msg_data.get("reply_to")
@@ -37,29 +36,23 @@ class ReplyLinker:
             if not child_filename:
                 continue
 
-            # If this message replies to another message
             if parent_id:
                 parent_id_str = str(parent_id)
                 parent_data = processed_messages.get(parent_id_str)
 
                 if parent_data and parent_data.get("filename"):
-                    # We have both parent and child - add this relationship
                     links_to_add.append((parent_data["filename"], child_filename))
                 else:
-                    # Parent message not found or has no filename - mark as unresolved
                     unresolved_child_files.add(child_filename)
 
-        # Process all links in parallel
         logger.info(f"[{entity_id}] Processing {len(links_to_add)} reply links and {len(unresolved_child_files)} unresolved links")
 
-        # Process organized in two batches: normal links and unresolved markers
         results = await asyncio.gather(
             self._process_reply_links(links_to_add, entity_export_path, entity_id),
             self._process_unresolved_replies(unresolved_child_files, entity_export_path, entity_id),
             return_exceptions=True
         )
 
-        # Log results
         if isinstance(results[0], Exception):
             logger.error(f"[{entity_id}] Error processing reply links: {results[0]}")
         if isinstance(results[1], Exception):
@@ -74,7 +67,6 @@ class ReplyLinker:
 
         success_count = 0
 
-        # Process in batches to avoid too many open files
         batch_size = 20
         for i in range(0, len(links), batch_size):
             batch = links[i:i+batch_size]
@@ -98,7 +90,6 @@ class ReplyLinker:
 
         success_count = 0
 
-        # Process in batches to avoid too many open files
         batch_size = 20
         filenames_list = list(filenames)
         for i in range(0, len(filenames_list), batch_size):

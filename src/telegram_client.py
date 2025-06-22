@@ -28,6 +28,14 @@ class TelegramManager:
     def __init__(self, config: Config):
         """Initialize Telegram manager with configuration."""
         self.config = config
+        proxy_info = None
+        if config.proxy_type and config.proxy_addr and config.proxy_port:
+            proxy_scheme = config.proxy_type.lower()
+            if proxy_scheme not in ['socks4', 'socks5', 'http']:
+                logger.warning(f"Unsupported proxy type for Telethon: '{proxy_scheme}'. Ignoring.")
+            else:
+                proxy_info = (proxy_scheme, config.proxy_addr, config.proxy_port)
+                logger.info(f"Using {proxy_scheme.upper()} proxy for Telethon: {config.proxy_addr}:{config.proxy_port}")
         self.client = TelegramClient(
             config.session_name,
             config.api_id,
@@ -36,7 +44,8 @@ class TelegramManager:
             app_version="1.0.0",
             connection_retries=5,
             retry_delay=2,
-            request_retries=5
+            request_retries=5,
+            proxy=proxy_info
         )
         self.entity_cache: Dict[str, Any] = {}
         self.client_connected = False
