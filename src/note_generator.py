@@ -53,13 +53,15 @@ class NoteGenerator:
             url: str,
             notes_export_path: Path,
             media_export_path: Path,
-            media_processor: Any
+            media_processor: Any,
+            cache: dict,
+            entity_id: str
         ) -> Optional[Path]:
             """
             Создает .md файл из статьи Telegra.ph, включая изображения.
             """
             article_data = await fetch_and_parse_telegraph_to_markdown(
-                session, url, media_export_path, media_processor
+                session, url, media_export_path, media_processor, cache, entity_id
             )
             if not article_data:
                 return None

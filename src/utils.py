@@ -103,11 +103,16 @@ def find_telegraph_links(text: str) -> List[str]:
     return [match.group(0) for match in re.finditer(pattern, text)]
 
 async def fetch_and_parse_telegraph_to_markdown(
-    session: aiohttp.ClientSession, url: str, media_path: Path, media_processor
+    session: aiohttp.ClientSession,
+    url: str,
+    media_path: Path,
+    media_processor,
+    cache: Optional[dict] = None,
+    entity_id: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    Asynchronously fetches and parses a Telegra.ph article into Markdown,
-    including downloading all images.
+    Асинхронно скачивает и парсит статью Telegra.ph в Markdown,
+    скачивая изображения и заменяя внутренние ссылки на посты.
     """
     try:
         logger.debug(f"Fetching Telegra.ph article: {url}")
@@ -159,7 +164,42 @@ async def fetch_and_parse_telegraph_to_markdown(
                         if figcaption := element.find('figcaption'):
                             markdown_lines.append(f"*{figcaption.get_text(strip=True)}*")
 
-        return {"title": title, "content": "\n\n".join(markdown_lines)}
+        raw_markdown = "\n\n".join(markdown_lines)
+
+        # --- НОВЫЙ БЛОК: Замена ссылок на посты Telegram внутри статьи ---
+        if not (cache and entity_id):
+            return {"title": title, "content": raw_markdown}
+
+        processed_messages = cache.get("entities", {}).get(entity_id, {}).get("processed_messages", {})
+        if not processed_messages:
+            return {"title": title, "content": raw_markdown}
+
+        url_to_data = {data["telegram_url"]: data for data in processed_messages.values() if data.get("telegram_url")}
+        msg_id_to_data = {msg_id: data for msg_id, data in processed_messages.items()}
+
+        def replacer(match: re.Match) -> str:
+            link_text, url = match.groups()
+            url = url.rstrip('/')
+
+            data = url_to_data.get(url)
+            if not data:
+                if msg_id_match := re.search(r"/(\d+)$", url):
+                    data = msg_id_to_data.get(msg_id_match.group(1))
+
+            if data and (fname := data.get("filename")):
+                title_text = data.get("title", "").replace("\n", " ").strip()
+                display = title_text if title_text else link_text
+                logger.debug(f"Found link in Telegra.ph '{url}' -> {fname}")
+                return f"[[{Path(fname).stem}|{display}]]"
+
+            logger.warning(f"[Telegra.ph Parser] No local file found for link: '{url}'")
+            return match.group(0)
+
+        pattern = re.compile(r"\[([^\]]+)\]\((https?://t\.me/[^\)]+)\)")
+        final_markdown = pattern.sub(replacer, raw_markdown)
+        # --- КОНЕЦ НОВОГО БЛОКА ---
+
+        return {"title": title, "content": final_markdown}
 
     except Exception as e:
         logger.error(f"Error parsing Telegra.ph article {url}: {e}", exc_info=True)

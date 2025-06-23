@@ -15,15 +15,12 @@ from src.cache_manager import CacheManager
 from src.config import Config, ExportTarget, load_config
 from src.exceptions import ConfigError, ExporterError, TelegramConnectionError
 
-# --- ИЗМЕНЕНО: Импортируем константу напрямую ---
 from src.media_processor import AIOHTTP_HEADERS, MediaProcessor
 from src.note_generator import NoteGenerator
 from src.reply_linker import ReplyLinker
 from src.telegram_client import TelegramManager
 from src.utils import find_telegraph_links, logger, setup_logging
 
-# ... (остальной код файла остается таким же, как я присылал в прошлый раз)
-# ... (я просто скопирую его сюда для полноты)
 
 thread_executor: Optional[ThreadPoolExecutor] = None
 process_executor: Optional[ProcessPoolExecutor] = None
@@ -72,20 +69,21 @@ async def process_message_group(
 
             for link in telegraph_links:
                 article_note_path = await note_generator.create_note_from_telegraph_url(
-                session=http_session,
-                url=link,
-                notes_export_path=entity_export_path, # Где сохранять .md файл статьи
-                media_export_path=entity_media_path, # Где сохранять картинки из статьи
-                media_processor=media_processor
+                    session=http_session,
+                    url=link,
+                    notes_export_path=entity_export_path,
+                    media_export_path=entity_media_path,
+                    media_processor=media_processor,
+                    cache=cache_manager.cache,
+                    entity_id=str(entity_id)
                 )
                 if article_note_path:
-                    # Используем Path.stem, чтобы получить имя файла без .md для ссылки
                     local_link = f"[[{article_note_path.stem}]]"
                     modified_content = modified_content.replace(link, local_link)
 
-            if modified_content != original_content:
-                await note_generator.write_note_content(note_path, modified_content)
-                logger.info(f"Updated note {note_path.name} with local Telegra.ph links.")
+                    if modified_content != original_content:
+                        await note_generator.write_note_content(note_path, modified_content)
+                        logger.info(f"Updated note {note_path.name} with local Telegra.ph links.")
 
         note_filename = note_path.name
         reply_to_id = getattr(first_message.reply_to, 'reply_to_msg_id', None)
