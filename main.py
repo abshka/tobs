@@ -3,12 +3,17 @@
 import asyncio
 import multiprocessing
 import sys
+import re
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import aiohttp
 from aiohttp_proxy import ProxyConnector
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
+from rich.table import Table
+from rich.console import Console
+from rich import print as rprint
 from telethon.tl.types import Message
 
 from src.cache_manager import CacheManager
@@ -41,16 +46,24 @@ async def process_message_group(
 
     first_message = messages[0]
     msg_date = getattr(first_message, 'date', 'No date')
-    logger.info(f"[{entity_id}] Processing message group ID: {first_message.id} ({len(messages)} messages) Date: {msg_date}")
+    rprint(f"[bold cyan]--- Message group {first_message.id} ({len(messages)}) from {msg_date} ---[/bold cyan]")
 
     try:
         media_paths = []
         if config.media_download:
-            media_tasks = [
-                media_processor.download_and_optimize_media(msg, entity_id, entity_media_path)
-                for msg in messages
-            ]
-            for result in await asyncio.gather(*media_tasks):
+            for msg in messages:
+                filename = None
+                if hasattr(msg, "file") and msg.file and hasattr(msg.file, "name") and msg.file.name:
+                    filename = msg.file.name
+                elif hasattr(msg, "media") and hasattr(msg.media, "document") and hasattr(msg.media.document, "attributes"):
+                    for attr in msg.media.document.attributes:
+                        if hasattr(attr, "file_name"):
+                            filename = attr.file_name
+                            break
+                if not filename:
+                    filename = f"media_from_msg_{msg.id}"
+                rprint(f"[yellow]Downloading:[/yellow] {filename}")
+                result = await media_processor.download_and_optimize_media(msg, entity_id, entity_media_path)
                 if isinstance(result, list):
                     media_paths.extend(result)
 
@@ -61,12 +74,18 @@ async def process_message_group(
             logger.error(f"[{entity_id}] Failed to create main note for message {first_message.id}")
             return None
 
+        rprint(f"[green]Writing:[/green] {note_path.name}")
+
         telegraph_links = find_telegraph_links(first_message.text)
         if telegraph_links:
-            logger.info(f"Found {len(telegraph_links)} Telegra.ph links to process in message {first_message.id}.")
+            rprint(f"[cyan]Telegra.ph links found: {len(telegraph_links)}[/cyan]")
             original_content = await note_generator.read_note_content(note_path)
             modified_content = original_content
 
+            # Mapping: telegra.ph url -> note_name
+            telegraph_mapping = {}
+
+            # First, create all local notes and fill mapping
             for link in telegraph_links:
                 article_note_path = await note_generator.create_note_from_telegraph_url(
                     session=http_session,
@@ -75,15 +94,27 @@ async def process_message_group(
                     media_export_path=entity_media_path,
                     media_processor=media_processor,
                     cache=cache_manager.cache,
-                    entity_id=str(entity_id)
+                    entity_id=str(entity_id),
+                    telegraph_mapping=telegraph_mapping
                 )
                 if article_note_path:
                     local_link = f"[[{article_note_path.stem}]]"
                     modified_content = modified_content.replace(link, local_link)
 
-                    if modified_content != original_content:
-                        await note_generator.write_note_content(note_path, modified_content)
-                        logger.info(f"Updated note {note_path.name} with local Telegra.ph links.")
+            # Second, replace all telegra.ph links in the note content with local links if available
+            import re
+            def telegraph_replacer(match):
+                url = match.group(0)
+                note_stem = telegraph_mapping.get(url)
+                if note_stem:
+                    return f"[[{note_stem}]]"
+                return url
+            for link, note_stem in telegraph_mapping.items():
+                modified_content = modified_content.replace(link, f"[[{note_stem}]]")
+
+            if modified_content != original_content:
+                await note_generator.write_note_content(note_path, modified_content)
+                rprint(f"[green]Updated note with local Telegra.ph links: {note_path.name}[/green]")
 
         note_filename = note_path.name
         reply_to_id = getattr(first_message.reply_to, 'reply_to_msg_id', None)
@@ -101,7 +132,7 @@ async def process_message_group(
                 telegram_url=telegram_url
             )
 
-        logger.info(f"[{entity_id}] Successfully processed message group {first_message.id} -> {note_filename}")
+        rprint(f"[bold green]Message group {first_message.id} processed -> {note_filename}[/bold green]")
         return first_message.id
 
     except Exception as e:
@@ -151,6 +182,8 @@ async def export_single_target(
     finally:
         await cache_manager.save_cache()
         logger.info(f"--- Finished export for target: {target.name} ---")
+
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TaskProgressColumn
 
 async def process_entity_messages(
     entity: Any, entity_id_str: str, target_name: str, entity_export_path: Path,
@@ -267,25 +300,105 @@ async def run_export(config: Config):
             logger.info(f"Using proxy for aiohttp requests: {proxy_url}")
 
         async with aiohttp.ClientSession(headers=AIOHTTP_HEADERS, connector=connector) as http_session:
-            logger.info("--- STAGE 1: EXPORTING ALL TARGETS ---")
-            for target in config.export_targets:
-                await export_single_target(
-                    target, config, telegram_manager, cache_manager,
-                    media_processor, note_generator, http_session
-                )
-            logger.info("--- STAGE 1 COMPLETE ---")
+            export_summaries = []
+            console = Console()
+            rprint("[bold cyan]***Authorization***[/bold cyan]")
 
-            logger.info("--- STAGE 2: POST-PROCESSING ---")
-            for target in config.export_targets:
-                entity_id_str = str(target.id)
-                export_root = config.get_export_path_for_entity(entity_id_str)
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                transient=True,
+                console=console
+            ) as progress:
+                # Stage 1: Parsing messages
+                parsing_task = progress.add_task("[cyan]Parsing messages...", total=1)
+                rprint("[bold cyan]***Export***[/bold cyan]")
+                for target in config.export_targets:
+                    await export_single_target(
+                        target, config, telegram_manager, cache_manager,
+                        media_processor, note_generator, http_session
+                    )
+                    entity_id_str = str(target.id)
+                    export_root = config.get_export_path_for_entity(entity_id_str)
+                    summary = {
+                        "name": target.name,
+                        "id": entity_id_str,
+                        "export_path": str(export_root),
+                    }
+                    export_summaries.append(summary)
+                progress.update(parsing_task, advance=1)
+                progress.stop_task(parsing_task)
+                rprint("[bold cyan]--- Parsing complete ---[/bold cyan]")
 
-                logger.info(f"Post-processing replies for '{target.name}'...")
-                await reply_linker.link_replies(entity_id_str, export_root)
+                # Stage 2: Downloading posts/media
+                download_task = progress.add_task("[magenta]Downloading posts/media...", total=1)
+                rprint("[bold magenta]***Downloading posts/media***[/bold magenta]")
+                progress.update(download_task, advance=1)
+                progress.stop_task(download_task)
 
-                logger.info(f"Post-processing internal links for '{target.name}'...")
-                await note_generator.postprocess_all_notes(export_root, entity_id_str, cache_manager.cache)
-            logger.info("--- STAGE 2 COMPLETE ---")
+                # Stage 3: Post-processing
+                postprocess_task = progress.add_task("[green]Post-processing...", total=1)
+                rprint("[bold green]***Post-processing***[/bold green]")
+                for target in config.export_targets:
+                    entity_id_str = str(target.id)
+                    export_root = config.get_export_path_for_entity(entity_id_str)
+
+                    rprint(f"[green]Post-processing replies for '{target.name}'...[/green]")
+                    await reply_linker.link_replies(entity_id_str, export_root)
+
+                    rprint(f"[green]Post-processing internal links for '{target.name}'...[/green]")
+                    await note_generator.postprocess_all_notes(export_root, entity_id_str, cache_manager.cache)
+                rprint("[bold green]--- Post-processing complete ---[/bold green]")
+                progress.update(postprocess_task, advance=1)
+                progress.stop_task(postprocess_task)
+
+                # --- Second pass: Replace all telegra.ph links in all notes with local links ---
+                from pathlib import Path
+                import re
+                rprint("[bold cyan]Second pass: replacing telegra.ph links in all notes...[/bold cyan]")
+                # Collect mapping from all telegra.ph notes
+                telegraph_mapping = {}
+                for target in config.export_targets:
+                    entity_id_str = str(target.id)
+                    export_root = config.get_export_path_for_entity(entity_id_str)
+                    telegraph_dir = Path(export_root) / 'telegra_ph'
+                    if telegraph_dir.exists():
+                        for note_file in telegraph_dir.glob("*.md"):
+                            telegraph_url = None
+                            # Try to extract original url from the note
+                            with open(note_file, "r", encoding="utf-8") as f:
+                                content = f.read()
+                                match = re.search(r"\*Source: (https?://telegra\.ph/[^\*]+)\*", content)
+                                if match:
+                                    telegraph_url = match.group(1).strip()
+                            if telegraph_url:
+                                telegraph_mapping[telegraph_url] = note_file.stem
+                # Replace in all notes
+                for target in config.export_targets:
+                    entity_id_str = str(target.id)
+                    export_root = config.get_export_path_for_entity(entity_id_str)
+                    for note_file in Path(export_root).rglob("*.md"):
+                        with open(note_file, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        modified = content
+                        for url, note_stem in telegraph_mapping.items():
+                            # Replace both markdown and bare links
+                            modified = re.sub(rf"\[([^\]]+)\]\({re.escape(url)}\)", rf"[[{note_stem}|\1]]", modified)
+                            modified = modified.replace(url, f"[[{note_stem}]]")
+                        if modified != content:
+                            with open(note_file, "w", encoding="utf-8") as f:
+                                f.write(modified)
+                rprint("[bold green]Second pass complete: all telegra.ph links replaced with local notes where possible.[/bold green]")
+
+            # Show summary table
+            table = Table(title="Export Summary", show_lines=True)
+            table.add_column("Name", style="cyan", no_wrap=True)
+            table.add_column("ID", style="magenta")
+            table.add_column("Export Path", style="green")
+            for summary in export_summaries:
+                table.add_row(summary["name"], summary["id"], summary["export_path"])
+            console.print(table)
 
     except (ConfigError, TelegramConnectionError) as e:
         logger.critical(f"A critical error occurred: {e}")

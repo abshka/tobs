@@ -19,11 +19,11 @@ R = TypeVar('R')
 
 def setup_logging(verbose: bool):
     """Configures logging using Loguru."""
-    log_level = "DEBUG" if verbose else "INFO"
+    # Console: only WARNING and above
     logger.remove()
     logger.add(
         sys.stderr,
-        level=log_level,
+        level="WARNING",
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}:{function}:{line}</cyan> - <level>{message}</level>",
         colorize=True
     )
@@ -31,7 +31,7 @@ def setup_logging(verbose: bool):
         log_file_path = Path("telegram_exporter.log").resolve()
         logger.add(
             log_file_path,
-            level="DEBUG",
+            level="DEBUG" if verbose else "INFO",
             rotation="10 MB",
             retention="7 days",
             compression="zip",
@@ -40,7 +40,7 @@ def setup_logging(verbose: bool):
             backtrace=True,
             diagnose=verbose
         )
-        logger.info(f"Logging initialized. Console: {log_level}, File: {log_file_path}")
+        logger.info(f"Logging initialized. Console: WARNING+, File: {log_file_path}")
     except Exception as e:
         logger.error(f"Failed to configure file logging: {e}")
 
@@ -108,11 +108,13 @@ async def fetch_and_parse_telegraph_to_markdown(
     media_path: Path,
     media_processor,
     cache: Optional[dict] = None,
-    entity_id: Optional[str] = None
+    entity_id: Optional[str] = None,
+    telegraph_mapping: Optional[dict] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    Асинхронно скачивает и парсит статью Telegra.ph в Markdown,
-    скачивая изображения и заменяя внутренние ссылки на посты.
+    Asynchronously downloads and parses a Telegra.ph article to Markdown,
+    downloads images, replaces Telegram post links and telegra.ph links with local notes if available.
+    Also tries to extract the publication date from the article.
     """
     try:
         logger.debug(f"Fetching Telegra.ph article: {url}")
@@ -125,6 +127,23 @@ async def fetch_and_parse_telegraph_to_markdown(
         if not article_content: return None
 
         title = (article_content.find('h1').get_text(strip=True) if article_content.find('h1') else "Untitled Article")
+
+        # Try to extract publication date from <time> or from the page
+        pub_date = None
+        # Try <time> tag
+        time_tag = soup.find('time')
+        if time_tag and time_tag.has_attr('datetime'):
+            pub_date = time_tag['datetime'][:10]
+        elif time_tag:
+            pub_date = time_tag.get_text(strip=True)
+        # Try to extract from meta or text if not found
+        if not pub_date:
+            # Sometimes date is in the subtitle or meta
+            subtitle = soup.find('div', class_='subtitle')
+            if subtitle:
+                m = re.search(r'(\d{4}-\d{2}-\d{2})', subtitle.get_text())
+                if m:
+                    pub_date = m.group(1)
 
         img_urls = []
         for img in article_content.find_all('img'):
@@ -166,40 +185,51 @@ async def fetch_and_parse_telegraph_to_markdown(
 
         raw_markdown = "\n\n".join(markdown_lines)
 
-        # --- НОВЫЙ БЛОК: Замена ссылок на посты Telegram внутри статьи ---
-        if not (cache and entity_id):
-            return {"title": title, "content": raw_markdown}
+        # --- Replace Telegram post links and telegra.ph links with local notes if available ---
+        content = raw_markdown
 
-        processed_messages = cache.get("entities", {}).get(entity_id, {}).get("processed_messages", {})
-        if not processed_messages:
-            return {"title": title, "content": raw_markdown}
+        # Replace Telegram post links as before
+        if cache and entity_id:
+            processed_messages = cache.get("entities", {}).get(entity_id, {}).get("processed_messages", {})
+            url_to_data = {data["telegram_url"]: data for data in processed_messages.values() if data.get("telegram_url")}
+            msg_id_to_data = {msg_id: data for msg_id, data in processed_messages.items()}
 
-        url_to_data = {data["telegram_url"]: data for data in processed_messages.values() if data.get("telegram_url")}
-        msg_id_to_data = {msg_id: data for msg_id, data in processed_messages.items()}
+            def tg_replacer(match: re.Match) -> str:
+                link_text, tg_url = match.groups()
+                tg_url = tg_url.rstrip('/')
 
-        def replacer(match: re.Match) -> str:
-            link_text, url = match.groups()
-            url = url.rstrip('/')
+                data = url_to_data.get(tg_url)
+                if not data:
+                    if msg_id_match := re.search(r"/(\d+)$", tg_url):
+                        data = msg_id_to_data.get(msg_id_match.group(1))
 
-            data = url_to_data.get(url)
-            if not data:
-                if msg_id_match := re.search(r"/(\d+)$", url):
-                    data = msg_id_to_data.get(msg_id_match.group(1))
+                if data and (fname := data.get("filename")):
+                    title_text = data.get("title", "").replace("\n", " ").strip()
+                    display = title_text if title_text else link_text
+                    logger.debug(f"Found link in Telegra.ph '{tg_url}' -> {fname}")
+                    return f"[[{Path(fname).stem}|{display}]]"
 
-            if data and (fname := data.get("filename")):
-                title_text = data.get("title", "").replace("\n", " ").strip()
-                display = title_text if title_text else link_text
-                logger.debug(f"Found link in Telegra.ph '{url}' -> {fname}")
-                return f"[[{Path(fname).stem}|{display}]]"
+                logger.warning(f"[Telegra.ph Parser] No local file found for link: '{tg_url}'")
+                return match.group(0)
 
-            logger.warning(f"[Telegra.ph Parser] No local file found for link: '{url}'")
-            return match.group(0)
+            tg_pattern = re.compile(r"\[([^\]]+)\]\((https?://t\.me/[^\)]+)\)")
+            content = tg_pattern.sub(tg_replacer, content)
 
-        pattern = re.compile(r"\[([^\]]+)\]\((https?://t\.me/[^\)]+)\)")
-        final_markdown = pattern.sub(replacer, raw_markdown)
-        # --- КОНЕЦ НОВОГО БЛОКА ---
+        # Replace telegra.ph links with local notes if mapping is provided
+        if telegraph_mapping:
+            def telegraph_replacer(match: re.Match) -> str:
+                link_text, telegraph_url = match.groups()
+                telegraph_url = telegraph_url.rstrip('/')
+                note_stem = telegraph_mapping.get(telegraph_url)
+                if note_stem:
+                    logger.debug(f"Replacing telegra.ph link '{telegraph_url}' with local note [[{note_stem}]]")
+                    return f"[[{note_stem}|{link_text}]]"
+                return match.group(0)
 
-        return {"title": title, "content": final_markdown}
+            telegraph_pattern = re.compile(r"\[([^\]]+)\]\((https?://telegra\.ph/[^\)]+)\)")
+            content = telegraph_pattern.sub(telegraph_replacer, content)
+
+        return {"title": title, "content": content, "pub_date": pub_date}
 
     except Exception as e:
         logger.error(f"Error parsing Telegra.ph article {url}: {e}", exc_info=True)

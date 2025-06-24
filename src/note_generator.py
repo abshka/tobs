@@ -55,13 +55,16 @@ class NoteGenerator:
             media_export_path: Path,
             media_processor: Any,
             cache: dict,
-            entity_id: str
+            entity_id: str,
+            telegraph_mapping: dict = None
         ) -> Optional[Path]:
             """
-            Создает .md файл из статьи Telegra.ph, включая изображения.
+            Creates a .md file from a Telegra.ph article, including images.
+            Also updates telegraph_mapping with url -> note_name.
+            The note filename uses the publication date from the article if available.
             """
             article_data = await fetch_and_parse_telegraph_to_markdown(
-                session, url, media_export_path, media_processor, cache, entity_id
+                session, url, media_export_path, media_processor, cache, entity_id, telegraph_mapping
             )
             if not article_data:
                 return None
@@ -69,15 +72,25 @@ class NoteGenerator:
             title = article_data['title']
             content = article_data['content']
 
+            # Try to extract publication date from article_data (if present)
+            pub_date = article_data.get('pub_date')
+            if pub_date:
+                date_str = pub_date
+            else:
+                date_str = datetime.now().strftime('%Y-%m-%d')
+
             sanitized_title = await run_in_thread_pool(sanitize_filename, title, 80)
-            date_str = datetime.now().strftime('%Y-%m-%d')
             filename = f"{date_str}.{sanitized_title}.md"
 
             telegraph_dir = notes_export_path / 'telegra_ph'
             await run_in_thread_pool(ensure_dir_exists, telegraph_dir)
             note_path = telegraph_dir / filename
 
-            final_content = f"# {title}\n\n{content}\n\n---\n*Источник: {url}*"
+            # Update mapping for this url
+            if telegraph_mapping is not None:
+                telegraph_mapping[url] = note_path.stem
+
+            final_content = f"# {title}\n\n{content}\n\n---\n*Source: {url}*"
 
             return await self._write_note_file(note_path, final_content)
 
@@ -92,7 +105,9 @@ class NoteGenerator:
 
     async def write_note_content(self, note_path: Path, content: str):
         """Перезаписывает содержимое файла заметки."""
+        from rich import print as rprint
         await self._write_note_file(note_path, content)
+        rprint(f"[green]Updated:[/green] {note_path.name}")
 
     async def _prepare_note_path(self, message: Message, entity_id: Union[str, int],
                                  entity_export_path: Path) -> Optional[Path]:
@@ -145,9 +160,10 @@ class NoteGenerator:
 
         async with self.io_semaphore, self.file_locks[note_path]:
             try:
+                from rich import print as rprint
                 async with aiofiles.open(note_path, 'w', encoding='utf-8') as f:
                     await f.write(content.strip() + '\n')
-                logger.info(f"Note file written: {note_path}")
+                rprint(f"[green]Writing:[/green] {note_path.name}")
                 return note_path
             except Exception as e:
                 logger.error(f"Failed to write note file {note_path}: {e}")
@@ -158,7 +174,8 @@ class NoteGenerator:
         Второй проход по всем .md-файлам для замены markdown-ссылок t.me
         на внутренние ссылки Obsidian `[[...]]` с использованием полного кэша.
         """
-        logger.info(f"[Postprocessing] Starting for all notes in {export_root} for entity '{entity_id}'")
+        from rich import print as rprint
+        rprint("\n[bold cyan]***Post-processing***[/bold cyan]")
 
         processed_messages = cache.get("entities", {}).get(entity_id, {}).get("processed_messages", {})
         if not processed_messages:
@@ -199,7 +216,6 @@ class NoteGenerator:
                         await f.seek(0)
                         await f.truncate()
                         await f.write(new_content)
-                        logger.info(f"[Postprocessing] Updated links in: {md_file.name}")
             except Exception as e:
                 logger.error(f"[Postprocessing] Failed to process file {md_file}: {e}")
-        logger.info(f"[Postprocessing] Finished for entity '{entity_id}'.")
+        # End of post-processing for entity

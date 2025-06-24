@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from rich import print as rprint
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 from telethon import TelegramClient, types
@@ -52,10 +53,13 @@ class TelegramManager:
 
     async def connect(self) -> bool:
         """Connect and authenticate with Telegram."""
+        from rich import print as rprint
         if self.client_connected:
             logger.info("Client already connected.")
+            rprint("[bold green]***Client already connected***[/bold green]")
             return True
 
+        rprint("[bold cyan]***Authorization***[/bold cyan]")
         logger.info("Connecting to Telegram...")
         if not self.config.api_id or not self.config.api_hash:
             raise TelegramConnectionError("API ID and API Hash must be provided in the configuration.")
@@ -77,6 +81,7 @@ class TelegramManager:
             username = getattr(me, 'username', None) or getattr(me, 'first_name', 'Unknown User')
             logger.info(f"Connected as: {username} (ID: {getattr(me, 'id', 'unknown')})")
             self.client_connected = True
+            rprint(f"[bold green]Authorization successful![/bold green] [dim]({username})[/dim]")
             return True
 
         except (AuthKeyError, UserDeactivatedBanError) as e:
@@ -93,6 +98,8 @@ class TelegramManager:
 
     async def _authenticate(self) -> bool:
         """Handle Telegram authentication flow."""
+        from rich import print as rprint
+        rprint("[bold cyan]***Authorization***[/bold cyan]")
         logger.info("Authorization required.")
         if not self.config.phone_number:
             logger.critical("Phone number not provided in config/env and session is invalid.")
@@ -101,17 +108,21 @@ class TelegramManager:
         try:
             # Request verification code
             await self.client.send_code_request(self.config.phone_number)
-            code = input("Enter the code you received from Telegram: ")
+            rprint("[bold yellow]Enter the code you received in Telegram:[/bold yellow]", end=" ")
+            code = input()
             await self.client.sign_in(self.config.phone_number, code)
             logger.info("Signed in successfully using code.")
+            rprint("[bold green]Signed in successfully using code![/bold green]")
             return True
         except SessionPasswordNeededError:
             # Handle 2FA
             logger.info("Two-step verification (2FA) enabled.")
-            password = input("Enter your 2FA password: ")
+            rprint("[bold yellow]Enter your 2FA password:[/bold yellow]", end=" ")
+            password = input()
             try:
                 await self.client.sign_in(password=password)
                 logger.info("Signed in successfully using 2FA password.")
+                rprint("[bold green]Signed in successfully using 2FA password![/bold green]")
                 return True
             except Exception as pwd_err:
                 logger.critical(f"Failed to sign in with 2FA password: {pwd_err}")
@@ -128,11 +139,14 @@ class TelegramManager:
             return True
 
         try:
+            from rich import print as rprint
             logger.info("Disconnecting Telegram client...")
+            rprint("[bold cyan]Disconnecting Telegram client...[/bold cyan]")
             if self.client.is_connected():
                 await self.client.disconnect()
             self.client_connected = False
             logger.info("Telegram client disconnected.")
+            rprint("[bold green]Telegram client disconnected.[/bold green]")
             return True
         except Exception as e:
             logger.error(f"Error during client disconnection: {e}")
@@ -193,6 +207,31 @@ class TelegramManager:
                 numeric_id = int(entity_id_str)
                 return await self.client.get_entity(numeric_id)
             raise
+
+    async def count_messages(
+        self,
+        entity: Any,
+        min_id: Optional[int] = None
+    ) -> int:
+        """
+        Count total messages in an entity (chat/channel) for progress bar.
+        """
+        try:
+            total = 0
+            safe_min_id = min_id or 0
+            async for _ in self.client.iter_messages(
+                entity=entity,
+                limit=None,
+                offset_id=0,
+                reverse=True,
+                min_id=safe_min_id,
+                wait_time=self.config.request_delay
+            ):
+                total += 1
+            return total
+        except Exception as e:
+            logger.error(f"Failed to count messages: {e}")
+            return 0
 
     async def fetch_messages(
         self,
@@ -270,18 +309,19 @@ class TelegramManager:
         # Show welcome message
         me = await self.client.get_me()
         username = getattr(me, 'username', getattr(me, 'first_name', 'User'))
-        print(f"\n--- Welcome, {username}! ---")
-        print("Select chats or channels to export.")
+        rprint(f"\n[bold green]--- Welcome, {username}! ---[/bold green]")
+        rprint("[bold]Select chats or channels to export.[/bold]")
 
         # Interactive menu loop
         while True:
-            print("\nOptions:")
-            print(" 1. List recent dialogs (Chats, Channels, Users)")
-            print(" 2. Enter ID/Username/Link manually")
-            print(" 3. Finish selection and start export")
-            print(" 4. Exit")
+            rprint("\n[bold yellow]Options:[/bold yellow]")
+            rprint(" [cyan]1.[/cyan] List recent dialogs (Chats, Channels, Users)")
+            rprint(" [cyan]2.[/cyan] Enter ID/Username/Link manually")
+            rprint(" [cyan]3.[/cyan] Finish selection and start export")
+            rprint(" [cyan]4.[/cyan] Exit")
 
-            choice = input("Choose an option (1-4): ")
+            rprint("[bold cyan]Choose an option (1-4):[/bold cyan]", end=" ")
+            choice = input()
 
             if choice == '1':
                 await self._list_and_select_dialogs()
@@ -289,36 +329,36 @@ class TelegramManager:
                 await self._select_dialog_manually()
             elif choice == '3':
                 if not self.config.export_targets:
-                    print("\nNo targets selected. Please select at least one target.")
+                    rprint("\n[bold red]No targets selected. Please select at least one target.[/bold red]")
                 else:
-                    print("\nFinished selection. Starting export process...")
+                    rprint("\n[bold green]Finished selection. Starting export process...[/bold green]")
                     break
             elif choice == '4':
-                print("Exiting.")
+                rprint("[bold yellow]Exiting.[/bold yellow]")
                 sys.exit(0)
             else:
-                print("Invalid choice. Please enter a number between 1 and 4.")
+                rprint("[bold red]Invalid choice. Please enter a number between 1 and 4.[/bold red]")
 
         return True
 
     async def _list_and_select_dialogs(self) -> bool:
         """List recent dialogs and let user select which to export."""
-        print("\nFetching recent dialogs...")
+        rprint("\n[bold]Fetching recent dialogs...[/bold]")
         try:
             # Get recent dialogs
             dialogs = await self.client.get_dialogs(limit=20)
             if not dialogs:
-                print("No dialogs found.")
+                rprint("[bold yellow]No dialogs found.[/bold yellow]")
                 return False
 
             # Display dialogs
-            print("Recent Dialogs:")
+            rprint("[bold underline]Recent Dialogs:[/bold underline]")
             dialog_map = {}
             for i, dialog in enumerate(dialogs):
                 entity = dialog.entity
                 entity_id = getattr(entity, 'id', 'N/A')
                 entity_type = self._get_entity_type_name(entity)
-                print(f" {i+1}. {dialog.name} (Type: {entity_type}, ID: {entity_id})")
+                rprint(f" [cyan]{i+1}.[/cyan] {dialog.name} (Type: {entity_type}, ID: {entity_id})")
                 dialog_map[i+1] = entity
 
             # Handle selection
@@ -327,7 +367,7 @@ class TelegramManager:
 
         except Exception as e:
             logger.error(f"Failed to list dialogs: {e}", exc_info=self.config.verbose)
-            print(f"Error fetching dialogs: {e}")
+            rprint(f"[bold red]Error fetching dialogs: {e}[/bold red]")
             return False
 
     def _get_entity_type_name(self, entity) -> str:
@@ -344,9 +384,8 @@ class TelegramManager:
     async def _process_dialog_selection(self, dialog_map: Dict[int, Any]) -> bool:
         """Process user selection of dialogs."""
         while True:
-            selection = input(
-                "Enter numbers to add (e.g., 1, 3, 5), or 'c' to cancel: "
-            )
+            rprint("[bold cyan]Enter numbers to add (e.g., 1, 3, 5), or 'c' to cancel:[/bold cyan]", end=" ")
+            selection = input()
 
             if selection.lower() == 'c':
                 break
@@ -364,16 +403,16 @@ class TelegramManager:
                         entity = dialog_map[index]
                         target = self._create_export_target_from_entity(entity)
                         self.config.add_export_target(target)
-                        print(f"Added: {target.name or target.id}")
+                        rprint(f"[bold green]Added: {target.name or target.id}[/bold green]")
                         added_count += 1
                     else:
-                        print(f"Invalid selection: {index}")
+                        rprint(f"[bold red]Invalid selection: {index}[/bold red]")
 
                 if added_count > 0:
                     break
 
             except ValueError:
-                print("Invalid input. Please enter numbers separated by commas.")
+                rprint("[bold red]Invalid input. Please enter numbers separated by commas.[/bold red]")
 
         return True
 
@@ -403,7 +442,8 @@ class TelegramManager:
         """Allow manual entry of chat ID, username, or link."""
         while True:
             # Get input
-            identifier = input("Enter Chat/Channel ID, @username, or t.me/ link (or 'c' to cancel): ")
+            rprint("[bold cyan]Enter Chat/Channel ID, @username, or t.me/ link (or 'c' to cancel):[/bold cyan]", end=" ")
+            identifier = input()
 
             if identifier.lower() == 'c':
                 break
@@ -412,22 +452,23 @@ class TelegramManager:
                 continue
 
             # Try to resolve entity
-            print(f"Resolving '{identifier}'...")
+            rprint(f"[bold]Resolving '{identifier}'...[/bold]")
             entity = await self.resolve_entity(identifier)
 
             if entity:
                 # Create and show target
                 target = self._create_export_target_from_entity(entity)
-                print(f"Resolved: {target.name} (Type: {target.type}, ID: {target.id})")
+                rprint(f"[bold green]Resolved: {target.name} (Type: {target.type}, ID: {target.id})[/bold green]")
 
                 # Confirm addition
-                confirm = input("Add this target? (y/n): ").strip().lower()
+                rprint("[bold cyan]Add this target? (y/n):[/bold cyan]", end=" ")
+                confirm = input().strip().lower()
                 if confirm == 'y':
                     self.config.add_export_target(target)
-                    print(f"Added: {target.name or target.id}")
+                    rprint(f"[bold green]Added: {target.name or target.id}[/bold green]")
                     break
             else:
-                print(f"Could not resolve or access '{identifier}'. Check input and permissions.")
+                rprint(f"[bold red]Could not resolve or access '{identifier}'. Check input and permissions.[/bold red]")
 
         return True
 

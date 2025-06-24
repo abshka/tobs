@@ -20,6 +20,7 @@ dependencies = [
   "python-dotenv==1.1.0",
   "redis==5.0.1",
   "requests>=2.32.4",
+  "rich>=14.0.0",
   "rsa==4.9.1",
   "telethon==1.39.0",
 ]

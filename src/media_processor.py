@@ -41,7 +41,7 @@ class MediaProcessor:
         logger.info(f"Media Processor initialized. Concurrent downloads: {config.concurrent_downloads}")
 
     async def download_and_optimize_media(
-            self, message: Message, entity_id: Union[str, int], entity_media_path: Path
+        self, message: Message, entity_id: Union[str, int], entity_media_path: Path
     ) -> List[Path]:
         if not self.config.media_download:
             return []
@@ -65,7 +65,29 @@ class MediaProcessor:
             for media_type, media_obj in media_items
         ]
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Use rich.progress to display download progress (implementation can be added here if needed)
+        results = await asyncio.gather(*tasks)
+        return [r for r in results if r]
+
+        with progress:
+            tasks = []
+            for media_type, media_obj in media_items:
+                media_id = getattr(media_obj, 'id', 'unknown')
+                filename = self._get_filename(media_obj, entity_id_str, media_type)
+
+                task = progress.add_task(
+                    "download",
+                    total=getattr(media_obj, 'file_size', None),
+                    filename=filename,
+                    visible=True # Make progress bar visible
+                )
+                tasks.append(asyncio.create_task(
+                    self._process_single_item(
+                        message.id, entity_id_str, media_type, media_obj, entity_media_path, task
+                    )
+                ))
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
         final_paths = []
         for i, result in enumerate(results):
@@ -161,7 +183,8 @@ class MediaProcessor:
                     await self._cleanup_file_async(raw_download_path)
                 async with self._cache_lock:
                     self.processed_cache[final_path] = True
-                logger.info(f"Finished processing media: {final_path}")
+                from rich import print as rprint
+                rprint(f"[green]Writing:[/green] {final_path.name}")
                 return final_path
             else:
                 logger.error(f"[{entity_id_str}] Media processing failed for msg {message_id}, type {media_type}")
@@ -176,7 +199,8 @@ class MediaProcessor:
     ) -> bool:
         try:
             async with self.download_semaphore:
-                logger.info(f"[{entity_id_str}] Downloading {media_type} for msg {message_id} -> {raw_download_path.name}...")
+                from rich import print as rprint
+                rprint(f"[yellow]Downloading:[/yellow] {raw_download_path.name}")
                 await run_in_thread_pool(ensure_dir_exists, raw_download_path.parent)
                 download_result = await self.client.download_media(media_obj, file=str(raw_download_path))
                 return download_result is not None and await run_in_thread_pool(raw_download_path.exists)
