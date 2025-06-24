@@ -57,15 +57,18 @@ class TelegramManager:
             return True
 
         logger.info("Connecting to Telegram...")
+        if not self.config.api_id or not self.config.api_hash:
+            raise TelegramConnectionError("API ID and API Hash must be provided in the configuration.")
+
         try:
             await self.client.connect()
 
             # Handle authentication if needed
-            if not self.client.is_user_authorized():
+            if not await self.client.is_user_authorized():
                 await self._authenticate()
 
             # Verify authentication was successful
-            if not self.client.is_user_authorized():
+            if not await self.client.is_user_authorized():
                 logger.critical("Authorization failed even after sign-in attempt.")
                 raise TelegramConnectionError("Authorization failed.")
 
