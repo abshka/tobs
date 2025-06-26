@@ -1,34 +1,40 @@
 # main.py
 
+"""
+Main entry point for Telegram-to-Obsidian export.
+Handles configuration, interactive menu, export stages, and graceful shutdown.
+"""
+
 import asyncio
 import multiprocessing
+import signal
 import sys
-import re
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import aiohttp
 from aiohttp_proxy import ProxyConnector
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
-from rich.table import Table
-from rich.console import Console
 from rich import print as rprint
 from telethon.tl.types import Message
 
 from src.cache_manager import CacheManager
 from src.config import Config, ExportTarget, load_config
 from src.exceptions import ConfigError, ExporterError, TelegramConnectionError
-
 from src.media_processor import AIOHTTP_HEADERS, MediaProcessor
 from src.note_generator import NoteGenerator
 from src.reply_linker import ReplyLinker
 from src.telegram_client import TelegramManager
 from src.utils import find_telegraph_links, logger, setup_logging
 
-
 thread_executor: Optional[ThreadPoolExecutor] = None
 process_executor: Optional[ProcessPoolExecutor] = None
+
+def handle_sigint(signum, frame):
+    rprint("\n[bold yellow]Received interrupt signal. Cleaning up and exiting...[/bold yellow]")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, handle_sigint)
 
 async def process_message_group(
     messages: List[Message],
@@ -46,7 +52,7 @@ async def process_message_group(
 
     first_message = messages[0]
     msg_date = getattr(first_message, 'date', 'No date')
-    rprint(f"[bold cyan]--- Message group {first_message.id} ({len(messages)}) from {msg_date} ---[/bold cyan]")
+    logger.info(f"Message group {first_message.id} ({len(messages)}) from {msg_date}")
 
     try:
         media_paths = []
@@ -62,7 +68,7 @@ async def process_message_group(
                             break
                 if not filename:
                     filename = f"media_from_msg_{msg.id}"
-                rprint(f"[yellow]Downloading:[/yellow] {filename}")
+                logger.info(f"[{filename}] Downloading")
                 result = await media_processor.download_and_optimize_media(msg, entity_id, entity_media_path)
                 if isinstance(result, list):
                     media_paths.extend(result)
@@ -74,11 +80,11 @@ async def process_message_group(
             logger.error(f"[{entity_id}] Failed to create main note for message {first_message.id}")
             return None
 
-        rprint(f"[green]Writing:[/green] {note_path.name}")
+        rprint(f"[green]Writing: {note_path.name}[/green]")
 
         telegraph_links = find_telegraph_links(first_message.text)
         if telegraph_links:
-            rprint(f"[cyan]Telegra.ph links found: {len(telegraph_links)}[/cyan]")
+            logger.info(f"Telegra.ph links found: {len(telegraph_links)}")
             original_content = await note_generator.read_note_content(note_path)
             modified_content = original_content
 
@@ -102,7 +108,6 @@ async def process_message_group(
                     modified_content = modified_content.replace(link, local_link)
 
             # Second, replace all telegra.ph links in the note content with local links if available
-            import re
             def telegraph_replacer(match):
                 url = match.group(0)
                 note_stem = telegraph_mapping.get(url)
@@ -114,7 +119,7 @@ async def process_message_group(
 
             if modified_content != original_content:
                 await note_generator.write_note_content(note_path, modified_content)
-                rprint(f"[green]Updated note with local Telegra.ph links: {note_path.name}[/green]")
+                logger.info(f"Updated note with local Telegra.ph links: {note_path.name}")
 
         note_filename = note_path.name
         reply_to_id = getattr(first_message.reply_to, 'reply_to_msg_id', None)
@@ -132,11 +137,11 @@ async def process_message_group(
                 telegram_url=telegram_url
             )
 
-        rprint(f"[bold green]Message group {first_message.id} processed -> {note_filename}[/bold green]")
+        logger.info(f"Message group {first_message.id} processed -> {note_filename}")
         return first_message.id
 
     except Exception as e:
-        logger.error(f"[{entity_id}] Critical failure in process_message_group for msg {first_message.id}: {e}", exc_info=config.verbose)
+        logger.error(f"[{entity_id}] Critical failure in process_message_group for msg {first_message.id}: {e}", exc_info=(config.log_level == 'DEBUG'))
         return None
 
 async def export_single_target(
@@ -183,7 +188,6 @@ async def export_single_target(
         await cache_manager.save_cache()
         logger.info(f"--- Finished export for target: {target.name} ---")
 
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TaskProgressColumn
 
 async def process_entity_messages(
     entity: Any, entity_id_str: str, target_name: str, entity_export_path: Path,
@@ -242,7 +246,6 @@ async def process_entity_messages(
                         await _process_group(gid)
                 grouped_messages[message.id] = [message]
                 await _process_group(message.id)
-
             last_message_time = current_time
 
             if processed_count % config.cache_save_interval == 0:
@@ -258,7 +261,7 @@ async def process_entity_messages(
         logger.info(f"[{target_name}] Processing complete. {successful_count} notes created from {processed_count} messages.")
 
     except Exception as e:
-        logger.error(f"[{target_name}] Error during message processing loop: {e}", exc_info=config.verbose)
+        logger.error(f"[{target_name}] Error during message processing loop: {e}", exc_info=(config.log_level == 'DEBUG'))
 
 async def run_export(config: Config):
     global thread_executor, process_executor
@@ -284,6 +287,7 @@ async def run_export(config: Config):
         reply_linker = ReplyLinker(config, cache_manager)
 
         if config.interactive_mode:
+            await interactive_config_update(config)
             await telegram_manager.run_interactive_selection()
             if not config.export_targets:
                 logger.warning("No targets selected. Exiting.")
@@ -301,104 +305,85 @@ async def run_export(config: Config):
 
         async with aiohttp.ClientSession(headers=AIOHTTP_HEADERS, connector=connector) as http_session:
             export_summaries = []
-            console = Console()
-            rprint("[bold cyan]***Authorization***[/bold cyan]")
+            logger.info("***Authorization***")
 
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                transient=True,
-                console=console
-            ) as progress:
-                # Stage 1: Parsing messages
-                parsing_task = progress.add_task("[cyan]Parsing messages...", total=1)
-                rprint("[bold cyan]***Export***[/bold cyan]")
-                for target in config.export_targets:
-                    await export_single_target(
-                        target, config, telegram_manager, cache_manager,
-                        media_processor, note_generator, http_session
-                    )
-                    entity_id_str = str(target.id)
-                    export_root = config.get_export_path_for_entity(entity_id_str)
-                    summary = {
-                        "name": target.name,
-                        "id": entity_id_str,
-                        "export_path": str(export_root),
-                    }
-                    export_summaries.append(summary)
-                progress.update(parsing_task, advance=1)
-                progress.stop_task(parsing_task)
-                rprint("[bold cyan]--- Parsing complete ---[/bold cyan]")
+            # Stage 1: Parsing messages
+            rprint("[cyan]***Export***[/cyan]")
+            for target in config.export_targets:
+                logger.info(f"Parsing messages for: {target.name}")
+                await export_single_target(
+                    target, config, telegram_manager, cache_manager,
+                    media_processor, note_generator, http_session
+                )
+                entity_id_str = str(target.id)
+                export_root = config.get_export_path_for_entity(entity_id_str)
+                summary = {
+                    "name": target.name,
+                    "id": entity_id_str,
+                    "export_path": str(export_root),
+                }
+                export_summaries.append(summary)
+                logger.info(f"Parsing complete for: {target.name}")
 
-                # Stage 2: Downloading posts/media
-                download_task = progress.add_task("[magenta]Downloading posts/media...", total=1)
-                rprint("[bold magenta]***Downloading posts/media***[/bold magenta]")
-                progress.update(download_task, advance=1)
-                progress.stop_task(download_task)
+            # Stage 2: Downloading posts/media
+            rprint("[magenta]***Downloading posts/media***[/magenta]")
+            rprint("[magenta]Downloading posts/media complete.[/magenta]")
 
-                # Stage 3: Post-processing
-                postprocess_task = progress.add_task("[green]Post-processing...", total=1)
-                rprint("[bold green]***Post-processing***[/bold green]")
-                for target in config.export_targets:
-                    entity_id_str = str(target.id)
-                    export_root = config.get_export_path_for_entity(entity_id_str)
+            # Stage 3: Post-processing
+            rprint("[green]***Post-processing***[/green]")
+            for target in config.export_targets:
+                entity_id_str = str(target.id)
+                export_root = config.get_export_path_for_entity(entity_id_str)
 
-                    rprint(f"[green]Post-processing replies for '{target.name}'...[/green]")
-                    await reply_linker.link_replies(entity_id_str, export_root)
+                logger.info(f"Post-processing replies for '{target.name}'...")
+                await reply_linker.link_replies(entity_id_str, export_root)
 
-                    rprint(f"[green]Post-processing internal links for '{target.name}'...[/green]")
-                    await note_generator.postprocess_all_notes(export_root, entity_id_str, cache_manager.cache)
-                rprint("[bold green]--- Post-processing complete ---[/bold green]")
-                progress.update(postprocess_task, advance=1)
-                progress.stop_task(postprocess_task)
+                logger.info(f"Post-processing internal links for '{target.name}'...")
+                await note_generator.postprocess_all_notes(export_root, entity_id_str, cache_manager.cache)
+            rprint("[green]Post-processing complete.[/green]")
 
-                # --- Second pass: Replace all telegra.ph links in all notes with local links ---
-                from pathlib import Path
-                import re
-                rprint("[bold cyan]Second pass: replacing telegra.ph links in all notes...[/bold cyan]")
-                # Collect mapping from all telegra.ph notes
-                telegraph_mapping = {}
-                for target in config.export_targets:
-                    entity_id_str = str(target.id)
-                    export_root = config.get_export_path_for_entity(entity_id_str)
-                    telegraph_dir = Path(export_root) / 'telegra_ph'
-                    if telegraph_dir.exists():
-                        for note_file in telegraph_dir.glob("*.md"):
-                            telegraph_url = None
-                            # Try to extract original url from the note
-                            with open(note_file, "r", encoding="utf-8") as f:
-                                content = f.read()
-                                match = re.search(r"\*Source: (https?://telegra\.ph/[^\*]+)\*", content)
-                                if match:
-                                    telegraph_url = match.group(1).strip()
-                            if telegraph_url:
-                                telegraph_mapping[telegraph_url] = note_file.stem
-                # Replace in all notes
-                for target in config.export_targets:
-                    entity_id_str = str(target.id)
-                    export_root = config.get_export_path_for_entity(entity_id_str)
-                    for note_file in Path(export_root).rglob("*.md"):
+            # --- Second pass: Replace all telegra.ph links in all notes with local links ---
+            import re
+            from pathlib import Path
+            logger.info("Second pass: replacing telegra.ph links in all notes...")
+            # Collect mapping from all telegra.ph notes
+            telegraph_mapping = {}
+            for target in config.export_targets:
+                entity_id_str = str(target.id)
+                export_root = config.get_export_path_for_entity(entity_id_str)
+                telegraph_dir = Path(export_root) / 'telegra_ph'
+                if telegraph_dir.exists():
+                    for note_file in telegraph_dir.glob("*.md"):
+                        telegraph_url = None
+                        # Try to extract original url from the note
                         with open(note_file, "r", encoding="utf-8") as f:
                             content = f.read()
-                        modified = content
-                        for url, note_stem in telegraph_mapping.items():
-                            # Replace both markdown and bare links
-                            modified = re.sub(rf"\[([^\]]+)\]\({re.escape(url)}\)", rf"[[{note_stem}|\1]]", modified)
-                            modified = modified.replace(url, f"[[{note_stem}]]")
-                        if modified != content:
-                            with open(note_file, "w", encoding="utf-8") as f:
-                                f.write(modified)
-                rprint("[bold green]Second pass complete: all telegra.ph links replaced with local notes where possible.[/bold green]")
+                            match = re.search(r"\*Source: (https?://telegra\.ph/[^\*]+)\*", content)
+                            if match:
+                                telegraph_url = match.group(1).strip()
+                        if telegraph_url:
+                            telegraph_mapping[telegraph_url] = note_file.stem
+            # Replace in all notes
+            for target in config.export_targets:
+                entity_id_str = str(target.id)
+                export_root = config.get_export_path_for_entity(entity_id_str)
+                for note_file in Path(export_root).rglob("*.md"):
+                    with open(note_file, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    modified = content
+                    for url, note_stem in telegraph_mapping.items():
+                        # Replace both markdown and bare links
+                        modified = re.sub(rf"\[([^\]]+)\]\({re.escape(url)}\)", rf"[[{note_stem}|\1]]", modified)
+                        modified = modified.replace(url, f"[[{note_stem}]]")
+                    if modified != content:
+                        with open(note_file, "w", encoding="utf-8") as f:
+                            f.write(modified)
+            logger.info("Second pass complete: all telegra.ph links replaced with local notes where possible.")
 
             # Show summary table
-            table = Table(title="Export Summary", show_lines=True)
-            table.add_column("Name", style="cyan", no_wrap=True)
-            table.add_column("ID", style="magenta")
-            table.add_column("Export Path", style="green")
+            logger.info("Export Summary:")
             for summary in export_summaries:
-                table.add_row(summary["name"], summary["id"], summary["export_path"])
-            console.print(table)
+                logger.info(f"Name: {summary['name']} | ID: {summary['id']} | Export Path: {summary['export_path']}")
 
     except (ConfigError, TelegramConnectionError) as e:
         logger.critical(f"A critical error occurred: {e}")
@@ -413,20 +398,79 @@ async def run_export(config: Config):
             process_executor.shutdown(wait=False)
         logger.info("Export process finished.")
 
+def prompt_int(prompt, default):
+    """
+    Prompt user for integer input with a default value.
+    """
+    try:
+        rprint(f"[bold]{prompt}[/bold] [dim][{default}][/dim]", end=" ")
+        val = input().strip()
+        return int(val) if val else default
+    except Exception:
+        rprint("[red]Invalid input, using default.[/red]")
+        return default
+
+def prompt_float(prompt, default):
+    """
+    Prompt user for float input with a default value.
+    """
+    try:
+        rprint(f"[bold]{prompt}[/bold] [dim][{default}][/dim]", end=" ")
+        val = input().strip()
+        return float(val) if val else default
+    except Exception:
+        rprint("[red]Invalid input, using default.[/red]")
+        return default
+
+async def interactive_config_update(config):
+    """
+    Interactive menu for advanced config options before export.
+    """
+    while True:
+        rprint("\n[bold yellow]Advanced Config Options:[/bold yellow]")
+        rprint(" [cyan]1.[/cyan] Throttle threshold (KB/s): [green]{}[/green]".format(getattr(config, 'throttle_threshold_kbps', 50)))
+        rprint(" [cyan]2.[/cyan] Throttle pause (s): [green]{}[/green]".format(getattr(config, 'throttle_pause_s', 30)))
+        rprint(" [cyan]3.[/cyan] Max workers (threads): [green]{}[/green]".format(getattr(config, 'max_workers', 8)))
+        rprint(" [cyan]4.[/cyan] Max process workers: [green]{}[/green]".format(getattr(config, 'max_process_workers', 4)))
+        rprint(" [cyan]5.[/cyan] Concurrent downloads: [green]{}[/green]".format(getattr(config, 'concurrent_downloads', 10)))
+        rprint(" [cyan]6.[/cyan] Continue to export")
+        choice = input("Choose an option to change (1-6): ").strip()
+        if choice == "1":
+            config.throttle_threshold_kbps = prompt_int("Throttle threshold (KB/s)", getattr(config, 'throttle_threshold_kbps', 50))
+        elif choice == "2":
+            config.throttle_pause_s = prompt_int("Throttle pause (s)", getattr(config, 'throttle_pause_s', 30))
+        elif choice == "3":
+            config.max_workers = prompt_int("Max workers (threads)", getattr(config, 'max_workers', 8))
+        elif choice == "4":
+            config.max_process_workers = prompt_int("Max process workers", getattr(config, 'max_process_workers', 4))
+        elif choice == "5":
+            config.concurrent_downloads = prompt_int("Concurrent downloads", getattr(config, 'concurrent_downloads', 10))
+        elif choice == "6":
+            break
+        else:
+            rprint("[red]Invalid choice. Please select 1-6.[/red]")
+
 async def main():
+    """
+    Main async entry point for the exporter.
+    Loads config, sets up logging, and runs the export process.
+    """
     try:
         config = load_config()
-        setup_logging(config.verbose)
+        setup_logging(config.log_level)
         logger.info("Configuration loaded.")
         await run_export(config)
     except (ConfigError, ValueError) as e:
-        print(f"ERROR: Configuration failed: {e}", file=sys.stderr)
+        rprint(f"[red]ERROR: Configuration failed: {e}[/red]", file=sys.stderr)
         sys.exit(1)
+    except KeyboardInterrupt:
+        rprint("\n[bold yellow]Received interrupt signal. Cleaning up and exiting...[/bold yellow]")
+        sys.exit(0)
     except Exception as e:
         try:
             logger.critical(f"A fatal error occurred in main: {e}", exc_info=True)
         except NameError:
-            print(f"FATAL ERROR: {e}", file=sys.stderr)
+            rprint(f"[red]FATAL ERROR: {e}[/red]", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":
@@ -435,6 +479,11 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Process interrupted by user.")
+        rprint("[yellow]Process interrupted by user (KeyboardInterrupt).[/yellow]")
     except Exception as e:
         print(f"\nFATAL UNHANDLED ERROR: {e}", file=sys.stderr)
+        print("Security error while unpacking a received message: Server replied with a wrong session ID (see FAQ for details)")
+        print("If you see repeated 'wrong session ID' errors, try the following:")
+        print("- Restart the export with a fresh session.")
+        print("- Ensure only one client is connected with the same session at a time.")
+        print("- Check for updates to Telethon.")

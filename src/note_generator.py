@@ -1,3 +1,9 @@
+# src/note_generator.py
+
+"""
+NoteGenerator: Handles creation and post-processing of Markdown notes from Telegram messages.
+"""
+
 import asyncio
 import re
 from datetime import datetime
@@ -19,6 +25,9 @@ from src.utils import (
 
 
 class NoteGenerator:
+    """
+    Handles creation and post-processing of Markdown notes from Telegram messages.
+    """
     def __init__(self, config: Config):
         self.config = config
         self.file_locks: Dict[Path, asyncio.Lock] = {}
@@ -31,71 +40,70 @@ class NoteGenerator:
         entity_id: Union[str, int],
         entity_export_path: Path,
     ) -> Optional[Path]:
-        """Создает Markdown-файл для сообщения."""
+        """
+        Creates a Markdown file for a Telegram message.
+        """
         try:
             note_path = await self._prepare_note_path(message, entity_id, entity_export_path)
             if not note_path:
                 return None
 
             content = await self._generate_note_content(message, media_paths, note_path)
-
             return await self._write_note_file(note_path, content)
 
         except Exception as e:
-            logger.error(f"Failed to create note for message {getattr(message, 'id', 'unknown')} "
-                         f"in entity {entity_id}: {e}",
-                         exc_info=self.config.verbose)
+            logger.error(
+                f"Failed to create note for message {getattr(message, 'id', 'unknown')} in entity {entity_id}: {e}",
+                exc_info=True
+            )
             return None
 
     async def create_note_from_telegraph_url(
-            self,
-            session: aiohttp.ClientSession,
-            url: str,
-            notes_export_path: Path,
-            media_export_path: Path,
-            media_processor: Any,
-            cache: dict,
-            entity_id: str,
-            telegraph_mapping: dict = None
-        ) -> Optional[Path]:
-            """
-            Creates a .md file from a Telegra.ph article, including images.
-            Also updates telegraph_mapping with url -> note_name.
-            The note filename uses the publication date from the article if available.
-            """
-            article_data = await fetch_and_parse_telegraph_to_markdown(
-                session, url, media_export_path, media_processor, cache, entity_id, telegraph_mapping
-            )
-            if not article_data:
-                return None
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        notes_export_path: Path,
+        media_export_path: Path,
+        media_processor: Any,
+        cache: dict,
+        entity_id: str,
+        telegraph_mapping: dict = None
+    ) -> Optional[Path]:
+        """
+        Creates a .md file from a Telegra.ph article, including images.
+        Also updates telegraph_mapping with url -> note_name.
+        The note filename uses the publication date from the article if available.
+        """
+        article_data = await fetch_and_parse_telegraph_to_markdown(
+            session, url, media_export_path, media_processor, cache, entity_id, telegraph_mapping
+        )
+        if not article_data:
+            return None
 
-            title = article_data['title']
-            content = article_data['content']
+        title = article_data['title']
+        content = article_data['content']
 
-            # Try to extract publication date from article_data (if present)
-            pub_date = article_data.get('pub_date')
-            if pub_date:
-                date_str = pub_date
-            else:
-                date_str = datetime.now().strftime('%Y-%m-%d')
+        pub_date = article_data.get('pub_date')
+        date_str = pub_date if pub_date else datetime.now().strftime('%Y-%m-%d')
 
-            sanitized_title = await run_in_thread_pool(sanitize_filename, title, 80)
-            filename = f"{date_str}.{sanitized_title}.md"
+        sanitized_title = await run_in_thread_pool(sanitize_filename, title, 80)
+        filename = f"{date_str}.{sanitized_title}.md"
 
-            telegraph_dir = notes_export_path / 'telegra_ph'
-            await run_in_thread_pool(ensure_dir_exists, telegraph_dir)
-            note_path = telegraph_dir / filename
+        telegraph_dir = notes_export_path / 'telegra_ph'
+        await run_in_thread_pool(ensure_dir_exists, telegraph_dir)
+        note_path = telegraph_dir / filename
 
-            # Update mapping for this url
-            if telegraph_mapping is not None:
-                telegraph_mapping[url] = note_path.stem
+        if telegraph_mapping is not None:
+            telegraph_mapping[url] = note_path.stem
 
-            final_content = f"# {title}\n\n{content}\n\n---\n*Source: {url}*"
+        final_content = f"# {title}\n\n{content}\n\n---\n*Source: {url}*"
 
-            return await self._write_note_file(note_path, final_content)
+        return await self._write_note_file(note_path, final_content)
 
     async def read_note_content(self, note_path: Path) -> str:
-        """Читает содержимое файла заметки."""
+        """
+        Reads the content of a note file.
+        """
         if note_path not in self.file_locks:
             self.file_locks[note_path] = asyncio.Lock()
 
@@ -104,14 +112,17 @@ class NoteGenerator:
                 return await f.read()
 
     async def write_note_content(self, note_path: Path, content: str):
-        """Перезаписывает содержимое файла заметки."""
-        from rich import print as rprint
+        """
+        Overwrites the content of a note file.
+        """
         await self._write_note_file(note_path, content)
-        rprint(f"[green]Updated:[/green] {note_path.name}")
+        logger.info(f"Updated: {note_path.name}")
 
     async def _prepare_note_path(self, message: Message, entity_id: Union[str, int],
                                  entity_export_path: Path) -> Optional[Path]:
-        """Определяет путь для файла заметки на основе даты и заголовка."""
+        """
+        Determines the path for a note file based on date and title.
+        """
         try:
             message_text = getattr(message, 'text', '') or ""
             first_line = message_text.split('\n', 1)[0]
@@ -129,12 +140,14 @@ class NoteGenerator:
             await run_in_thread_pool(ensure_dir_exists, note_path.parent)
             return note_path
         except Exception as e:
-            logger.error(f"Failed to prepare note path for message in entity {entity_id}: {e}")
+            logger.error(f"Failed to prepare note path for message in entity {entity_id}: {e}", exc_info=True)
             return None
 
     async def _generate_note_content(self, message: Message, media_paths: List[Path],
                                      note_path: Path) -> str:
-        """Генерирует Markdown-содержимое заметки."""
+        """
+        Generates Markdown content for a note.
+        """
         message_text = getattr(message, 'text', '') or ""
         content = message_text.strip() + "\n\n" if message_text else ""
         if media_paths:
@@ -144,7 +157,9 @@ class NoteGenerator:
         return content.strip()
 
     async def _generate_media_links(self, media_paths: List[Path], note_path: Path) -> List[str]:
-        """Создает ссылки в формате Obsidian `![[filename.ext]]` для медиафайлов."""
+        """
+        Creates Obsidian-style links for media files.
+        """
         media_links = []
         for media_path in media_paths:
             if media_path and await run_in_thread_pool(media_path.exists):
@@ -154,32 +169,33 @@ class NoteGenerator:
         return media_links
 
     async def _write_note_file(self, note_path: Path, content: str) -> Optional[Path]:
-        """Записывает контент в файл с блокировкой для потокобезопасности."""
+        """
+        Writes content to a note file with locking for thread safety.
+        """
         if note_path not in self.file_locks:
             self.file_locks[note_path] = asyncio.Lock()
 
         async with self.io_semaphore, self.file_locks[note_path]:
             try:
-                from rich import print as rprint
                 async with aiofiles.open(note_path, 'w', encoding='utf-8') as f:
                     await f.write(content.strip() + '\n')
-                rprint(f"[green]Writing:[/green] {note_path.name}")
+                logger.info(f"Writing: {note_path.name}")
                 return note_path
             except Exception as e:
-                logger.error(f"Failed to write note file {note_path}: {e}")
+                logger.error(f"Failed to write note file {note_path}: {e}", exc_info=True)
                 return None
 
     async def postprocess_all_notes(self, export_root: Path, entity_id: str, cache: dict):
         """
-        Второй проход по всем .md-файлам для замены markdown-ссылок t.me
-        на внутренние ссылки Obsidian `[[...]]` с использованием полного кэша.
+        Second pass through all .md files to replace t.me markdown links
+        with internal Obsidian links using the full cache.
         """
         from rich import print as rprint
-        rprint("\n[bold cyan]***Post-processing***[/bold cyan]")
+        rprint(f"[green]*** Post-processing links for entity {entity_id} ***[/green]")
 
         processed_messages = cache.get("entities", {}).get(entity_id, {}).get("processed_messages", {})
         if not processed_messages:
-            logger.warning(f"[Postprocessing] No cache for entity '{entity_id}'. Skipping.")
+            rprint(f"[yellow]No cache for entity '{entity_id}'. Skipping post-processing.[/yellow]")
             return
 
         url_to_data = {data["telegram_url"]: data for data in processed_messages.values() if data.get("telegram_url")}
@@ -188,25 +204,23 @@ class NoteGenerator:
 
         def replacer(match: re.Match) -> str:
             link_text, url = match.groups()
-            url = url.rstrip('/')
+            clean_url = url.split('?')[0].rstrip('/')
 
-            data = url_to_data.get(url)
+            data = url_to_data.get(clean_url)
             if not data:
-                msg_id_match = re.search(r"/(\d+)$", url)
-                if msg_id_match:
+                if msg_id_match := re.search(r"/(\d+)$", clean_url):
                     data = msg_id_to_data.get(msg_id_match.group(1))
 
-            if data and data.get("filename"):
-                fname = data["filename"]
+            if data and (fname := data.get("filename")):
                 title = data.get("title", "").replace("\n", " ").strip()
                 display = title if title else link_text
                 logger.debug(f"Found link '{url}' -> {fname}")
                 return f"[[{Path(fname).stem}|{display}]]"
-
-            logger.warning(f"[Postprocessing] No local file found for link: '{url}'")
+            rprint(f"[yellow]No local file found for link: '{url}'[/yellow]")
             return match.group(0)
 
         pattern = re.compile(r"\[([^\]]+)\]\((https?://t\.me/[^\)]+)\)")
+        updated_files_count = 0
         for md_file in export_root.rglob("*.md"):
             try:
                 async with aiofiles.open(md_file, "r+", encoding="utf-8") as f:
@@ -216,6 +230,8 @@ class NoteGenerator:
                         await f.seek(0)
                         await f.truncate()
                         await f.write(new_content)
+                        updated_files_count += 1
             except Exception as e:
-                logger.error(f"[Postprocessing] Failed to process file {md_file}: {e}")
-        # End of post-processing for entity
+                logger.error(f"[Postprocessing] Failed to process file {md_file}: {e}", exc_info=True)
+
+        rprint(f"[green]Post-processing complete. Updated links in {updated_files_count} file(s).[/green]")

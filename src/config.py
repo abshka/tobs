@@ -1,5 +1,9 @@
 # src/config.py
 
+"""
+Config: Handles loading and validation of configuration from .env and environment variables.
+"""
+
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,20 +14,21 @@ from dotenv import load_dotenv
 from src.exceptions import ConfigError
 from src.utils import logger, sanitize_filename
 
-# Пути по умолчанию теперь относительные
+# Default paths
 DEFAULT_CACHE_PATH = Path("./telegram_obsidian_cache.json")
-DEFAULT_EXPORT_PATH = Path("./debug_exports")  # Новый путь по умолчанию для экспорта
+DEFAULT_EXPORT_PATH = Path("./debug_exports")
 
 @dataclass
 class ExportTarget:
-    """Представляет одну цель для экспорта (канал, чат)."""
+    """
+    Represents a single export target (channel, chat, or user).
+    """
     id: Union[str, int]
     name: str = ""
     type: str = "unknown"
 
     def __post_init__(self):
         self.id = str(self.id).strip()
-        # Автоопределение типа по формату ID
         if self.id.startswith('@') or 't.me/' in self.id or self.id.startswith('-100'):
             self.type = "channel"
         elif self.id.startswith('-') and self.id[1:].isdigit():
@@ -33,6 +38,10 @@ class ExportTarget:
 
 @dataclass
 class Config:
+    """
+    Main configuration class for the exporter.
+    Loads and validates all settings from .env and environment variables.
+    """
     # Telegram
     api_id: int
     api_hash: str
@@ -49,6 +58,7 @@ class Config:
     only_new: bool = False
     media_download: bool = True
     verbose: bool = True
+    log_level: str = "INFO"
     max_workers: int = 8
     max_process_workers: int = 4
     concurrent_downloads: int = 10
@@ -66,19 +76,26 @@ class Config:
     # Cache and UI
     cache_file: Path = field(default=DEFAULT_CACHE_PATH)
     interactive_mode: bool = False
+    dialog_fetch_limit: int = 20  # Pagination limit
 
     # Proxy
     proxy_type: Optional[str] = None
     proxy_addr: Optional[str] = None
     proxy_port: Optional[int] = None
 
-    # Runtime state (не задаются из .env)
+    # Throttling
+    throttle_threshold_kbps: int = 50
+    throttle_pause_s: int = 30
+
+    # Runtime state (not set from .env)
     export_paths: Dict[str, Path] = field(default_factory=dict, init=False)
     media_paths: Dict[str, Path] = field(default_factory=dict, init=False)
     cache: Dict[str, Any] = field(default_factory=dict, init=False)
 
     def __post_init__(self):
-        """Валидация и настройка путей после инициализации."""
+        """
+        Validate and set up paths after initialization.
+        """
         if not self.api_id or not self.api_hash:
             raise ConfigError("API_ID and API_HASH must be set in .env file")
 
@@ -97,7 +114,9 @@ class Config:
             logger.warning("No export targets defined and interactive mode is off. Nothing to do.")
 
     def _update_target_paths(self):
-        """Настраивает пути для экспорта и медиа для всех целей."""
+        """
+        Set up export and media paths for all targets.
+        """
         self.export_paths = {}
         self.media_paths = {}
         for target in self.export_targets:
@@ -114,40 +133,54 @@ class Config:
                 path.mkdir(parents=True, exist_ok=True)
 
     def _get_entity_folder_name(self, target: ExportTarget) -> str:
-        """Генерирует безопасное имя папки для сущности."""
+        """
+        Generate a safe folder name for the entity.
+        """
         name = target.name or f"id_{target.id}"
         clean_name = sanitize_filename(name, max_length=100)
-        type_prefix = target.type if target.type != "unknown" else "entity"
-        return f"{type_prefix}_{clean_name}"
+        return clean_name
 
     def add_export_target(self, target: ExportTarget):
-        """Добавляет новую цель экспорта и обновляет пути."""
+        """
+        Add a new export target and update paths.
+        """
         if str(target.id) not in [str(t.id) for t in self.export_targets]:
             self.export_targets.append(target)
             self._update_target_paths()
             logger.info(f"Added export target: {target.name or target.id}")
 
     def get_export_path_for_entity(self, entity_id: Union[str, int]) -> Path:
-        """Возвращает путь для экспорта для указанной сущности."""
+        """
+        Get the export path for the specified entity.
+        """
         return self.export_paths.get(str(entity_id), self.export_path)
 
     def get_media_path_for_entity(self, entity_id: Union[str, int]) -> Path:
-        """Возвращает путь для медиа для указанной сущности."""
+        """
+        Get the media path for the specified entity.
+        """
         return self.media_paths.get(str(entity_id), self.export_path / self.media_subdir)
 
 def _parse_bool(value: Optional[Union[str, bool]], default: bool = False) -> bool:
-    """Конвертирует строковое значение в boolean."""
-    if value is None: return default
-    if isinstance(value, bool): return value
+    """
+    Convert a string value to boolean.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
     return str(value).lower() in ('true', '1', 'yes', 'y', 'on')
 
 def load_config(env_path: Union[str, Path] = ".env") -> Config:
-    """Загружает конфигурацию из .env файла и переменных окружения."""
+    """
+    Loads configuration from .env file and environment variables.
+    """
     if Path(env_path).exists():
         load_dotenv(dotenv_path=env_path)
     try:
         proxy_port_str = os.getenv("PROXY_PORT")
         proxy_port = int(proxy_port_str) if proxy_port_str and proxy_port_str.isdigit() else None
+
         config_dict = {
             "api_id": int(os.getenv("API_ID", 0)),
             "api_hash": os.getenv("API_HASH", ""),
@@ -159,6 +192,7 @@ def load_config(env_path: Union[str, Path] = ".env") -> Config:
             "only_new": _parse_bool(os.getenv("ONLY_NEW"), False),
             "media_download": _parse_bool(os.getenv("MEDIA_DOWNLOAD"), True),
             "verbose": _parse_bool(os.getenv("VERBOSE"), True),
+            "log_level": os.getenv("LOG_LEVEL", "INFO"),
             "max_workers": int(os.getenv("MAX_WORKERS", 8)),
             "max_process_workers": int(os.getenv("MAX_PROCESS_WORKERS", 4)),
             "concurrent_downloads": int(os.getenv("CONCURRENT_DOWNLOADS", 10)),
@@ -172,9 +206,12 @@ def load_config(env_path: Union[str, Path] = ".env") -> Config:
             "use_h265": _parse_bool(os.getenv("USE_H265"), False),
             "cache_file": Path(os.getenv("CACHE_FILE", DEFAULT_CACHE_PATH)),
             "interactive_mode": _parse_bool(os.getenv("INTERACTIVE_MODE"), False),
+            "dialog_fetch_limit": int(os.getenv("DIALOG_FETCH_LIMIT", 20)),
             "proxy_type": os.getenv("PROXY_TYPE"),
             "proxy_addr": os.getenv("PROXY_ADDR"),
             "proxy_port": proxy_port,
+            "throttle_threshold_kbps": int(os.getenv("THROTTLE_THRESHOLD_KBPS", 50)),
+            "throttle_pause_s": int(os.getenv("THROTTLE_PAUSE_S", 30)),
         }
 
         export_targets = []

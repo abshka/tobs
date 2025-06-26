@@ -205,6 +205,6 @@ class ReplyLinker:
                         return True
 
                 except Exception as e:
-                    log_level = 'error' if self.config.verbose else 'warning'
+                    log_level = 'error' if self.config.log_level.upper() == 'DEBUG' else 'warning'
                     getattr(logger, log_level)(f"[{entity_id}] Failed to update {file_path}: {e}")
                     return False

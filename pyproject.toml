@@ -23,4 +23,5 @@ dependencies = [
   "rich>=14.0.0",
   "rsa==4.9.1",
   "telethon==1.39.0",
+  "tqdm>=4.67.1",
 ]
