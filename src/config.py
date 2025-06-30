@@ -15,7 +15,7 @@ from src.exceptions import ConfigError
 from src.utils import logger, sanitize_filename
 
 # Default paths
-DEFAULT_CACHE_PATH = Path("./telegram_obsidian_cache.json")
+DEFAULT_CACHE_PATH = Path("./tobs_cache.json")
 DEFAULT_EXPORT_PATH = Path("./debug_exports")
 
 @dataclass
@@ -47,7 +47,7 @@ class Config:
     api_id: int
     api_hash: str
     phone_number: Optional[str] = None
-    session_name: str = "telegram_obsidian_session"
+    session_name: str = "tobs_session"
     export_targets: List[ExportTarget] = field(default_factory=list)
 
     # Paths
@@ -184,13 +184,14 @@ def load_config(env_path: Union[str, Path] = ".env") -> Config:
             "api_id": int(os.getenv("API_ID", 0)),
             "api_hash": os.getenv("API_HASH", ""),
             "phone_number": os.getenv("PHONE_NUMBER"),
-            "session_name": os.getenv("SESSION_NAME", "telegram_obsidian_session"),
+            "session_name": os.getenv("SESSION_NAME", "tobs_session"),
             "export_path": Path(os.getenv("EXPORT_PATH", DEFAULT_EXPORT_PATH)),
             "media_subdir": os.getenv("MEDIA_SUBDIR", "_media"),
             "use_entity_folders": _parse_bool(os.getenv("USE_ENTITY_FOLDERS"), True),
             "only_new": _parse_bool(os.getenv("ONLY_NEW"), False),
             "media_download": _parse_bool(os.getenv("MEDIA_DOWNLOAD"), True),
             "verbose": _parse_bool(os.getenv("VERBOSE"), True),
+        }
             "log_level": os.getenv("LOG_LEVEL", "INFO"),
             "max_workers": int(os.getenv("MAX_WORKERS", 8)),
             "max_process_workers": int(os.getenv("MAX_PROCESS_WORKERS", 4)),

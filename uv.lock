@@ -603,7 +603,7 @@ wheels = [
 ]
 
 [[package]]
-name = "telegram-obsidian"
+name = "tobs"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

@@ -1,4 +1,4 @@
-# Telegram-Obsidian
+# tobs
 
 A powerful tool for exporting messages and media from Telegram channels directly to Obsidian-compatible markdown files.
 
@@ -22,8 +22,8 @@ A powerful tool for exporting messages and media from Telegram channels directly
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/abshka/Telegram-Obsidian.git
-   cd Telegram-Obsidian
+   git clone https://github.com/abshka/tobs.git
+   cd tobs
    ```
 2. Install the required dependencies:
    ```bash

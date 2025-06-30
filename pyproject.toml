@@ -1,7 +1,7 @@
 [project]
-name = "telegram-obsidian"
+name = "tobs"
 version = "0.1.0"
-description = "An application to export Telegram channel/chat to Markdown files"
+description = "An application to export Telegram channel/chat to Markdown files (tobs: telegram + obsidian)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

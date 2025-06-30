@@ -2,8 +2,8 @@
 .venv/
 .ropeproject/
 exporter.log
-telegram_obsidian_session.session
-telegram_obsidian_session.session-journal
+tobs_session.session
+tobs_session.session-journal
 src/__pycache__/
-telegram_exporter.log
+tobs_exporter.log
 .python-version
