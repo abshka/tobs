@@ -603,12 +603,26 @@ wheels = [
 ]
 
 [[package]]
+name = "telethon"
+version = "1.39.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyaes" },
+    { name = "rsa" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/54/b2/6e48b593a0e4e678578a682332ef36e54648c78ef13a5d395e5cdd293c6d/telethon-1.39.0.tar.gz", hash = "sha256:35d4795d8c91deac515fb0bcb3723866b924de1c724e1d5c230460e96f284a63", size = 640634, upload-time = "2025-02-20T17:30:44.562Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/f2/4e66a59c6d0cb6a25c0c2a630b4b184d81cfe8cb982bf3b65ce32b020fc8/Telethon-1.39.0-py3-none-any.whl", hash = "sha256:aa9f394b94be144799a6f6a93ab463867bc7c63503ede9631751940a98f6c703", size = 715851, upload-time = "2025-02-20T17:30:41.955Z" },
+]
+
+[[package]]
 name = "tobs"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiogram" },
+    { name = "aiohttp" },
     { name = "aiohttp-proxy" },
     { name = "asyncio" },
     { name = "beautifulsoup4" },
@@ -632,6 +646,7 @@ dependencies = [
 requires-dist = [
     { name = "aiofiles", specifier = "==23.2.1" },
     { name = "aiogram", specifier = "==3.3.0" },
+    { name = "aiohttp", specifier = ">=3.9.5" },
     { name = "aiohttp-proxy", specifier = ">=0.1.2" },
     { name = "asyncio", specifier = "==3.4.3" },
     { name = "beautifulsoup4", specifier = ">=4.13.4" },
@@ -649,19 +664,6 @@ requires-dist = [
     { name = "rsa", specifier = "==4.9.1" },
     { name = "telethon", specifier = "==1.39.0" },
     { name = "tqdm", specifier = ">=4.67.1" },
-]
-
-[[package]]
-name = "telethon"
-version = "1.39.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pyaes" },
-    { name = "rsa" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/54/b2/6e48b593a0e4e678578a682332ef36e54648c78ef13a5d395e5cdd293c6d/telethon-1.39.0.tar.gz", hash = "sha256:35d4795d8c91deac515fb0bcb3723866b924de1c724e1d5c230460e96f284a63", size = 640634, upload-time = "2025-02-20T17:30:44.562Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/32/f2/4e66a59c6d0cb6a25c0c2a630b4b184d81cfe8cb982bf3b65ce32b020fc8/Telethon-1.39.0-py3-none-any.whl", hash = "sha256:aa9f394b94be144799a6f6a93ab463867bc7c63503ede9631751940a98f6c703", size = 715851, upload-time = "2025-02-20T17:30:41.955Z" },
 ]
 
 [[package]]
