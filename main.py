@@ -167,6 +167,12 @@ async def export_single_target(
 
         entity_export_path = config.get_export_path_for_entity(entity_id_str)
         entity_media_path = config.get_media_path_for_entity(entity_id_str)
+
+        # Создаём папки только сейчас, перед экспортом
+        from src.utils import ensure_dir_exists
+        ensure_dir_exists(entity_export_path)
+        ensure_dir_exists(entity_media_path)
+
         logger.info(f"Export path: {entity_export_path}")
         logger.info(f"Media path: {entity_media_path}")
 
@@ -426,15 +432,18 @@ async def interactive_config_update(config):
     """
     Interactive menu for advanced config options before export.
     """
+    from src.utils import clear_screen
     while True:
-        rprint("\n[bold yellow]Advanced Config Options:[/bold yellow]")
+        clear_screen()
+        rprint("[bold yellow]Advanced Config Options:[/bold yellow]")
         rprint(" [cyan]1.[/cyan] Throttle threshold (KB/s): [green]{}[/green]".format(getattr(config, 'throttle_threshold_kbps', 50)))
         rprint(" [cyan]2.[/cyan] Throttle pause (s): [green]{}[/green]".format(getattr(config, 'throttle_pause_s', 30)))
         rprint(" [cyan]3.[/cyan] Max workers (threads): [green]{}[/green]".format(getattr(config, 'max_workers', 8)))
         rprint(" [cyan]4.[/cyan] Max process workers: [green]{}[/green]".format(getattr(config, 'max_process_workers', 4)))
         rprint(" [cyan]5.[/cyan] Concurrent downloads: [green]{}[/green]".format(getattr(config, 'concurrent_downloads', 10)))
         rprint(" [cyan]6.[/cyan] Continue to export")
-        choice = input("Choose an option to change (1-6): ").strip()
+        rprint(" [cyan]7.[/cyan] Exit")
+        choice = input("Choose an option to change (1-7): ").strip()
         if choice == "1":
             config.throttle_threshold_kbps = prompt_int("Throttle threshold (KB/s)", getattr(config, 'throttle_threshold_kbps', 50))
         elif choice == "2":
@@ -447,6 +456,9 @@ async def interactive_config_update(config):
             config.concurrent_downloads = prompt_int("Concurrent downloads", getattr(config, 'concurrent_downloads', 10))
         elif choice == "6":
             break
+        elif choice == '7':
+            rprint("[yellow]Exiting...[/yellow]")
+            sys.exit(0)
         else:
             rprint("[red]Invalid choice. Please select 1-6.[/red]")
 

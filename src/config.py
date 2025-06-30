@@ -116,6 +116,7 @@ class Config:
     def _update_target_paths(self):
         """
         Set up export and media paths for all targets.
+        (No directory creation here; only path calculation.)
         """
         self.export_paths = {}
         self.media_paths = {}
@@ -128,9 +129,6 @@ class Config:
 
             self.export_paths[target_id] = base_path.resolve()
             self.media_paths[target_id] = media_path.resolve()
-
-            for path in [base_path, media_path]:
-                path.mkdir(parents=True, exist_ok=True)
 
     def _get_entity_folder_name(self, target: ExportTarget) -> str:
         """
@@ -147,7 +145,7 @@ class Config:
         if str(target.id) not in [str(t.id) for t in self.export_targets]:
             self.export_targets.append(target)
             self._update_target_paths()
-            logger.info(f"Added export target: {target.name or target.id}")
+            # logger.info(f"Added export target: {target.name or target.id}")
 
     def get_export_path_for_entity(self, entity_id: Union[str, int]) -> Path:
         """

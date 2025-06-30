@@ -6,6 +6,7 @@ TelegramManager: Handles Telegram connection, dialog selection, and user interac
 
 import asyncio
 import sys
+from time import sleep
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 from rich import print as rprint
@@ -25,7 +26,7 @@ from telethon.tl.types import Message
 
 from src.config import Config, ExportTarget
 from src.exceptions import TelegramConnectionError
-from src.utils import logger
+from src.utils import clear_screen, logger
 
 
 class TelegramManager:
@@ -173,13 +174,21 @@ class TelegramManager:
         """
         Display the interactive options menu using rprint.
         """
-        rprint("\n" + "-"*40)
+        clear_screen()
+        rprint("-" * 40)
         rprint("[bold yellow]Options:[/bold yellow]")
         rprint(" [cyan]1.[/cyan] List recent dialogs")
         rprint(" [cyan]2.[/cyan] Enter ID/Username/Link manually")
         rprint(" [cyan]3.[/cyan] Finish selection and start export")
         rprint(" [cyan]4.[/cyan] Exit")
         rprint("-" * 40)
+        # Новый блок: показываем выбранные цели экспорта
+        if self.config.export_targets:
+            rprint("[bold green]Export targets:[/bold green]")
+            for target in self.config.export_targets:
+                rprint(f" • {getattr(target, 'name', target.id) or target.id} [dim]({getattr(target, 'type', 'unknown')})[/dim]")
+        else:
+            rprint("[dim]No export targets selected.[/dim]")
         rprint("[bold]Choose an option (1-4):[/bold]", end=" ")
 
     async def run_interactive_selection(self) -> bool:
@@ -191,6 +200,7 @@ class TelegramManager:
             if not self.client_connected:
                 return False
 
+        clear_screen()
         while True:
             self._display_menu()
             choice = input().strip()
@@ -205,17 +215,17 @@ class TelegramManager:
                     rprint("[green]Finished selection. Starting export...[/green]")
                     break
             elif choice == '4':
-                rprint("[yellow]Exiting.[/yellow]")
+                rprint("[yellow]Exiting...[/yellow]")
                 sys.exit(0)
             else:
-                rprint("[red]Invalid choice. Please enter a number between 1 and 4.[/red]")
+                rprint("[red]Invalid choice. Please enter a number from 1 to 4.[/red]")
         return True
 
     def _display_dialogs(self, dialogs, dialog_map, start_index, page_num=None):
         """
         Display a list of dialogs with rich formatting.
         """
-        header = "\n[bold underline]Recent Dialogs:[/bold underline]"
+        header = "[bold underline]Recent Dialogs:[/bold underline]"
         if page_num is not None:
             header += f" [dim](Page {page_num})[/dim]"
         rprint(header)
@@ -238,6 +248,7 @@ class TelegramManager:
 
         while True:
             try:
+                clear_screen()
                 get_dialogs_kwargs = {
                     "limit": self.config.dialog_fetch_limit,
                     "offset_date": offset_date,
@@ -267,7 +278,7 @@ class TelegramManager:
                 dialog_map = {}
                 self._display_dialogs(dialogs, dialog_map, 1, page_num=page_num)
 
-                rprint("\n[bold]Enter numbers to add (e.g., 1, 3, 5), n for next page, p for previous page, or c for cancel:[/bold]", end=" ")
+                rprint("[bold]Enter numbers to add (e.g., 1, 3, 5), n for next page, p for previous page, or c for cancel:[/bold]", end=" ")
                 selection = input().strip().lower()
 
                 if selection in ('c', 'cancel'):
@@ -301,6 +312,7 @@ class TelegramManager:
                 added = await self._process_dialog_selection(selection, dialog_map)
                 if added:
                     rprint("[green]Target(s) added.[/green]")
+                    sleep(1)
             except Exception as e:
                 logger.error(f"Error during dialog selection: {e}", exc_info=True)
                 break
@@ -324,18 +336,25 @@ class TelegramManager:
             if not indices:
                 return False
 
+            valid_indices = set(dialog_map.keys())
             added_count = 0
+            invalid_indices = [index for index in indices if index not in valid_indices]
+            if invalid_indices:
+                rprint("[red]Invalid input. Enter number in range 1-20.[/red]")
+                sleep(1)
+                return False
+
             for index in indices:
-                if entity := dialog_map.get(index):
+                entity = dialog_map.get(index)
+                if entity:
                     target = self._create_export_target_from_entity(entity)
                     self.config.add_export_target(target)
                     rprint(f"[green]Added:[/green] {target.name or target.id}")
                     added_count += 1
-                else:
-                    rprint(f"[red]Invalid selection: {index}[/red]")
             return added_count > 0
         except ValueError:
             rprint("[red]Invalid input. Please enter numbers separated by commas.[/red]")
+            sleep(1)
             return False
 
     def _create_export_target_from_entity(self, entity) -> ExportTarget:
@@ -366,6 +385,7 @@ class TelegramManager:
                 if input().strip().lower() == 'y':
                     self.config.add_export_target(target)
                     rprint(f"[green]Added:[/green] {target.name or target.id}")
+                    sleep(1)
                     break
             else:
                 rprint(f"[bold red]Could not resolve or access '{identifier}'. Check input and permissions.[/bold red]")

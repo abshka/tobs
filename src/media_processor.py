@@ -49,7 +49,7 @@ class ProgressCallback:
     def __call__(self, downloaded_bytes: int, total_bytes: int):
         percent = int((downloaded_bytes / total_bytes) * 100) if total_bytes else 0
         if not hasattr(self, "_last_percent") or percent // 10 != getattr(self, "_last_percent", -1):
-            logger.info(f"[{self.description}] Downloaded {percent}% ({downloaded_bytes // 1024} KB / {total_bytes // 1024} KB)")
+            print(f"Downloading {self.description} {percent}% ({downloaded_bytes // 1024} kb / {total_bytes // 1024} kb)")
             self._last_percent = percent // 10
         self._check_throttling(downloaded_bytes)
 

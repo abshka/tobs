@@ -19,6 +19,31 @@ import aiohttp
 from bs4 import BeautifulSoup, NavigableString
 from loguru import logger
 
+# Минимизируем логи: только ошибки в консоль, всё остальное — в файл на уровне WARNING
+logger.remove()  # Удалить все обработчики
+logger.add("exporter.log", level="WARNING", rotation="1 MB")  # Только в файл, только важное
+
+
+class TelethonFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        ignore_phrases = [
+            "Server sent a very old message with ID",
+            "Security error while unpacking a received message",
+            "Server replied with a wrong session ID"
+        ]
+        return not any(phrase in msg for phrase in ignore_phrases)
+
+# Применить фильтр ко всем логгерам Telethon
+logging.getLogger("telethon").addFilter(TelethonFilter())
+
+
+def clear_screen():
+    """
+    Clears the terminal screen (cross-platform).
+    """
+    os.system('cls' if os.name == 'nt' else 'clear')
+
 T = TypeVar('T')
 R = TypeVar('R')
 
