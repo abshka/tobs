@@ -42,7 +42,6 @@ class Config:
     Main configuration class for the exporter.
     Loads and validates all settings from .env and environment variables.
     """
-    cache_manager: Any = None  # ссылка на cache_manager для доступа из media_processor
     # Telegram
     api_id: int
     api_hash: str
@@ -58,7 +57,7 @@ class Config:
     # Processing
     only_new: bool = False
     media_download: bool = True
-    verbose: bool = True
+    cache_manager: Any = None
     log_level: str = "INFO"
     max_workers: int = 8
     max_process_workers: int = 4
@@ -190,8 +189,6 @@ def load_config(env_path: Union[str, Path] = ".env") -> Config:
             "use_entity_folders": _parse_bool(os.getenv("USE_ENTITY_FOLDERS"), True),
             "only_new": _parse_bool(os.getenv("ONLY_NEW"), False),
             "media_download": _parse_bool(os.getenv("MEDIA_DOWNLOAD"), True),
-            "verbose": _parse_bool(os.getenv("VERBOSE"), True),
-        }
             "log_level": os.getenv("LOG_LEVEL", "INFO"),
             "max_workers": int(os.getenv("MAX_WORKERS", 8)),
             "max_process_workers": int(os.getenv("MAX_PROCESS_WORKERS", 4)),

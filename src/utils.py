@@ -76,7 +76,7 @@ def setup_logging(log_level: str = "INFO"):
     )
 
     try:
-        log_file_path = Path("telegram_exporter.log").resolve()
+        log_file_path = Path("tobs_exporter.log").resolve()
         logger.add(
             log_file_path,
             level="DEBUG",

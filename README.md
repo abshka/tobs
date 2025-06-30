@@ -1,4 +1,4 @@
-# tobs
+# Tobs (Telegram + Obsidian)
 
 A powerful tool for exporting messages and media from Telegram channels directly to Obsidian-compatible markdown files.
 
