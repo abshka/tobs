@@ -203,7 +203,14 @@ class MediaProcessor:
             final_path = type_subdir / filename
             raw_download_path = type_subdir / f"raw_{filename}"
 
-            if final_path.exists():
+            # Проверка кэша медиафайлов: если все медиа на месте — пропустить скачивание
+            cache_manager = self.config.cache_manager if hasattr(self.config, "cache_manager") else None
+            all_media_ok = False
+            if cache_manager:
+                all_media_ok = await cache_manager.all_media_files_present(
+                    entity_id_str, message.id, type_subdir
+                )
+            if all_media_ok and final_path.exists():
                 return final_path
 
             await run_in_thread_pool(ensure_dir_exists, type_subdir)
@@ -217,6 +224,12 @@ class MediaProcessor:
             if optimization_success:
                 if raw_download_path != final_path:
                     await self._cleanup_file_async(raw_download_path)
+                # Обновить кэш медиафайлов после успешной загрузки и оптимизации
+                if cache_manager:
+                    media_size = final_path.stat().st_size if final_path.exists() else 0
+                    await cache_manager.add_media_file_to_message(
+                        entity_id_str, message.id, final_path.name, media_size
+                    )
                 return final_path
             else:
                 logger.error(f"Media processing failed for msg {message.id}, type {media_type}")

@@ -42,6 +42,7 @@ class Config:
     Main configuration class for the exporter.
     Loads and validates all settings from .env and environment variables.
     """
+    cache_manager: Any = None  # ссылка на cache_manager для доступа из media_processor
     # Telegram
     api_id: int
     api_hash: str

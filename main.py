@@ -284,6 +284,7 @@ async def run_export(config: Config):
         cache_manager = CacheManager(config.cache_file)
         await cache_manager.load_cache()
         config.cache = cache_manager.cache
+        config.cache_manager = cache_manager  # <--- Добавлено: ссылка на cache_manager для доступа из media_processor
 
         telegram_manager = TelegramManager(config)
         await telegram_manager.connect()

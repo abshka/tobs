@@ -142,7 +142,9 @@ class CacheManager:
                 "filename": note_filename,
                 "reply_to": reply_to_id,
                 "title": title,
-                "telegram_url": telegram_url
+                "telegram_url": telegram_url,
+                # Новый ключ: список медиафайлов (имя и размер)
+                "media_files": []
             }
             current_last_id = data.get("last_id")
             if current_last_id is None or message_id > current_last_id:
@@ -157,6 +159,37 @@ class CacheManager:
             data["type"] = entity_type
         await self._with_entity_data(entity_id, update, modify=True)
         await self.schedule_background_save()
+
+    async def add_media_file_to_message(self, entity_id: Union[str, int], message_id: int, media_filename: str, media_size: int):
+        """
+        Добавляет информацию о скачанном медиафайле к сообщению в кэше.
+        """
+        msg_id_str = str(message_id)
+        def update(data):
+            entry = data["processed_messages"].get(msg_id_str)
+            if entry is not None:
+                media_files = entry.setdefault("media_files", [])
+                # Не добавлять дубликаты
+                if not any(f["name"] == media_filename and f["size"] == media_size for f in media_files):
+                    media_files.append({"name": media_filename, "size": media_size})
+        await self._with_entity_data(entity_id, update, modify=True)
+        await self.schedule_background_save()
+
+    async def all_media_files_present(self, entity_id: Union[str, int], message_id: int, media_dir: Path) -> bool:
+        """
+        Проверяет, что все медиафайлы для сообщения реально существуют и соответствуют размеру.
+        """
+        msg_id_str = str(message_id)
+        def check(data):
+            entry = data["processed_messages"].get(msg_id_str)
+            if not entry or not entry.get("media_files"):
+                return False
+            for f in entry["media_files"]:
+                file_path = media_dir / f["name"]
+                if not file_path.exists() or file_path.stat().st_size != f["size"]:
+                    return False
+            return True
+        return await self._with_entity_data(entity_id, check) or False
 
     async def get_all_processed_messages_async(self, entity_id: Union[str, int]) -> Dict[str, Any]:
         """Получает все обработанные сообщения для указанной сущности."""
