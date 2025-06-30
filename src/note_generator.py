@@ -116,7 +116,6 @@ class NoteGenerator:
         Overwrites the content of a note file.
         """
         await self._write_note_file(note_path, content)
-        logger.info(f"Updated: {note_path.name}")
 
     async def _prepare_note_path(self, message: Message, entity_id: Union[str, int],
                                  entity_export_path: Path) -> Optional[Path]:
@@ -179,7 +178,6 @@ class NoteGenerator:
             try:
                 async with aiofiles.open(note_path, 'w', encoding='utf-8') as f:
                     await f.write(content.strip() + '\n')
-                logger.info(f"Writing: {note_path.name}")
                 return note_path
             except Exception as e:
                 logger.error(f"Failed to write note file {note_path}: {e}", exc_info=True)
@@ -200,7 +198,7 @@ class NoteGenerator:
 
         url_to_data = {data["telegram_url"]: data for data in processed_messages.values() if data.get("telegram_url")}
         msg_id_to_data = {msg_id: data for msg_id, data in processed_messages.items()}
-        logger.info(f"[Postprocessing] Built lookup maps: {len(url_to_data)} URLs, {len(msg_id_to_data)} msg_ids.")
+        # logger.info(f"[Postprocessing] Built lookup maps: {len(url_to_data)} URLs, {len(msg_id_to_data)} msg_ids.")
 
         def replacer(match: re.Match) -> str:
             link_text, url = match.groups()

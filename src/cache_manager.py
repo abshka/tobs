@@ -1,7 +1,5 @@
-# src/cache_manager.py
-
 """
-CacheManager: Handles async loading, saving, and updating of the export cache.
+CacheManager: Handles async loading,  log, and updating of the export cache.
 """
 
 import asyncio
@@ -87,7 +85,7 @@ class CacheManager:
             if not self._dirty:
                 return
             try:
-                logger.info(f"Saving cache to {self.cache_path}...")
+                # logger.info(f"Saving cache to {self.cache_path}...")
                 loop = asyncio.get_running_loop()
                 cache_json = await loop.run_in_executor(
                     self._pool, partial(json.dumps, self.cache, indent=2, ensure_ascii=False)
@@ -96,7 +94,7 @@ class CacheManager:
                 async with aiofiles.open(temp_path, mode='w', encoding='utf-8') as f:
                     await f.write(cache_json)
                 await loop.run_in_executor(self._pool, os.replace, temp_path, self.cache_path)
-                logger.info("Cache saved successfully.")
+                # logger.info("Cache saved successfully.")
                 self._dirty = False
             except Exception as e:
                 logger.error(f"Failed to save cache: {e}", exc_info=True)

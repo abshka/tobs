@@ -52,7 +52,7 @@ async def process_message_group(
 
     first_message = messages[0]
     msg_date = getattr(first_message, 'date', 'No date')
-    logger.info(f"Message group {first_message.id} ({len(messages)}) from {msg_date}")
+    # logger.info(f"Message group {first_message.id} ({len(messages)}) from {msg_date}")
 
     try:
         media_paths = []
@@ -68,7 +68,7 @@ async def process_message_group(
                             break
                 if not filename:
                     filename = f"media_from_msg_{msg.id}"
-                logger.info(f"[{filename}] Downloading")
+                # logger.info(f"[{filename}] Downloading")
                 result = await media_processor.download_and_optimize_media(msg, entity_id, entity_media_path)
                 if isinstance(result, list):
                     media_paths.extend(result)
@@ -80,11 +80,11 @@ async def process_message_group(
             logger.error(f"[{entity_id}] Failed to create main note for message {first_message.id}")
             return None
 
-        rprint(f"[green]Writing: {note_path.name}[/green]")
+        # rprint(f"[green]Writing: {note_path.name}[/green]")
 
         telegraph_links = find_telegraph_links(first_message.text)
         if telegraph_links:
-            logger.info(f"Telegra.ph links found: {len(telegraph_links)}")
+            # logger.info(f"Telegra.ph links found: {len(telegraph_links)}")
             original_content = await note_generator.read_note_content(note_path)
             modified_content = original_content
 
@@ -119,7 +119,7 @@ async def process_message_group(
 
             if modified_content != original_content:
                 await note_generator.write_note_content(note_path, modified_content)
-                logger.info(f"Updated note with local Telegra.ph links: {note_path.name}")
+                # logger.info(f"Updated note with local Telegra.ph links: {note_path.name}")
 
         note_filename = note_path.name
         reply_to_id = getattr(first_message.reply_to, 'reply_to_msg_id', None)
@@ -137,7 +137,7 @@ async def process_message_group(
                 telegram_url=telegram_url
             )
 
-        logger.info(f"Message group {first_message.id} processed -> {note_filename}")
+        # logger.info(f"Message group {first_message.id} processed -> {note_filename}")
         return first_message.id
 
     except Exception as e:
@@ -150,7 +150,7 @@ async def export_single_target(
     http_session: aiohttp.ClientSession
 ):
     entity_id_str = str(target.id)
-    logger.info(f"--- Starting export for target: {target.name or entity_id_str} ---")
+    # logger.info(f"--- Starting export for target: {target.name or entity_id_str} ---")
 
     try:
         entity = await telegram_manager.resolve_entity(target.id)
@@ -162,7 +162,7 @@ async def export_single_target(
         target.id = entity.id
         entity_id_str = str(target.id)
 
-        logger.info(f"Resolved entity: {target.name} (ID: {entity_id_str})")
+        # logger.info(f"Resolved entity: {target.name} (ID: {entity_id_str})")
         await cache_manager.update_entity_info_async(entity_id_str, target.name, target.type)
 
         entity_export_path = config.get_export_path_for_entity(entity_id_str)
@@ -173,12 +173,12 @@ async def export_single_target(
         ensure_dir_exists(entity_export_path)
         ensure_dir_exists(entity_media_path)
 
-        logger.info(f"Export path: {entity_export_path}")
-        logger.info(f"Media path: {entity_media_path}")
+        # logger.info(f"Export path: {entity_export_path}")
+        # logger.info(f"Media path: {entity_media_path}")
 
         last_processed_id = cache_manager.get_last_processed_message_id(entity_id_str) if config.only_new else None
         if last_processed_id:
-            logger.info(f"[{target.name}] Incremental mode. Starting after message ID: {last_processed_id}")
+            rprint(f"[{target.name}] Incremental mode. Starting after message ID: {last_processed_id}")
 
         await process_entity_messages(
             entity, entity_id_str, target.name, entity_export_path, entity_media_path,
@@ -192,7 +192,7 @@ async def export_single_target(
         logger.critical(f"[{target.name}] Critical error during export: {e}", exc_info=True)
     finally:
         await cache_manager.save_cache()
-        logger.info(f"--- Finished export for target: {target.name} ---")
+        # logger.info(f"--- Finished export for target: {target.name} ---")
 
 
 async def process_entity_messages(
@@ -256,7 +256,7 @@ async def process_entity_messages(
 
             if processed_count % config.cache_save_interval == 0:
                 await cache_manager.schedule_background_save()
-                logger.info(f"[{target_name}] Progress: ~{processed_count} messages fetched.")
+                # logger.info(f"[{target_name}] Progress: ~{processed_count} messages fetched.")
 
         for gid in list(grouped_messages.keys()):
             await _process_group(gid)
@@ -264,7 +264,7 @@ async def process_entity_messages(
         if active_tasks:
             await asyncio.gather(*active_tasks)
 
-        logger.info(f"[{target_name}] Processing complete. {successful_count} notes created from {processed_count} messages.")
+        # logger.info(f"[{target_name}] Processing complete. {successful_count} notes created from {processed_count} messages.")
 
     except Exception as e:
         logger.error(f"[{target_name}] Error during message processing loop: {e}", exc_info=(config.log_level == 'DEBUG'))
@@ -279,7 +279,7 @@ async def run_export(config: Config):
         process_executor = ProcessPoolExecutor(max_workers=process_workers)
         thread_executor = ThreadPoolExecutor(max_workers=thread_workers)
         asyncio.get_event_loop().set_default_executor(thread_executor)
-        logger.info(f"Using {process_workers} process workers and {thread_workers} thread workers.")
+        # logger.info(f"Using {process_workers} process workers and {thread_workers} thread workers.")
 
         cache_manager = CacheManager(config.cache_file)
         await cache_manager.load_cache()
@@ -307,16 +307,16 @@ async def run_export(config: Config):
         if config.proxy_type and config.proxy_addr and config.proxy_port:
             proxy_url = f"{config.proxy_type.lower()}://{config.proxy_addr}:{config.proxy_port}"
             connector = ProxyConnector.from_url(proxy_url)
-            logger.info(f"Using proxy for aiohttp requests: {proxy_url}")
+            # logger.info(f"Using proxy for aiohttp requests: {proxy_url}")
 
         async with aiohttp.ClientSession(headers=AIOHTTP_HEADERS, connector=connector) as http_session:
             export_summaries = []
-            logger.info("***Authorization***")
+            # logger.info("***Authorization***")
 
             # Stage 1: Parsing messages
             rprint("[cyan]***Export***[/cyan]")
             for target in config.export_targets:
-                logger.info(f"Parsing messages for: {target.name}")
+                # logger.info(f"Parsing messages for: {target.name}")
                 await export_single_target(
                     target, config, telegram_manager, cache_manager,
                     media_processor, note_generator, http_session
@@ -329,7 +329,7 @@ async def run_export(config: Config):
                     "export_path": str(export_root),
                 }
                 export_summaries.append(summary)
-                logger.info(f"Parsing complete for: {target.name}")
+                # logger.info(f"Parsing complete for: {target.name}")
 
             # Stage 2: Downloading posts/media
             rprint("[magenta]***Downloading posts/media***[/magenta]")
@@ -341,17 +341,17 @@ async def run_export(config: Config):
                 entity_id_str = str(target.id)
                 export_root = config.get_export_path_for_entity(entity_id_str)
 
-                logger.info(f"Post-processing replies for '{target.name}'...")
+                # logger.info(f"Post-processing replies for '{target.name}'...")
                 await reply_linker.link_replies(entity_id_str, export_root)
 
-                logger.info(f"Post-processing internal links for '{target.name}'...")
+                # logger.info(f"Post-processing internal links for '{target.name}'...")
                 await note_generator.postprocess_all_notes(export_root, entity_id_str, cache_manager.cache)
             rprint("[green]Post-processing complete.[/green]")
 
             # --- Second pass: Replace all telegra.ph links in all notes with local links ---
             import re
             from pathlib import Path
-            logger.info("Second pass: replacing telegra.ph links in all notes...")
+            # logger.info("Second pass: replacing telegra.ph links in all notes...")
             # Collect mapping from all telegra.ph notes
             telegraph_mapping = {}
             for target in config.export_targets:
@@ -384,12 +384,12 @@ async def run_export(config: Config):
                     if modified != content:
                         with open(note_file, "w", encoding="utf-8") as f:
                             f.write(modified)
-            logger.info("Second pass complete: all telegra.ph links replaced with local notes where possible.")
+            # logger.info("Second pass complete: all telegra.ph links replaced with local notes where possible.")
 
             # Show summary table
-            logger.info("Export Summary:")
-            for summary in export_summaries:
-                logger.info(f"Name: {summary['name']} | ID: {summary['id']} | Export Path: {summary['export_path']}")
+            # logger.info("Export Summary:")
+            # for summary in export_summaries:
+            #     logger.info(f"Name: {summary['name']} | ID: {summary['id']} | Export Path: {summary['export_path']}")
 
     except (ConfigError, TelegramConnectionError) as e:
         logger.critical(f"A critical error occurred: {e}")
@@ -402,7 +402,7 @@ async def run_export(config: Config):
             thread_executor.shutdown(wait=False)
         if process_executor:
             process_executor.shutdown(wait=False)
-        logger.info("Export process finished.")
+        # logger.info("Export process finished.")
 
 def prompt_int(prompt, default):
     """
@@ -434,6 +434,7 @@ async def interactive_config_update(config):
     """
     from src.utils import clear_screen
     while True:
+        logger.error("TEST ERROR TO LOG FILE ONLY")
         clear_screen()
         rprint("[bold yellow]Advanced Config Options:[/bold yellow]")
         rprint(" [cyan]1.[/cyan] Throttle threshold (KB/s): [green]{}[/green]".format(getattr(config, 'throttle_threshold_kbps', 50)))
@@ -493,9 +494,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         rprint("[yellow]Process interrupted by user (KeyboardInterrupt).[/yellow]")
     except Exception as e:
-        print(f"\nFATAL UNHANDLED ERROR: {e}", file=sys.stderr)
-        print("Security error while unpacking a received message: Server replied with a wrong session ID (see FAQ for details)")
-        print("If you see repeated 'wrong session ID' errors, try the following:")
-        print("- Restart the export with a fresh session.")
-        print("- Ensure only one client is connected with the same session at a time.")
-        print("- Check for updates to Telethon.")
+        rprint(f"\nFATAL UNHANDLED ERROR: {e}", file=sys.stderr)
+        rprint("Security error while unpacking a received message: Server replied with a wrong session ID (see FAQ for details)")
+        rprint("If you see repeated 'wrong session ID' errors, try the following:")
+        rprint("- Restart the export with a fresh session.")
+        rprint("- Ensure only one client is connected with the same session at a time.")
+        rprint("- Check for updates to Telethon.")

@@ -16,6 +16,7 @@ import aiofiles
 import aiohttp
 import ffmpeg
 from PIL import Image, UnidentifiedImageError
+from rich import print as rprint
 from telethon import TelegramClient
 from telethon.tl.types import (
     Document,
@@ -49,7 +50,7 @@ class ProgressCallback:
     def __call__(self, downloaded_bytes: int, total_bytes: int):
         percent = int((downloaded_bytes / total_bytes) * 100) if total_bytes else 0
         if not hasattr(self, "_last_percent") or percent // 10 != getattr(self, "_last_percent", -1):
-            print(f"Downloading {self.description} {percent}% ({downloaded_bytes // 1024} kb / {total_bytes // 1024} kb)")
+            rprint(f"Downloading {self.description} {percent}% ({downloaded_bytes // 1024} kb / {total_bytes // 1024} kb)")
             self._last_percent = percent // 10
         self._check_throttling(downloaded_bytes)
 
@@ -86,13 +87,11 @@ class MediaProcessor:
         self.config = config
         self.client = client
         self.download_semaphore = asyncio.Semaphore(config.concurrent_downloads)
-        logger.info(f"Throttle threshold: {getattr(config, 'throttle_threshold_kbps', 50)} KB/s, pause: {getattr(config, 'throttle_pause_s', 30)}s")
         self.thread_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=config.max_workers, thread_name_prefix="MediaThread"
         )
         self.processed_cache = {}
         self._cache_lock = asyncio.Lock()
-        logger.info(f"Media Processor initialized. Concurrent downloads: {config.concurrent_downloads}")
 
     async def download_and_optimize_media(
         self, message: Message, entity_id: Union[str, int], entity_media_path: Path
@@ -152,7 +151,6 @@ class MediaProcessor:
                         file_path = images_dir / filename
 
                         if file_path.exists():
-                            logger.info(f"File already exists: {file_path.name}")
                             return file_path
 
                         # Always use concise, event-based logging every 10%
@@ -164,7 +162,7 @@ class MediaProcessor:
                                 downloaded += len(chunk)
                                 percent = int((downloaded / total_size) * 100) if total_size else 0
                                 if percent // 10 != last_percent:
-                                    logger.info(f"[{filename}] Downloaded {percent}% ({downloaded // 1024} KB / {total_size // 1024} KB)")
+                                    rprint(f"Downloading {filename} {percent}% ({downloaded // 1024} kb / {total_size // 1024} kb)")
                                     last_percent = percent // 10
 
                         return file_path
@@ -206,7 +204,6 @@ class MediaProcessor:
             raw_download_path = type_subdir / f"raw_{filename}"
 
             if final_path.exists():
-                logger.info(f"File already exists: {final_path.name}")
                 return final_path
 
             await run_in_thread_pool(ensure_dir_exists, type_subdir)
@@ -329,7 +326,7 @@ class MediaProcessor:
             video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
             if not video_stream:
                 logger.warning(f"No video stream in {input_path.name}, copying directly.")
-                ffmpeg.input(str(input_path)).output(str(output_path), c='copy').run(capture_stderr=True, overwrite_output=True)
+                ffmpeg.input(str(input_path)).output(str(output_path), c='copy').global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True)
                 return
 
             width = int(video_stream.get('width', 0))
@@ -352,18 +349,20 @@ class MediaProcessor:
             if audio_stream := next((s for s in probe['streams'] if s['codec_type'] == 'audio'), None):
                 self._configure_audio_options(ffmpeg_options, audio_stream, float(video_stream.get('duration', 0)), 'voice' in input_path.name.lower())
 
-            ffmpeg.output(stream, str(output_path), **ffmpeg_options).run(capture_stderr=True, overwrite_output=True)
+            ffmpeg.output(stream, str(output_path), **ffmpeg_options).global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True)
 
             if output_path.exists() and input_path.exists() and output_path.stat().st_size >= input_path.stat().st_size:
-                logger.info(f"Optimized file not smaller, using original for {input_path.name}.")
-                ffmpeg.input(str(input_path)).output(str(output_path), c='copy').run(capture_stderr=True, overwrite_output=True)
+                ffmpeg.input(str(input_path)).output(str(output_path), c='copy').global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True)
         except ffmpeg.Error as e:
             stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else "No stderr"
             logger.error(f"ffmpeg failed for video {input_path.name}: {stderr}")
-            raise
+            print(f"❌ Failed to convert video {input_path.name} (see exporter.log for details)")
+            print("   Try updating ffmpeg or check codec support.")
+            return
         except Exception as e:
             logger.error(f"Video optimization failed for {input_path.name}: {e}")
-            raise
+            print(f"❌ Failed to process video {input_path.name} (see exporter.log for details)")
+            return
 
     def _configure_nvidia_encoder(self, options, use_h265, crf, bitrate):
         codec = 'hevc_nvenc' if use_h265 else 'h264_nvenc'
@@ -424,7 +423,7 @@ class MediaProcessor:
             audio_stream = next((s for s in probe['streams'] if s['codec_type'] == 'audio'), None)
             if not audio_stream:
                 logger.warning(f"No audio stream in {input_path.name}, copying directly.")
-                ffmpeg.input(str(input_path)).output(str(output_path), c='copy').run(capture_stderr=True, overwrite_output=True)
+                ffmpeg.input(str(input_path)).output(str(output_path), c='copy').global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True)
                 return
 
             channels = int(audio_stream.get('channels', 2))
@@ -458,31 +457,32 @@ class MediaProcessor:
                     ffmpeg_options.update({'b:a': '48k', 'ac': '1'})
 
             try:
-                ffmpeg.output(stream, str(output_path), **ffmpeg_options).run(capture_stderr=True, overwrite_output=True)
+                ffmpeg.output(stream, str(output_path), **ffmpeg_options).global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True, quiet=True)
             except ffmpeg.Error as e:
                 if 'incorrect codec parameters' in e.stderr.decode('utf-8', errors='ignore'):
                     logger.warning(f"Codec parameter issue, trying simpler encoding for {input_path.name}")
                     ffmpeg.input(str(input_path)).audio.output(
                         str(output_path),
                         c='aac' if output_format in ['m4a', 'aac'] else 'libmp3lame'
-                    ).run(capture_stderr=True, overwrite_output=True)
+                    ).global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True, quiet=True)
                 else:
                     raise
 
             if output_path.exists() and input_path.exists() and output_path.stat().st_size >= input_path.stat().st_size:
-                logger.info(f"Optimized file not smaller, using original for {input_path.name}.")
-                ffmpeg.input(str(input_path)).audio.output(str(output_path), c='copy').run(capture_stderr=True, overwrite_output=True)
+                ffmpeg.input(str(input_path)).audio.output(str(output_path), c='copy').global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True, quiet=True)
         except ffmpeg.Error as e:
             stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else "No stderr"
             logger.error(f"ffmpeg failed for audio {input_path.name}: {stderr}")
             try:
-                logger.info(f"Falling back to direct copy for {input_path.name}")
-                ffmpeg.input(str(input_path)).audio.output(str(output_path), c='copy').run(capture_stderr=True, overwrite_output=True)
+                ffmpeg.input(str(input_path)).audio.output(str(output_path), c='copy').global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True, quiet=True)
             except Exception as copy_err:
                 logger.error(f"Fallback copy also failed: {copy_err}")
                 import shutil
                 shutil.copy2(input_path, output_path)
-                logger.info(f"Used direct file copy as last resort for {input_path.name}")
+                print(f"❌ Failed to convert audio {input_path.name} (see exporter.log for details)")
+                print("   Try updating ffmpeg or check codec support.")
+                return
         except Exception as e:
             logger.error(f"Audio optimization failed for {input_path.name}: {e}")
-            raise
+            print(f"❌ Failed to process audio {input_path.name} (see exporter.log for details)")
+            return
