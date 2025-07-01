@@ -1,9 +1,3 @@
-# src/telegram_client.py
-
-"""
-TelegramManager: Handles Telegram connection, dialog selection, and user interaction.
-"""
-
 import asyncio
 import sys
 from time import sleep
@@ -30,10 +24,12 @@ from src.utils import clear_screen, logger
 
 
 class TelegramManager:
+    """TODO: Add description."""
     """
     Manages Telegram connection, dialog selection, and user interaction.
     """
     def __init__(self, config: Config):
+        """TODO: Add description."""
         """Initialize Telegram manager with configuration."""
         self.config = config
         proxy_info = None
@@ -191,7 +187,8 @@ class TelegramManager:
             rprint("[dim]No export targets selected.[/dim]")
         rprint("[bold]Choose an option (1-4):[/bold]", end=" ")
 
-    async def run_interactive_selection(self) -> bool:
+    async def run_interactive_selection(self):
+        """TODO: Add description."""
         """
         Run the interactive selection menu for export targets.
         """
@@ -235,7 +232,8 @@ class TelegramManager:
             rprint(f" [cyan]{i}.[/cyan] {dialog.name} [dim]({entity_type})[/dim]")
             dialog_map[i] = entity
 
-    async def _list_and_select_dialogs(self) -> bool:
+    async def _list_and_select_dialogs(self):
+        """TODO: Add description."""
         """
         List recent dialogs and allow user to select them interactively.
         """
@@ -318,7 +316,8 @@ class TelegramManager:
                 break
         return True
 
-    def _get_entity_type_name(self, entity) -> str:
+    def _get_entity_type_name(self, entity):
+        """TODO: Add description."""
         if isinstance(entity, types.User):
             return "User"
         if isinstance(entity, types.Chat):
@@ -364,7 +363,8 @@ class TelegramManager:
         name = getattr(entity, 'title', getattr(entity, 'username', str(entity.id)))
         return ExportTarget(id=entity.id, name=name, type=self._get_entity_type_name(entity))
 
-    async def _select_dialog_manually(self) -> bool:
+    async def _select_dialog_manually(self):
+        """TODO: Add description."""
         """
         Allow user to manually enter a chat/channel ID, username, or link.
         """

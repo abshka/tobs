@@ -1,10 +1,3 @@
-# main.py
-
-"""
-Main entry point for Telegram-to-Obsidian export.
-Handles configuration, interactive menu, export stages, and graceful shutdown.
-"""
-
 import asyncio
 import multiprocessing
 import signal
@@ -31,6 +24,7 @@ thread_executor: Optional[ThreadPoolExecutor] = None
 process_executor: Optional[ProcessPoolExecutor] = None
 
 def handle_sigint(signum, frame):
+    """Handle SIGINT (Ctrl+C) signal by printing a message and exiting the program."""
     rprint("\n[bold yellow]Received interrupt signal. Cleaning up and exiting...[/bold yellow]")
     sys.exit(0)
 
@@ -47,12 +41,28 @@ async def process_message_group(
     config: Config,
     http_session: aiohttp.ClientSession
 ) -> Optional[int]:
+    """
+    Process a group of Telegram messages, download and optimize media, create notes,
+    handle telegra.ph links, and update the cache with processed message information.
+
+    Args:
+        messages: List of Telegram messages to process.
+        entity_id: ID of the Telegram entity (channel/group/user).
+        entity_export_path: Path to export notes for this entity.
+        entity_media_path: Path to export media for this entity.
+        media_processor: MediaProcessor instance for handling media downloads.
+        note_generator: NoteGenerator instance for creating notes.
+        cache_manager: CacheManager instance for tracking processed messages.
+        config: Config object with export settings.
+        http_session: aiohttp ClientSession for HTTP requests.
+
+    Returns:
+        The ID of the first processed message, or None if processing failed.
+    """
     if not messages:
         return None
 
     first_message = messages[0]
-    msg_date = getattr(first_message, 'date', 'No date')
-    # logger.info(f"Message group {first_message.id} ({len(messages)}) from {msg_date}")
 
     try:
         media_paths = []
@@ -68,7 +78,6 @@ async def process_message_group(
                             break
                 if not filename:
                     filename = f"media_from_msg_{msg.id}"
-                # logger.info(f"[{filename}] Downloading")
                 result = await media_processor.download_and_optimize_media(msg, entity_id, entity_media_path)
                 if isinstance(result, list):
                     media_paths.extend(result)
@@ -80,18 +89,13 @@ async def process_message_group(
             logger.error(f"[{entity_id}] Failed to create main note for message {first_message.id}")
             return None
 
-        # rprint(f"[green]Writing: {note_path.name}[/green]")
-
         telegraph_links = find_telegraph_links(first_message.text)
         if telegraph_links:
-            # logger.info(f"Telegra.ph links found: {len(telegraph_links)}")
             original_content = await note_generator.read_note_content(note_path)
             modified_content = original_content
 
-            # Mapping: telegra.ph url -> note_name
             telegraph_mapping = {}
 
-            # First, create all local notes and fill mapping
             for link in telegraph_links:
                 article_note_path = await note_generator.create_note_from_telegraph_url(
                     session=http_session,
@@ -107,19 +111,25 @@ async def process_message_group(
                     local_link = f"[[{article_note_path.stem}]]"
                     modified_content = modified_content.replace(link, local_link)
 
-            # Second, replace all telegra.ph links in the note content with local links if available
             def telegraph_replacer(match):
+                """
+                Replace a telegra.ph URL in the note content with a local note link if available.
+
+                Args:
+                    match: Regex match object for a telegra.ph URL.
+
+                Returns:
+                    The local note link if found, otherwise the original URL.
+                """
                 url = match.group(0)
                 note_stem = telegraph_mapping.get(url)
-                if note_stem:
-                    return f"[[{note_stem}]]"
-                return url
+                return f"[[{note_stem}]]" if note_stem else url
+
             for link, note_stem in telegraph_mapping.items():
                 modified_content = modified_content.replace(link, f"[[{note_stem}]]")
 
             if modified_content != original_content:
                 await note_generator.write_note_content(note_path, modified_content)
-                # logger.info(f"Updated note with local Telegra.ph links: {note_path.name}")
 
         note_filename = note_path.name
         reply_to_id = getattr(first_message.reply_to, 'reply_to_msg_id', None)
@@ -137,8 +147,8 @@ async def process_message_group(
                 telegram_url=telegram_url
             )
 
-        # logger.info(f"Message group {first_message.id} processed -> {note_filename}")
         return first_message.id
+
 
     except Exception as e:
         logger.error(f"[{entity_id}] Critical failure in process_message_group for msg {first_message.id}: {e}", exc_info=(config.log_level == 'DEBUG'))
@@ -149,6 +159,21 @@ async def export_single_target(
     cache_manager: CacheManager, media_processor: MediaProcessor, note_generator: NoteGenerator,
     http_session: aiohttp.ClientSession
 ):
+    """
+    Export all messages and media for a single export target (Telegram entity).
+
+    Resolves the entity, prepares export and media directories, and processes all messages
+    for the target using the provided managers and processors.
+
+    Args:
+        target: ExportTarget object representing the Telegram entity to export.
+        config: Config object with export settings.
+        telegram_manager: TelegramManager instance for Telegram API access.
+        cache_manager: CacheManager instance for tracking processed messages.
+        media_processor: MediaProcessor instance for handling media downloads.
+        note_generator: NoteGenerator instance for creating notes.
+        http_session: aiohttp ClientSession for HTTP requests.
+    """
     entity_id_str = str(target.id)
     # logger.info(f"--- Starting export for target: {target.name or entity_id_str} ---")
 
@@ -202,6 +227,24 @@ async def process_entity_messages(
     media_processor: MediaProcessor, note_generator: NoteGenerator,
     http_session: aiohttp.ClientSession
 ):
+    """
+    Fetch and process all messages for a given Telegram entity, grouping messages as needed,
+    and handling concurrency and cache updates.
+
+    Args:
+        entity: Telegram entity object (channel/group/user).
+        entity_id_str: String ID of the entity.
+        target_name: Name of the export target.
+        entity_export_path: Path to export notes for this entity.
+        entity_media_path: Path to export media for this entity.
+        last_processed_id: ID of the last processed message for incremental export, or None.
+        config: Config object with export settings.
+        telegram_manager: TelegramManager instance for Telegram API access.
+        cache_manager: CacheManager instance for tracking processed messages.
+        media_processor: MediaProcessor instance for handling media downloads.
+        note_generator: NoteGenerator instance for creating notes.
+        http_session: aiohttp ClientSession for HTTP requests.
+    """
     semaphore = asyncio.Semaphore(config.max_workers)
     active_tasks = set()
     processed_count, successful_count = 0, 0
@@ -210,9 +253,16 @@ async def process_entity_messages(
     last_message_time = asyncio.get_event_loop().time()
 
     async def _process_group(group_id: int):
+        """
+        Process a group of messages identified by group_id, using concurrency control.
+
+        Args:
+            group_id: The ID of the message group to process.
+        """
         nonlocal successful_count
         messages = grouped_messages.pop(group_id, [])
-        if not messages: return
+        if not messages:
+            return
 
         async with semaphore:
             task = asyncio.create_task(
@@ -270,6 +320,13 @@ async def process_entity_messages(
         logger.error(f"[{target_name}] Error during message processing loop: {e}", exc_info=(config.log_level == 'DEBUG'))
 
 async def run_export(config: Config):
+    """
+    Main export routine. Sets up executors, managers, and sessions, and coordinates the
+    export process for all configured targets, including post-processing and link replacement.
+
+    Args:
+        config: Config object with export settings.
+    """
     global thread_executor, process_executor
     telegram_manager = None
     try:
@@ -406,9 +463,7 @@ async def run_export(config: Config):
         # logger.info("Export process finished.")
 
 def prompt_int(prompt, default):
-    """
-    Prompt user for integer input with a default value.
-    """
+    """Prompt user for integer input with a default value."""
     try:
         rprint(f"[bold]{prompt}[/bold] [dim][{default}][/dim]", end=" ")
         val = input().strip()
@@ -418,9 +473,7 @@ def prompt_int(prompt, default):
         return default
 
 def prompt_float(prompt, default):
-    """
-    Prompt user for float input with a default value.
-    """
+    """Prompt user for float input with a default value."""
     try:
         rprint(f"[bold]{prompt}[/bold] [dim][{default}][/dim]", end=" ")
         val = input().strip()
@@ -430,9 +483,7 @@ def prompt_float(prompt, default):
         return default
 
 async def interactive_config_update(config):
-    """
-    Interactive menu for advanced config options before export.
-    """
+    """Interactive menu for advanced config options before export."""
     from src.utils import clear_screen
     while True:
         logger.error("TEST ERROR TO LOG FILE ONLY")
@@ -466,8 +517,8 @@ async def interactive_config_update(config):
 
 async def main():
     """
-    Main async entry point for the exporter.
-    Loads config, sets up logging, and runs the export process.
+    Main async entry point for the exporter. Loads configuration, sets up logging,
+    and runs the export process. Handles startup errors and keyboard interrupts.
     """
     try:
         config = load_config()
@@ -475,7 +526,7 @@ async def main():
         logger.info("Configuration loaded.")
         await run_export(config)
     except (ConfigError, ValueError) as e:
-        rprint(f"[red]ERROR: Configuration failed: {e}[/red]", file=sys.stderr)
+        rprint(f"[red]Startup error: {e}[/red]")
         sys.exit(1)
     except KeyboardInterrupt:
         rprint("\n[bold yellow]Received interrupt signal. Cleaning up and exiting...[/bold yellow]")

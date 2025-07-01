@@ -19,8 +19,8 @@ class NoteGenerationError(ExporterError):
     pass
 
 class TelegramConnectionError(ExporterError):
-     """Error specific to Telegram connection or API interaction."""
-     pass
+    """Error specific to Telegram connection or API interaction."""
+    pass
 
 class ThreadPoolError(ExporterError):
     """Error related to thread pool execution."""

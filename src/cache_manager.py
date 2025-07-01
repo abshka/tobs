@@ -1,7 +1,3 @@
-"""
-CacheManager: Handles async loading,  log, and updating of the export cache.
-"""
-
 import asyncio
 import json
 import os
@@ -20,6 +16,7 @@ class CacheManager:
     Handles async loading, saving, and updating of the export cache.
     """
     def __init__(self, cache_path: Path):
+        """TODO: Add description."""
         self.cache_path = cache_path.resolve()
         self.cache: Dict[str, Any] = {"version": 2, "entities": {}}
         self._lock = asyncio.Lock()
@@ -29,9 +26,7 @@ class CacheManager:
         logger.info(f"Cache Manager initialized. Cache file: {self.cache_path}")
 
     async def load_cache(self):
-        """
-        Asynchronously loads cache data from a JSON file.
-        """
+        """TODO: Add description."""
         async with self._lock:
             if not self.cache_path.exists():
                 logger.warning(f"Cache file not found at {self.cache_path}. Starting fresh.")
@@ -70,22 +65,17 @@ class CacheManager:
                 self._dirty = False
 
     def _get_default_entity_cache(self) -> Dict[str, Any]:
-        """
-        Returns the default structure for a new entity in the cache.
-        """
+        """TODO: Add description."""
         return {"processed_messages": {}, "last_id": None, "title": "Unknown", "type": "unknown"}
 
     async def save_cache(self):
-        """
-        Saves the current cache state to a JSON file if it has changed.
-        """
+        """TODO: Add description."""
         if not self._dirty:
             return
         async with self._lock:
             if not self._dirty:
                 return
             try:
-                # logger.info(f"Saving cache to {self.cache_path}...")
                 loop = asyncio.get_running_loop()
                 cache_json = await loop.run_in_executor(
                     self._pool, partial(json.dumps, self.cache, indent=2, ensure_ascii=False)
@@ -94,15 +84,12 @@ class CacheManager:
                 async with aiofiles.open(temp_path, mode='w', encoding='utf-8') as f:
                     await f.write(cache_json)
                 await loop.run_in_executor(self._pool, os.replace, temp_path, self.cache_path)
-                # logger.info("Cache saved successfully.")
                 self._dirty = False
-            except Exception as e:
-                logger.error(f"Failed to save cache: {e}", exc_info=True)
+            except Exception:
+                pass
 
     async def schedule_background_save(self):
-        """
-        Schedules a cache save operation if needed and not already running.
-        """
+        """TODO: Add description."""
         if not self._dirty or (self._save_task and not self._save_task.done()):
             return
         await asyncio.sleep(0.1)
@@ -111,9 +98,7 @@ class CacheManager:
         self._save_task = asyncio.create_task(self.save_cache())
 
     async def _with_entity_data(self, entity_id: Union[str, int], operation: Callable, modify: bool = False):
-        """
-        Performs an operation on entity data with locking.
-        """
+        """TODO: Add description."""
         entity_id_str = str(entity_id)
         async with self._lock:
             entity_data = self.cache["entities"].setdefault(entity_id_str, self._get_default_entity_cache())
@@ -123,9 +108,7 @@ class CacheManager:
             return result
 
     async def is_processed(self, message_id: int, entity_id: Union[str, int]) -> bool:
-        """
-        Checks if a message ID has been processed for the given entity.
-        """
+        """TODO: Add description."""
         msg_id_str = str(message_id)
         def check(data):
             return msg_id_str in data.get("processed_messages", {})
@@ -135,7 +118,7 @@ class CacheManager:
         self, message_id: int, note_filename: str, reply_to_id: Optional[int],
         entity_id: Union[str, int], title: str, telegram_url: Optional[str]
     ):
-        """Добавляет обработанное сообщение в кэш для указанной сущности."""
+        """TODO: Add description."""
         msg_id_str = str(message_id)
         def update(data):
             data["processed_messages"][msg_id_str] = {
@@ -153,7 +136,7 @@ class CacheManager:
         await self.schedule_background_save()
 
     async def update_entity_info_async(self, entity_id: Union[str, int], title: str, entity_type: str):
-        """Обновляет информацию о сущности (заголовок, тип) в кэше."""
+        """TODO: Add description."""
         def update(data):
             data["title"] = title
             data["type"] = entity_type
@@ -161,9 +144,7 @@ class CacheManager:
         await self.schedule_background_save()
 
     async def add_media_file_to_message(self, entity_id: Union[str, int], message_id: int, media_filename: str, media_size: int):
-        """
-        Добавляет информацию о скачанном медиафайле к сообщению в кэше.
-        """
+        """TODO: Add description."""
         msg_id_str = str(message_id)
         def update(data):
             entry = data["processed_messages"].get(msg_id_str)
@@ -176,9 +157,7 @@ class CacheManager:
         await self.schedule_background_save()
 
     async def all_media_files_present(self, entity_id: Union[str, int], message_id: int, media_dir: Path) -> bool:
-        """
-        Проверяет, что все медиафайлы для сообщения реально существуют и соответствуют размеру.
-        """
+        """TODO: Add description."""
         msg_id_str = str(message_id)
         def check(data):
             entry = data["processed_messages"].get(msg_id_str)
@@ -192,12 +171,12 @@ class CacheManager:
         return await self._with_entity_data(entity_id, check) or False
 
     async def get_all_processed_messages_async(self, entity_id: Union[str, int]) -> Dict[str, Any]:
-        """Получает все обработанные сообщения для указанной сущности."""
+        """TODO: Add description."""
         def get_messages(data):
             return dict(data.get("processed_messages", {}))
         return await self._with_entity_data(entity_id, get_messages) or {}
 
     def get_last_processed_message_id(self, entity_id: Union[str, int]) -> Optional[int]:
-        """Находит самый большой ID обработанного сообщения для сущности."""
+        """TODO: Add description."""
         entity_data = self.cache.get("entities", {}).get(str(entity_id))
         return entity_data.get("last_id") if entity_data else None

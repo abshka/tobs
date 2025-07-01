@@ -1,9 +1,3 @@
-# src/config.py
-
-"""
-Config: Handles loading and validation of configuration from .env and environment variables.
-"""
-
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +22,7 @@ class ExportTarget:
     type: str = "unknown"
 
     def __post_init__(self):
+        """TODO: Add description."""
         self.id = str(self.id).strip()
         if self.id.startswith('@') or 't.me/' in self.id or self.id.startswith('-100'):
             self.type = "channel"
@@ -93,9 +88,7 @@ class Config:
     cache: Dict[str, Any] = field(default_factory=dict, init=False)
 
     def __post_init__(self):
-        """
-        Validate and set up paths after initialization.
-        """
+        """TODO: Add description."""
         if not self.api_id or not self.api_hash:
             raise ConfigError("API_ID and API_HASH must be set in .env file")
 
@@ -114,10 +107,7 @@ class Config:
             logger.warning("No export targets defined and interactive mode is off. Nothing to do.")
 
     def _update_target_paths(self):
-        """
-        Set up export and media paths for all targets.
-        (No directory creation here; only path calculation.)
-        """
+        """TODO: Add description."""
         self.export_paths = {}
         self.media_paths = {}
         for target in self.export_targets:
@@ -131,38 +121,28 @@ class Config:
             self.media_paths[target_id] = media_path.resolve()
 
     def _get_entity_folder_name(self, target: ExportTarget) -> str:
-        """
-        Generate a safe folder name for the entity.
-        """
+        """TODO: Add description."""
         name = target.name or f"id_{target.id}"
         clean_name = sanitize_filename(name, max_length=100)
         return clean_name
 
     def add_export_target(self, target: ExportTarget):
-        """
-        Add a new export target and update paths.
-        """
+        """TODO: Add description."""
         if str(target.id) not in [str(t.id) for t in self.export_targets]:
             self.export_targets.append(target)
             self._update_target_paths()
             # logger.info(f"Added export target: {target.name or target.id}")
 
     def get_export_path_for_entity(self, entity_id: Union[str, int]) -> Path:
-        """
-        Get the export path for the specified entity.
-        """
+        """TODO: Add description."""
         return self.export_paths.get(str(entity_id), self.export_path)
 
     def get_media_path_for_entity(self, entity_id: Union[str, int]) -> Path:
-        """
-        Get the media path for the specified entity.
-        """
+        """TODO: Add description."""
         return self.media_paths.get(str(entity_id), self.export_path / self.media_subdir)
 
 def _parse_bool(value: Optional[Union[str, bool]], default: bool = False) -> bool:
-    """
-    Convert a string value to boolean.
-    """
+    """TODO: Add description."""
     if value is None:
         return default
     if isinstance(value, bool):
@@ -170,9 +150,7 @@ def _parse_bool(value: Optional[Union[str, bool]], default: bool = False) -> boo
     return str(value).lower() in ('true', '1', 'yes', 'y', 'on')
 
 def load_config(env_path: Union[str, Path] = ".env") -> Config:
-    """
-    Loads configuration from .env file and environment variables.
-    """
+    """TODO: Add description."""
     if Path(env_path).exists():
         load_dotenv(dotenv_path=env_path)
     try:

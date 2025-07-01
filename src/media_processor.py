@@ -1,9 +1,3 @@
-# src/media_processor.py
-
-"""
-MediaProcessor: Handles media downloads, progress reporting, throttling, and optimization.
-"""
-
 import asyncio
 import concurrent.futures
 import mimetypes
@@ -37,10 +31,9 @@ AIOHTTP_HEADERS = {
 }
 
 class ProgressCallback:
-    """
-    Reports concise, event-based progress and handles throttling.
-    """
+    """TODO: Add description."""
     def __init__(self, config: Config, description: str):
+        """TODO: Add description."""
         self.config = config
         self.description = description
         self.last_check_time = time.time()
@@ -48,6 +41,7 @@ class ProgressCallback:
         self.throttle_counter = 0
 
     def __call__(self, downloaded_bytes: int, total_bytes: int):
+        """TODO: Add description."""
         percent = int((downloaded_bytes / total_bytes) * 100) if total_bytes else 0
         if not hasattr(self, "_last_percent") or percent // 10 != getattr(self, "_last_percent", -1):
             rprint(f"Downloading {self.description} {percent}% ({downloaded_bytes // 1024} kb / {total_bytes // 1024} kb)")
@@ -55,9 +49,7 @@ class ProgressCallback:
         self._check_throttling(downloaded_bytes)
 
     def _check_throttling(self, downloaded_bytes: int):
-        """
-        Checks download speed and pauses if too low.
-        """
+        """TODO: Add description."""
         now = time.time()
         elapsed = now - self.last_check_time
         if elapsed < 3:
@@ -83,7 +75,9 @@ class ProgressCallback:
 
 
 class MediaProcessor:
+    """TODO: Add description."""
     def __init__(self, config: Config, client: TelegramClient):
+        """TODO: Add description."""
         self.config = config
         self.client = client
         self.download_semaphore = asyncio.Semaphore(config.concurrent_downloads)
@@ -96,6 +90,7 @@ class MediaProcessor:
     async def download_and_optimize_media(
         self, message: Message, entity_id: Union[str, int], entity_media_path: Path
     ) -> List[Path]:
+        """TODO: Add description."""
         if not self.config.media_download:
             return []
 
@@ -129,6 +124,7 @@ class MediaProcessor:
         return final_paths
 
     async def download_external_image(self, session: aiohttp.ClientSession, url: str, media_path: Path, max_retries: int = 3) -> Optional[Path]:
+        """TODO: Add description."""
         attempt = 0
         while attempt < max_retries:
             try:
@@ -173,6 +169,7 @@ class MediaProcessor:
         return None
 
     async def _add_media_from_message(self, message: Message, media_items: List):
+        """TODO: Add description."""
         if not message.media:
             return
         if isinstance(message.media, MessageMediaPhoto) and isinstance(message.media.photo, Photo):
@@ -181,6 +178,7 @@ class MediaProcessor:
             media_items.append((self._get_document_type(message.media.document), message))
 
     def _get_document_type(self, doc: Document) -> str:
+        """TODO: Add description."""
         if any(isinstance(attr, DocumentAttributeVideo) for attr in doc.attributes):
             return "round_video" if any(getattr(attr, 'round_message', False) for attr in doc.attributes if isinstance(attr, DocumentAttributeVideo)) else "video"
         return "audio" if any(isinstance(attr, DocumentAttributeAudio) for attr in doc.attributes) else "document"
@@ -188,6 +186,7 @@ class MediaProcessor:
     async def _process_single_item(
             self, message: Message, entity_id_str: str, media_type: str, entity_media_path: Path
     ) -> Optional[Path]:
+        """TODO: Add description."""
         try:
             # Determine the media_obj for filename generation
             if isinstance(message.media, MessageMediaPhoto) and isinstance(message.media.photo, Photo):
@@ -203,7 +202,6 @@ class MediaProcessor:
             final_path = type_subdir / filename
             raw_download_path = type_subdir / f"raw_{filename}"
 
-            # Проверка кэша медиафайлов: если все медиа на месте — пропустить скачивание
             cache_manager = self.config.cache_manager if hasattr(self.config, "cache_manager") else None
             all_media_ok = False
             if cache_manager:
@@ -224,7 +222,6 @@ class MediaProcessor:
             if optimization_success:
                 if raw_download_path != final_path:
                     await self._cleanup_file_async(raw_download_path)
-                # Обновить кэш медиафайлов после успешной загрузки и оптимизации
                 if cache_manager:
                     media_size = final_path.stat().st_size if final_path.exists() else 0
                     await cache_manager.add_media_file_to_message(
@@ -239,6 +236,7 @@ class MediaProcessor:
             return None
 
     async def _download_media(self, message: Message, raw_download_path: Path, filename: str) -> bool:
+        """TODO: Add description."""
         try:
             async with self.download_semaphore:
                 progress_callback = ProgressCallback(self.config, filename)
@@ -253,7 +251,7 @@ class MediaProcessor:
             return False
 
     async def _optimize_media(self, raw_path: Path, final_path: Path, media_type: str) -> bool:
-        # Minimize debug logs: only log on error or if verbose
+        """TODO: Add description."""
         try:
             if media_type == "image":
                 await self._optimize_image(raw_path, final_path)
@@ -276,6 +274,7 @@ class MediaProcessor:
             return False
 
     async def _cleanup_file_async(self, file_path: Path):
+        """TODO: Add description."""
         try:
             if await run_in_thread_pool(file_path.exists):
                 await run_in_thread_pool(file_path.unlink)
@@ -283,6 +282,7 @@ class MediaProcessor:
             logger.warning(f"Could not clean up file {file_path}: {e}")
 
     def _get_filename(self, media_obj: Union[Photo, Document], message_id: int, media_type: str, entity_id_str: str) -> str:
+        """TODO: Add description."""
         media_id = getattr(media_obj, 'id', 'no_id')
         base_name = f"{entity_id_str}_msg{message_id}_{media_type}_{media_id}"
         ext = ".dat"
@@ -306,9 +306,11 @@ class MediaProcessor:
         return f"{safe_base}{safe_ext}"
 
     async def _optimize_image(self, input_path: Path, output_path: Path):
+        """TODO: Add description."""
         await run_in_thread_pool(self._sync_optimize_image, input_path, output_path)
 
     def _sync_optimize_image(self, input_path: Path, output_path: Path):
+        """TODO: Add description."""
         try:
             with Image.open(input_path) as img:
                 img_to_save = img.convert('RGB')
@@ -329,9 +331,11 @@ class MediaProcessor:
             raise
 
     async def _optimize_video(self, input_path: Path, output_path: Path):
+        """TODO: Add description."""
         await run_in_thread_pool(self._sync_optimize_video, input_path, output_path)
 
     def _sync_optimize_video(self, input_path: Path, output_path: Path):
+        """TODO: Add description."""
         try:
             hw_acceleration = getattr(self.config, 'hw_acceleration', 'none').lower()
             use_h265 = getattr(self.config, 'use_h265', True)
@@ -369,33 +373,35 @@ class MediaProcessor:
         except ffmpeg.Error as e:
             stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else "No stderr"
             logger.error(f"ffmpeg failed for video {input_path.name}: {stderr}")
-            print(f"❌ Failed to convert video {input_path.name} (see exporter.log for details)")
-            print("   Try updating ffmpeg or check codec support.")
             return
         except Exception as e:
             logger.error(f"Video optimization failed for {input_path.name}: {e}")
-            print(f"❌ Failed to process video {input_path.name} (see exporter.log for details)")
             return
 
     def _configure_nvidia_encoder(self, options, use_h265, crf, bitrate):
+        """TODO: Add description."""
         codec = 'hevc_nvenc' if use_h265 else 'h264_nvenc'
         options.update({'c:v': codec, 'preset': 'p6', 'rc:v': 'vbr_hq', 'cq': str(crf), 'b:v': bitrate, 'spatial-aq': '1', 'temporal-aq': '1'})
 
     def _configure_amd_encoder(self, options, use_h265, crf, bitrate):
+        """TODO: Add description."""
         codec = 'hevc_amf' if use_h265 else 'h264_amf'
         options.update({'c:v': codec, 'quality': 'quality', 'qp_i': str(crf), 'qp_p': str(crf + 2), 'b:v': bitrate.replace('k', '000')})
 
     def _configure_intel_encoder(self, options, use_h265, bitrate):
+        """TODO: Add description."""
         codec = 'hevc_qsv' if use_h265 else 'h264_qsv'
         options.update({'c:v': codec, 'preset': 'slower', 'b:v': bitrate, 'look_ahead': '1'})
 
     def _configure_software_encoder(self, options, use_h265, crf, bitrate):
+        """TODO: Add description."""
         if use_h265:
             options.update({'c:v': 'libx265', 'crf': str(crf), 'preset': self.config.video_preset, 'x265-params': "profile=main:level=5.1:no-sao=1:bframes=8:rd=4:psy-rd=1.0:rect=1:aq-mode=3:aq-strength=0.8:deblock=-1:-1", 'maxrate': bitrate, 'bufsize': f"{int(bitrate.replace('k', '')) * 2}k"})
         else:
             options.update({'c:v': 'libx264', 'crf': str(crf), 'preset': self.config.video_preset, 'profile:v': 'high', 'level': '4.1', 'tune': 'film', 'subq': '9', 'trellis': '2', 'partitions': 'all', 'direct-pred': 'auto', 'me_method': 'umh', 'g': '250', 'maxrate': bitrate, 'bufsize': f"{int(bitrate.replace('k', '')) * 2}k"})
 
     def _configure_audio_options(self, options, audio_stream, duration, is_voice_hint):
+        """TODO: Add description."""
         audio_bitrate = self._calculate_audio_bitrate(audio_stream.get('bit_rate'), audio_stream.get('channels', 2))
         options.update({'c:a': 'aac', 'b:a': audio_bitrate, 'ar': '44100', 'ac': '2'})
         if is_voice_hint or duration > 0:
@@ -403,6 +409,7 @@ class MediaProcessor:
             options['ac'] = '1'
 
     def _calculate_optimal_bitrate(self, width: int, height: int) -> str:
+        """TODO: Add description."""
         pixels = width * height
         if pixels <= 0:
             return "500k"
@@ -415,6 +422,7 @@ class MediaProcessor:
         return "400k"
 
     def _calculate_audio_bitrate(self, current_bitrate, channels: int) -> str:
+        """TODO: Add description."""
         if not current_bitrate:
             return "96k" if channels > 1 else "64k"
         try:
@@ -428,9 +436,11 @@ class MediaProcessor:
             return "96k"
 
     async def _optimize_audio(self, input_path: Path, output_path: Path):
+        """TODO: Add description."""
         await run_in_thread_pool(self._sync_optimize_audio, input_path, output_path)
 
     def _sync_optimize_audio(self, input_path: Path, output_path: Path):
+        """TODO: Add description."""
         try:
             probe = ffmpeg.probe(str(input_path))
             audio_stream = next((s for s in probe['streams'] if s['codec_type'] == 'audio'), None)

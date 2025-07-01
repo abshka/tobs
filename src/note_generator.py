@@ -1,9 +1,3 @@
-# src/note_generator.py
-
-"""
-NoteGenerator: Handles creation and post-processing of Markdown notes from Telegram messages.
-"""
-
 import asyncio
 import re
 from datetime import datetime
@@ -28,7 +22,9 @@ class NoteGenerator:
     """
     Handles creation and post-processing of Markdown notes from Telegram messages.
     """
+
     def __init__(self, config: Config):
+        """TODO: Add description."""
         self.config = config
         self.file_locks: Dict[Path, asyncio.Lock] = {}
         self.io_semaphore = asyncio.Semaphore(20)
@@ -40,9 +36,7 @@ class NoteGenerator:
         entity_id: Union[str, int],
         entity_export_path: Path,
     ) -> Optional[Path]:
-        """
-        Creates a Markdown file for a Telegram message.
-        """
+        """TODO: Add description."""
         try:
             note_path = await self._prepare_note_path(message, entity_id, entity_export_path)
             if not note_path:
@@ -69,11 +63,7 @@ class NoteGenerator:
         entity_id: str,
         telegraph_mapping: dict = None
     ) -> Optional[Path]:
-        """
-        Creates a .md file from a Telegra.ph article, including images.
-        Also updates telegraph_mapping with url -> note_name.
-        The note filename uses the publication date from the article if available.
-        """
+        """TODO: Add description."""
         article_data = await fetch_and_parse_telegraph_to_markdown(
             session, url, media_export_path, media_processor, cache, entity_id, telegraph_mapping
         )
@@ -101,9 +91,7 @@ class NoteGenerator:
         return await self._write_note_file(note_path, final_content)
 
     async def read_note_content(self, note_path: Path) -> str:
-        """
-        Reads the content of a note file.
-        """
+        """TODO: Add description."""
         if note_path not in self.file_locks:
             self.file_locks[note_path] = asyncio.Lock()
 
@@ -112,16 +100,12 @@ class NoteGenerator:
                 return await f.read()
 
     async def write_note_content(self, note_path: Path, content: str):
-        """
-        Overwrites the content of a note file.
-        """
+        """TODO: Add description."""
         await self._write_note_file(note_path, content)
 
     async def _prepare_note_path(self, message: Message, entity_id: Union[str, int],
                                  entity_export_path: Path) -> Optional[Path]:
-        """
-        Determines the path for a note file based on date and title.
-        """
+        """TODO: Add description."""
         try:
             message_text = getattr(message, 'text', '') or ""
             first_line = message_text.split('\n', 1)[0]
@@ -144,9 +128,7 @@ class NoteGenerator:
 
     async def _generate_note_content(self, message: Message, media_paths: List[Path],
                                      note_path: Path) -> str:
-        """
-        Generates Markdown content for a note.
-        """
+        """TODO: Add description."""
         message_text = getattr(message, 'text', '') or ""
         content = message_text.strip() + "\n\n" if message_text else ""
         if media_paths:
@@ -156,9 +138,7 @@ class NoteGenerator:
         return content.strip()
 
     async def _generate_media_links(self, media_paths: List[Path], note_path: Path) -> List[str]:
-        """
-        Creates Obsidian-style links for media files.
-        """
+        """TODO: Add description."""
         media_links = []
         for media_path in media_paths:
             if media_path and await run_in_thread_pool(media_path.exists):
@@ -168,9 +148,7 @@ class NoteGenerator:
         return media_links
 
     async def _write_note_file(self, note_path: Path, content: str) -> Optional[Path]:
-        """
-        Writes content to a note file with locking for thread safety.
-        """
+        """TODO: Add description."""
         if note_path not in self.file_locks:
             self.file_locks[note_path] = asyncio.Lock()
 
@@ -184,10 +162,7 @@ class NoteGenerator:
                 return None
 
     async def postprocess_all_notes(self, export_root: Path, entity_id: str, cache: dict):
-        """
-        Second pass through all .md files to replace t.me markdown links
-        with internal Obsidian links using the full cache.
-        """
+        """TODO: Add description."""
         from rich import print as rprint
         rprint(f"[green]*** Post-processing links for entity {entity_id} ***[/green]")
 

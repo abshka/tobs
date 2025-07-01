@@ -11,7 +11,9 @@ from src.utils import get_relative_path, logger, run_in_thread_pool
 
 
 class ReplyLinker:
+    """TODO: Add description."""
     def __init__(self, config: Config, cache_manager: CacheManager):
+        """TODO: Add description."""
         self.config = config
         self.cache_manager = cache_manager
         self.io_semaphore = asyncio.Semaphore(20)
@@ -61,7 +63,7 @@ class ReplyLinker:
         logger.info(f"[{entity_id}] Finished processing reply links")
 
     async def _process_reply_links(self, links: List[Tuple[str, str]], entity_export_path: Path, entity_id: str) -> int:
-        """Process all normal reply links in parallel."""
+        """TODO: Add description."""
         if not links:
             return 0
 
@@ -84,7 +86,7 @@ class ReplyLinker:
         return success_count
 
     async def _process_unresolved_replies(self, filenames: Set[str], entity_export_path: Path, entity_id: str) -> int:
-        """Process all unresolved reply markers in parallel."""
+        """TODO: Add description."""
         if not filenames:
             return 0
 
@@ -110,7 +112,7 @@ class ReplyLinker:
     async def _link_parent_to_child(
         self, parent_filename: str, child_filename: str, entity_export_path: Path, entity_id: str
     ) -> bool:
-        """Link a child note to its parent note."""
+        """TODO: Add description."""
         # Resolve both file paths
         parent_path = await self._find_note_path(entity_export_path, parent_filename)
         child_path = await self._find_note_path(entity_export_path, child_filename)
@@ -142,7 +144,7 @@ class ReplyLinker:
             return False
 
     async def _mark_as_unresolved(self, child_filename: str, entity_export_path: Path, entity_id: str) -> bool:
-        """Mark a note as replying to an unresolved message."""
+        """TODO: Add description."""
         child_path = await self._find_note_path(entity_export_path, child_filename)
         if not child_path:
             return False
@@ -159,7 +161,7 @@ class ReplyLinker:
             return False
 
     async def _find_note_path(self, base_path: Path, filename: str) -> Optional[Path]:
-        """Find a note file in the export directory or year subdirectory."""
+        """TODO: Add description."""
         # Try directly in the base path
         note_path = base_path / filename
         if await run_in_thread_pool(note_path.exists):
@@ -178,7 +180,7 @@ class ReplyLinker:
         return None
 
     async def _add_line_to_file(self, file_path: Path, line: str, check_existing: Union[str, Tuple[str, ...]], entity_id: str) -> bool:
-        """Add a line to the beginning of a file if it doesn't already contain the specified text."""
+        """TODO: Add description."""
         # Get or create a lock for this file
         if file_path not in self.file_locks:
             self.file_locks[file_path] = asyncio.Lock()

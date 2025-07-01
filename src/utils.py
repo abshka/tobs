@@ -1,10 +1,3 @@
-# src/utils.py
-
-"""
-Utility functions for Telegram-to-Obsidian exporter.
-Includes logging setup, filename sanitization, async helpers, and Telegra.ph parsing.
-"""
-
 import asyncio
 import logging
 import os
@@ -19,18 +12,17 @@ import aiohttp
 from bs4 import BeautifulSoup, NavigableString
 from loguru import logger
 
-# Минимизируем логи: только ошибки в консоль, всё остальное — в файл на уровне WARNING
-logger.remove()  # Удалить все обработчики
-logger.add("exporter.log", level="WARNING", rotation="1 MB")  # Только в файл, только важное
+logger.remove()
+logger.add("exporter.log", level="WARNING", rotation="1 MB")
 
 
 class TelethonFilter(logging.Filter):
+    """TODO: Add description."""
     def filter(self, record):
         msg = record.getMessage()
         ignore_phrases = [
             "Server sent a very old message with ID",
             "Security error while unpacking a received message",
-            "Server replied with a wrong session ID"
         ]
         return not any(phrase in msg for phrase in ignore_phrases)
 
