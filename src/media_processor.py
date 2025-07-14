@@ -9,7 +9,7 @@ from typing import List, Optional, Union
 import aiofiles
 import aiohttp
 import ffmpeg
-from PIL import Image, UnidentifiedImageError
+from PIL import ImageFile
 from rich import print as rprint
 from telethon import TelegramClient
 from telethon.tl.types import (
@@ -26,14 +26,21 @@ from telethon.tl.types import (
 from src.config import Config
 from src.utils import ensure_dir_exists, logger, run_in_thread_pool, sanitize_filename
 
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 AIOHTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
 
 class ProgressCallback:
-    """TODO: Add description."""
+    """
+    Callback for tracking and logging download progress, and handling throttling.
+
+    Args:
+        config (Config): Configuration object.
+        description (str): Description of the file being downloaded.
+    """
     def __init__(self, config: Config, description: str):
-        """TODO: Add description."""
         self.config = config
         self.description = description
         self.last_check_time = time.time()
@@ -41,7 +48,13 @@ class ProgressCallback:
         self.throttle_counter = 0
 
     def __call__(self, downloaded_bytes: int, total_bytes: int):
-        """TODO: Add description."""
+        """
+        Called during download to update progress and check for throttling.
+
+        Args:
+            downloaded_bytes (int): Number of bytes downloaded so far.
+            total_bytes (int): Total bytes to download.
+        """
         percent = int((downloaded_bytes / total_bytes) * 100) if total_bytes else 0
         if not hasattr(self, "_last_percent") or percent // 10 != getattr(self, "_last_percent", -1):
             rprint(f"Downloading {self.description} {percent}% ({downloaded_bytes // 1024} kb / {total_bytes // 1024} kb)")
@@ -49,7 +62,12 @@ class ProgressCallback:
         self._check_throttling(downloaded_bytes)
 
     def _check_throttling(self, downloaded_bytes: int):
-        """TODO: Add description."""
+        """
+        Checks download speed and pauses if throttling is suspected.
+
+        Args:
+            downloaded_bytes (int): Number of bytes downloaded so far.
+        """
         now = time.time()
         elapsed = now - self.last_check_time
         if elapsed < 3:
@@ -75,9 +93,14 @@ class ProgressCallback:
 
 
 class MediaProcessor:
-    """TODO: Add description."""
+    """
+    Handles downloading, optimizing, and managing media files from Telegram messages.
+
+    Args:
+        config (Config): Configuration object.
+        client (TelegramClient): Telethon client instance.
+    """
     def __init__(self, config: Config, client: TelegramClient):
-        """TODO: Add description."""
         self.config = config
         self.client = client
         self.download_semaphore = asyncio.Semaphore(config.concurrent_downloads)
@@ -90,7 +113,17 @@ class MediaProcessor:
     async def download_and_optimize_media(
         self, message: Message, entity_id: Union[str, int], entity_media_path: Path
     ) -> List[Path]:
-        """TODO: Add description."""
+        """
+        Downloads and optimizes all media from a Telegram message.
+
+        Args:
+            message (Message): Telegram message object.
+            entity_id (Union[str, int]): ID of the entity (chat/user).
+            entity_media_path (Path): Path to store media files.
+
+        Returns:
+            List[Path]: List of paths to processed media files.
+        """
         if not self.config.media_download:
             return []
 
@@ -124,7 +157,18 @@ class MediaProcessor:
         return final_paths
 
     async def download_external_image(self, session: aiohttp.ClientSession, url: str, media_path: Path, max_retries: int = 3) -> Optional[Path]:
-        """TODO: Add description."""
+        """
+        Downloads an external image from a URL and saves it to the specified path.
+
+        Args:
+            session (aiohttp.ClientSession): Aiohttp session for HTTP requests.
+            url (str): URL of the image to download.
+            media_path (Path): Directory to save the image.
+            max_retries (int): Maximum number of download attempts.
+
+        Returns:
+            Optional[Path]: Path to the downloaded image, or None if failed.
+        """
         attempt = 0
         while attempt < max_retries:
             try:
@@ -149,7 +193,6 @@ class MediaProcessor:
                         if file_path.exists():
                             return file_path
 
-                        # Always use concise, event-based logging every 10%
                         downloaded = 0
                         last_percent = -1
                         async with aiofiles.open(file_path, 'wb') as f:
@@ -169,7 +212,13 @@ class MediaProcessor:
         return None
 
     async def _add_media_from_message(self, message: Message, media_items: List):
-        """TODO: Add description."""
+        """
+        Adds media items from a Telegram message to the provided list.
+
+        Args:
+            message (Message): Telegram message object.
+            media_items (List): List to append found media items.
+        """
         if not message.media:
             return
         if isinstance(message.media, MessageMediaPhoto) and isinstance(message.media.photo, Photo):
@@ -178,7 +227,15 @@ class MediaProcessor:
             media_items.append((self._get_document_type(message.media.document), message))
 
     def _get_document_type(self, doc: Document) -> str:
-        """TODO: Add description."""
+        """
+        Determines the type of a Telegram document.
+
+        Args:
+            doc (Document): Telegram document object.
+
+        Returns:
+            str: Type of the document ('video', 'round_video', 'audio', or 'document').
+        """
         if any(isinstance(attr, DocumentAttributeVideo) for attr in doc.attributes):
             return "round_video" if any(getattr(attr, 'round_message', False) for attr in doc.attributes if isinstance(attr, DocumentAttributeVideo)) else "video"
         return "audio" if any(isinstance(attr, DocumentAttributeAudio) for attr in doc.attributes) else "document"
@@ -186,9 +243,19 @@ class MediaProcessor:
     async def _process_single_item(
             self, message: Message, entity_id_str: str, media_type: str, entity_media_path: Path
     ) -> Optional[Path]:
-        """TODO: Add description."""
+        """
+        Processes a single media item: downloads and optimizes it.
+
+        Args:
+            message (Message): Telegram message object.
+            entity_id_str (str): Entity ID as string.
+            media_type (str): Type of media ('image', 'video', etc.).
+            entity_media_path (Path): Path to store media files.
+
+        Returns:
+            Optional[Path]: Path to the processed media file, or None if failed.
+        """
         try:
-            # Determine the media_obj for filename generation
             if isinstance(message.media, MessageMediaPhoto) and isinstance(message.media.photo, Photo):
                 media_obj = message.media.photo
             elif isinstance(message.media, MessageMediaDocument) and isinstance(message.media.document, Document):
@@ -230,13 +297,24 @@ class MediaProcessor:
                 return final_path
             else:
                 logger.error(f"Media processing failed for msg {message.id}, type {media_type}")
+                await self._cleanup_file_async(raw_download_path)
                 return None
         except Exception as e:
             logger.error(f"Error in media processing pipeline for msg {getattr(message, 'id', 'unknown')}: {e}", exc_info=True)
             return None
 
     async def _download_media(self, message: Message, raw_download_path: Path, filename: str) -> bool:
-        """TODO: Add description."""
+        """
+        Downloads media from a Telegram message.
+
+        Args:
+            message (Message): Telegram message object.
+            raw_download_path (Path): Path to save the downloaded file.
+            filename (str): Name of the file being downloaded.
+
+        Returns:
+            bool: True if download succeeded, False otherwise.
+        """
         try:
             async with self.download_semaphore:
                 progress_callback = ProgressCallback(self.config, filename)
@@ -251,10 +329,21 @@ class MediaProcessor:
             return False
 
     async def _optimize_media(self, raw_path: Path, final_path: Path, media_type: str) -> bool:
-        """TODO: Add description."""
+        """
+        Optimizes a downloaded media file based on its type.
+
+        Args:
+            raw_path (Path): Path to the raw downloaded file.
+            final_path (Path): Path to save the optimized file.
+            media_type (str): Type of media ('image', 'video', etc.).
+
+        Returns:
+            bool: True if optimization succeeded, False otherwise.
+        """
         try:
             if media_type == "image":
-                await self._optimize_image(raw_path, final_path)
+                import shutil
+                await run_in_thread_pool(shutil.copy, raw_path, final_path)
             elif media_type in ["video", "round_video"]:
                 await self._optimize_video(raw_path, final_path)
             elif media_type == "audio":
@@ -264,17 +353,15 @@ class MediaProcessor:
             return await run_in_thread_pool(final_path.exists)
         except Exception as e:
             logger.error(f"Failed to process {media_type} {raw_path.name}: {e}")
-            try:
-                if await run_in_thread_pool(raw_path.exists):
-                    logger.warning(f"Processing failed, attempting direct copy for {raw_path.name}")
-                    await run_in_thread_pool(lambda: raw_path.rename(final_path))
-                    return await run_in_thread_pool(final_path.exists)
-            except Exception as e2:
-                logger.error(f"Direct copy also failed for {raw_path.name}: {e2}")
             return False
 
     async def _cleanup_file_async(self, file_path: Path):
-        """TODO: Add description."""
+        """
+        Asynchronously deletes a file if it exists.
+
+        Args:
+            file_path (Path): Path to the file to delete.
+        """
         try:
             if await run_in_thread_pool(file_path.exists):
                 await run_in_thread_pool(file_path.unlink)
@@ -282,7 +369,18 @@ class MediaProcessor:
             logger.warning(f"Could not clean up file {file_path}: {e}")
 
     def _get_filename(self, media_obj: Union[Photo, Document], message_id: int, media_type: str, entity_id_str: str) -> str:
-        """TODO: Add description."""
+        """
+        Generates a safe filename for a media object.
+
+        Args:
+            media_obj (Union[Photo, Document]): Media object (Photo or Document).
+            message_id (int): Telegram message ID.
+            media_type (str): Type of media.
+            entity_id_str (str): Entity ID as string.
+
+        Returns:
+            str: Safe filename for the media.
+        """
         media_id = getattr(media_obj, 'id', 'no_id')
         base_name = f"{entity_id_str}_msg{message_id}_{media_type}_{media_id}"
         ext = ".dat"
@@ -306,36 +404,43 @@ class MediaProcessor:
         return f"{safe_base}{safe_ext}"
 
     async def _optimize_image(self, input_path: Path, output_path: Path):
-        """TODO: Add description."""
-        await run_in_thread_pool(self._sync_optimize_image, input_path, output_path)
+        """
+        (Deprecated) Image optimization is not needed. Kept for compatibility.
+
+        Args:
+            input_path (Path): Path to input image.
+            output_path (Path): Path to output image.
+        """
+        pass
 
     def _sync_optimize_image(self, input_path: Path, output_path: Path):
-        """TODO: Add description."""
-        try:
-            with Image.open(input_path) as img:
-                img_to_save = img.convert('RGB')
-                if img.mode in ('RGBA', 'P', 'LA'):
-                    if 'transparency' in img.info or (img.mode in ('RGBA', 'LA') and any(p < 255 for p in img.getchannel('A').getdata())):
-                        img_to_save = img.convert('RGBA')
+        """
+        (Deprecated) Image optimization is not needed. Kept for compatibility.
 
-                output_path = output_path.with_suffix('.webp')
-                img_to_save.save(
-                    output_path, "WEBP",
-                    quality=self.config.image_quality, method=6
-                )
-        except UnidentifiedImageError:
-            logger.error(f"Cannot identify image file: {input_path}")
-            raise
-        except Exception as e:
-            logger.error(f"Image optimization failed: {e}")
-            raise
+        Args:
+            input_path (Path): Path to input image.
+            output_path (Path): Path to output image.
+        """
+        pass
 
     async def _optimize_video(self, input_path: Path, output_path: Path):
-        """TODO: Add description."""
+        """
+        Asynchronously optimizes a video file.
+
+        Args:
+            input_path (Path): Path to input video.
+            output_path (Path): Path to output video.
+        """
         await run_in_thread_pool(self._sync_optimize_video, input_path, output_path)
 
     def _sync_optimize_video(self, input_path: Path, output_path: Path):
-        """TODO: Add description."""
+        """
+        Synchronously optimizes a video file using ffmpeg.
+
+        Args:
+            input_path (Path): Path to input video.
+            output_path (Path): Path to output video.
+        """
         try:
             hw_acceleration = getattr(self.config, 'hw_acceleration', 'none').lower()
             use_h265 = getattr(self.config, 'use_h265', True)
@@ -379,29 +484,68 @@ class MediaProcessor:
             return
 
     def _configure_nvidia_encoder(self, options, use_h265, crf, bitrate):
-        """TODO: Add description."""
+        """
+        Configures ffmpeg options for NVIDIA hardware acceleration.
+
+        Args:
+            options (dict): ffmpeg options dictionary.
+            use_h265 (bool): Whether to use H.265 codec.
+            crf (int): Constant Rate Factor for quality.
+            bitrate (str): Target bitrate.
+        """
         codec = 'hevc_nvenc' if use_h265 else 'h264_nvenc'
         options.update({'c:v': codec, 'preset': 'p6', 'rc:v': 'vbr_hq', 'cq': str(crf), 'b:v': bitrate, 'spatial-aq': '1', 'temporal-aq': '1'})
 
     def _configure_amd_encoder(self, options, use_h265, crf, bitrate):
-        """TODO: Add description."""
+        """
+        Configures ffmpeg options for AMD hardware acceleration.
+
+        Args:
+            options (dict): ffmpeg options dictionary.
+            use_h265 (bool): Whether to use H.265 codec.
+            crf (int): Constant Rate Factor for quality.
+            bitrate (str): Target bitrate.
+        """
         codec = 'hevc_amf' if use_h265 else 'h264_amf'
         options.update({'c:v': codec, 'quality': 'quality', 'qp_i': str(crf), 'qp_p': str(crf + 2), 'b:v': bitrate.replace('k', '000')})
 
     def _configure_intel_encoder(self, options, use_h265, bitrate):
-        """TODO: Add description."""
+        """
+        Configures ffmpeg options for Intel hardware acceleration.
+
+        Args:
+            options (dict): ffmpeg options dictionary.
+            use_h265 (bool): Whether to use H.265 codec.
+            bitrate (str): Target bitrate.
+        """
         codec = 'hevc_qsv' if use_h265 else 'h264_qsv'
         options.update({'c:v': codec, 'preset': 'slower', 'b:v': bitrate, 'look_ahead': '1'})
 
     def _configure_software_encoder(self, options, use_h265, crf, bitrate):
-        """TODO: Add description."""
+        """
+        Configures ffmpeg options for software encoding.
+
+        Args:
+            options (dict): ffmpeg options dictionary.
+            use_h265 (bool): Whether to use H.265 codec.
+            crf (int): Constant Rate Factor for quality.
+            bitrate (str): Target bitrate.
+        """
         if use_h265:
             options.update({'c:v': 'libx265', 'crf': str(crf), 'preset': self.config.video_preset, 'x265-params': "profile=main:level=5.1:no-sao=1:bframes=8:rd=4:psy-rd=1.0:rect=1:aq-mode=3:aq-strength=0.8:deblock=-1:-1", 'maxrate': bitrate, 'bufsize': f"{int(bitrate.replace('k', '')) * 2}k"})
         else:
             options.update({'c:v': 'libx264', 'crf': str(crf), 'preset': self.config.video_preset, 'profile:v': 'high', 'level': '4.1', 'tune': 'film', 'subq': '9', 'trellis': '2', 'partitions': 'all', 'direct-pred': 'auto', 'me_method': 'umh', 'g': '250', 'maxrate': bitrate, 'bufsize': f"{int(bitrate.replace('k', '')) * 2}k"})
 
     def _configure_audio_options(self, options, audio_stream, duration, is_voice_hint):
-        """TODO: Add description."""
+        """
+        Configures ffmpeg options for audio streams.
+
+        Args:
+            options (dict): ffmpeg options dictionary.
+            audio_stream (dict): ffmpeg audio stream info.
+            duration (float): Duration of the video.
+            is_voice_hint (bool): Whether the file is likely a voice message.
+        """
         audio_bitrate = self._calculate_audio_bitrate(audio_stream.get('bit_rate'), audio_stream.get('channels', 2))
         options.update({'c:a': 'aac', 'b:a': audio_bitrate, 'ar': '44100', 'ac': '2'})
         if is_voice_hint or duration > 0:
@@ -409,7 +553,16 @@ class MediaProcessor:
             options['ac'] = '1'
 
     def _calculate_optimal_bitrate(self, width: int, height: int) -> str:
-        """TODO: Add description."""
+        """
+        Calculates optimal video bitrate based on resolution.
+
+        Args:
+            width (int): Video width.
+            height (int): Video height.
+
+        Returns:
+            str: Optimal bitrate string (e.g., '800k').
+        """
         pixels = width * height
         if pixels <= 0:
             return "500k"
@@ -422,7 +575,16 @@ class MediaProcessor:
         return "400k"
 
     def _calculate_audio_bitrate(self, current_bitrate, channels: int) -> str:
-        """TODO: Add description."""
+        """
+        Calculates optimal audio bitrate.
+
+        Args:
+            current_bitrate (Any): Current bitrate value.
+            channels (int): Number of audio channels.
+
+        Returns:
+            str: Optimal audio bitrate string (e.g., '96k').
+        """
         if not current_bitrate:
             return "96k" if channels > 1 else "64k"
         try:
@@ -436,11 +598,23 @@ class MediaProcessor:
             return "96k"
 
     async def _optimize_audio(self, input_path: Path, output_path: Path):
-        """TODO: Add description."""
+        """
+        Asynchronously optimizes an audio file.
+
+        Args:
+            input_path (Path): Path to input audio.
+            output_path (Path): Path to output audio.
+        """
         await run_in_thread_pool(self._sync_optimize_audio, input_path, output_path)
 
     def _sync_optimize_audio(self, input_path: Path, output_path: Path):
-        """TODO: Add description."""
+        """
+        Synchronously optimizes an audio file using ffmpeg.
+
+        Args:
+            input_path (Path): Path to input audio.
+            output_path (Path): Path to output audio.
+        """
         try:
             probe = ffmpeg.probe(str(input_path))
             audio_stream = next((s for s in probe['streams'] if s['codec_type'] == 'audio'), None)

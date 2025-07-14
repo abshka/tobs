@@ -1,5 +1,6 @@
 import asyncio
 import multiprocessing
+import re
 import signal
 import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -16,7 +17,6 @@ from src.config import Config, ExportTarget, load_config
 from src.exceptions import ConfigError, ExporterError, TelegramConnectionError
 from src.media_processor import AIOHTTP_HEADERS, MediaProcessor
 from src.note_generator import NoteGenerator
-from src.reply_linker import ReplyLinker
 from src.telegram_client import TelegramManager
 from src.utils import find_telegraph_links, logger, setup_logging
 
@@ -24,7 +24,16 @@ thread_executor: Optional[ThreadPoolExecutor] = None
 process_executor: Optional[ProcessPoolExecutor] = None
 
 def handle_sigint(signum, frame):
-    """Handle SIGINT (Ctrl+C) signal by printing a message and exiting the program."""
+    """
+    Handle SIGINT (Ctrl+C) signal by printing a message and exiting the program.
+
+    Args:
+        signum: Signal number.
+        frame: Current stack frame.
+
+    Returns:
+        None
+    """
     rprint("\n[bold yellow]Received interrupt signal. Cleaning up and exiting...[/bold yellow]")
     sys.exit(0)
 
@@ -39,7 +48,8 @@ async def process_message_group(
     note_generator: NoteGenerator,
     cache_manager: CacheManager,
     config: Config,
-    http_session: aiohttp.ClientSession
+    http_session: aiohttp.ClientSession,
+    telegram_manager
 ) -> Optional[int]:
     """
     Process a group of Telegram messages, download and optimize media, create notes,
@@ -55,6 +65,7 @@ async def process_message_group(
         cache_manager: CacheManager instance for tracking processed messages.
         config: Config object with export settings.
         http_session: aiohttp ClientSession for HTTP requests.
+        telegram_manager: TelegramManager instance.
 
     Returns:
         The ID of the first processed message, or None if processing failed.
@@ -83,7 +94,10 @@ async def process_message_group(
                     media_paths.extend(result)
 
         note_path = await note_generator.create_note(
-            first_message, media_paths, entity_id, entity_export_path
+            first_message, media_paths, entity_id, entity_export_path,
+            client=telegram_manager.get_client() if hasattr(telegram_manager, "get_client") else None,
+            export_comments=True,
+            entity_media_path=entity_media_path
         )
         if not note_path:
             logger.error(f"[{entity_id}] Failed to create main note for message {first_message.id}")
@@ -138,17 +152,17 @@ async def process_message_group(
             channel_id = getattr(message.peer_id, 'channel_id', None)
             telegram_url = f"https://t.me/c/{channel_id}/{message.id}" if channel_id else None
 
-            await cache_manager.add_processed_message_async(
-                message_id=message.id,
-                note_filename=note_filename,
-                reply_to_id=reply_to_id if message.id == first_message.id else None,
-                entity_id=entity_id,
-                title=(message.text or "").split('\n', 1)[0].strip(),
-                telegram_url=telegram_url
-            )
+            if cache_manager is not None:
+                await cache_manager.add_processed_message_async(
+                    message_id=message.id,
+                    note_filename=note_filename,
+                    reply_to_id=reply_to_id if message.id == first_message.id else None,
+                    entity_id=entity_id,
+                    title=(message.text or "").split('\n', 1)[0].strip(),
+                    telegram_url=telegram_url
+                )
 
         return first_message.id
-
 
     except Exception as e:
         logger.error(f"[{entity_id}] Critical failure in process_message_group for msg {first_message.id}: {e}", exc_info=(config.log_level == 'DEBUG'))
@@ -162,9 +176,6 @@ async def export_single_target(
     """
     Export all messages and media for a single export target (Telegram entity).
 
-    Resolves the entity, prepares export and media directories, and processes all messages
-    for the target using the provided managers and processors.
-
     Args:
         target: ExportTarget object representing the Telegram entity to export.
         config: Config object with export settings.
@@ -173,9 +184,11 @@ async def export_single_target(
         media_processor: MediaProcessor instance for handling media downloads.
         note_generator: NoteGenerator instance for creating notes.
         http_session: aiohttp ClientSession for HTTP requests.
+
+    Returns:
+        None
     """
     entity_id_str = str(target.id)
-    # logger.info(f"--- Starting export for target: {target.name or entity_id_str} ---")
 
     try:
         entity = await telegram_manager.resolve_entity(target.id)
@@ -187,28 +200,24 @@ async def export_single_target(
         target.id = entity.id
         entity_id_str = str(target.id)
 
-        # logger.info(f"Resolved entity: {target.name} (ID: {entity_id_str})")
-        await cache_manager.update_entity_info_async(entity_id_str, target.name, target.type)
+        if cache_manager is not None:
+            await cache_manager.update_entity_info_async(entity_id_str, target.name, target.type)
 
         entity_export_path = config.get_export_path_for_entity(entity_id_str)
         entity_media_path = config.get_media_path_for_entity(entity_id_str)
 
-        # Создаём папки только сейчас, перед экспортом
         from src.utils import ensure_dir_exists
         ensure_dir_exists(entity_export_path)
         ensure_dir_exists(entity_media_path)
 
-        # logger.info(f"Export path: {entity_export_path}")
-        # logger.info(f"Media path: {entity_media_path}")
-
-        last_processed_id = cache_manager.get_last_processed_message_id(entity_id_str) if config.only_new else None
+        last_processed_id = cache_manager.get_last_processed_message_id(entity_id_str) if (config.only_new and cache_manager is not None) else None
         if last_processed_id:
             rprint(f"[{target.name}] Incremental mode. Starting after message ID: {last_processed_id}")
 
         await process_entity_messages(
             entity, entity_id_str, target.name, entity_export_path, entity_media_path,
             last_processed_id, config, telegram_manager, cache_manager, media_processor, note_generator,
-            http_session
+            http_session, target, telegram_manager
         )
 
     except (ExporterError, TelegramConnectionError) as e:
@@ -216,16 +225,18 @@ async def export_single_target(
     except Exception as e:
         logger.critical(f"[{target.name}] Critical error during export: {e}", exc_info=True)
     finally:
-        await cache_manager.save_cache()
-        # logger.info(f"--- Finished export for target: {target.name} ---")
-
+        if not (getattr(target, "type", None) == "single_post" or getattr(target, "message_id", None) is not None):
+            if cache_manager is not None:
+                await cache_manager.save_cache()
 
 async def process_entity_messages(
     entity: Any, entity_id_str: str, target_name: str, entity_export_path: Path,
     entity_media_path: Path, last_processed_id: Optional[int], config: Config,
     telegram_manager: TelegramManager, cache_manager: CacheManager,
     media_processor: MediaProcessor, note_generator: NoteGenerator,
-    http_session: aiohttp.ClientSession
+    http_session: aiohttp.ClientSession,
+    export_target: Any = None,
+    telegram_manager_pass=None
 ):
     """
     Fetch and process all messages for a given Telegram entity, grouping messages as needed,
@@ -244,6 +255,11 @@ async def process_entity_messages(
         media_processor: MediaProcessor instance for handling media downloads.
         note_generator: NoteGenerator instance for creating notes.
         http_session: aiohttp ClientSession for HTTP requests.
+        export_target: Export target object, can be None.
+        telegram_manager_pass: Optional TelegramManager instance.
+
+    Returns:
+        None
     """
     semaphore = asyncio.Semaphore(config.max_workers)
     active_tasks = set()
@@ -258,6 +274,9 @@ async def process_entity_messages(
 
         Args:
             group_id: The ID of the message group to process.
+
+        Returns:
+            None
         """
         nonlocal successful_count
         messages = grouped_messages.pop(group_id, [])
@@ -269,7 +288,7 @@ async def process_entity_messages(
                 process_message_group(
                     messages, entity_id_str, entity_export_path, entity_media_path,
                     media_processor, note_generator, cache_manager, config,
-                    http_session
+                    http_session, telegram_manager_pass or telegram_manager
                 )
             )
             active_tasks.add(task)
@@ -285,36 +304,42 @@ async def process_entity_messages(
             task.add_done_callback(task_done_callback)
 
     try:
-        async for message in telegram_manager.fetch_messages(entity=entity, min_id=last_processed_id):
-            processed_count += 1
-            current_time = asyncio.get_event_loop().time()
-
-            if current_time - last_message_time > GROUP_TIMEOUT:
-                for gid in list(grouped_messages.keys()):
-                    await _process_group(gid)
-
-            group_id = getattr(message, 'grouped_id', None)
-            if group_id:
-                grouped_messages.setdefault(group_id, []).append(message)
+        if export_target and getattr(export_target, "message_id", None) is not None:
+            msg = await telegram_manager.client.get_messages(entity, ids=export_target.message_id)
+            if msg:
+                grouped_messages[msg.id] = [msg]
+                await _process_group(msg.id)
+                processed_count += 1
             else:
-                if grouped_messages:
+                logger.error(f"[{target_name}] Message with ID {export_target.message_id} not found.")
+        else:
+            async for message in telegram_manager.fetch_messages(entity=entity, min_id=last_processed_id):
+                processed_count += 1
+                current_time = asyncio.get_event_loop().time()
+
+                if current_time - last_message_time > GROUP_TIMEOUT:
                     for gid in list(grouped_messages.keys()):
                         await _process_group(gid)
-                grouped_messages[message.id] = [message]
-                await _process_group(message.id)
-            last_message_time = current_time
 
-            if processed_count % config.cache_save_interval == 0:
-                await cache_manager.schedule_background_save()
-                # logger.info(f"[{target_name}] Progress: ~{processed_count} messages fetched.")
+                group_id = getattr(message, 'grouped_id', None)
+                if group_id:
+                    grouped_messages.setdefault(group_id, []).append(message)
+                else:
+                    if grouped_messages:
+                        for gid in list(grouped_messages.keys()):
+                            await _process_group(gid)
+                    grouped_messages[message.id] = [message]
+                    await _process_group(message.id)
+                last_message_time = current_time
 
-        for gid in list(grouped_messages.keys()):
-            await _process_group(gid)
+                if processed_count % config.cache_save_interval == 0 and cache_manager is not None:
+                    await cache_manager.schedule_background_save()
+
+            for gid in list(grouped_messages.keys()):
+                await _process_group(gid)
 
         if active_tasks:
             await asyncio.gather(*active_tasks)
-
-        # logger.info(f"[{target_name}] Processing complete. {successful_count} notes created from {processed_count} messages.")
 
     except Exception as e:
         logger.error(f"[{target_name}] Error during message processing loop: {e}", exc_info=(config.log_level == 'DEBUG'))
@@ -326,6 +351,9 @@ async def run_export(config: Config):
 
     Args:
         config: Config object with export settings.
+
+    Returns:
+        None
     """
     global thread_executor, process_executor
     telegram_manager = None
@@ -336,19 +364,15 @@ async def run_export(config: Config):
         process_executor = ProcessPoolExecutor(max_workers=process_workers)
         thread_executor = ThreadPoolExecutor(max_workers=thread_workers)
         asyncio.get_event_loop().set_default_executor(thread_executor)
-        # logger.info(f"Using {process_workers} process workers and {thread_workers} thread workers.")
-
-        cache_manager = CacheManager(config.cache_file)
-        await cache_manager.load_cache()
-        config.cache = cache_manager.cache
-        config.cache_manager = cache_manager  # <--- Добавлено: ссылка на cache_manager для доступа из media_processor
 
         telegram_manager = TelegramManager(config)
         await telegram_manager.connect()
 
         media_processor = MediaProcessor(config, telegram_manager.get_client())
         note_generator = NoteGenerator(config)
-        reply_linker = ReplyLinker(config, cache_manager)
+
+        reply_linker = None
+        cache_manager = None
 
         if config.interactive_mode:
             await interactive_config_update(config)
@@ -365,18 +389,22 @@ async def run_export(config: Config):
         if config.proxy_type and config.proxy_addr and config.proxy_port:
             proxy_url = f"{config.proxy_type.lower()}://{config.proxy_addr}:{config.proxy_port}"
             connector = ProxyConnector.from_url(proxy_url)
-            # logger.info(f"Using proxy for aiohttp requests: {proxy_url}")
 
         async with aiohttp.ClientSession(headers=AIOHTTP_HEADERS, connector=connector) as http_session:
             export_summaries = []
-            # logger.info("***Authorization***")
 
-            # Stage 1: Parsing messages
             rprint("[cyan]***Export***[/cyan]")
             for target in config.export_targets:
-                # logger.info(f"Parsing messages for: {target.name}")
+                if getattr(target, "type", None) == "single_post" or getattr(target, "message_id", None) is not None:
+                    local_cache_manager = None
+                else:
+                    from src.cache_manager import CacheManager
+                    local_cache_manager = CacheManager(config.cache_file)
+                    await local_cache_manager.load_cache()
+                    config.cache = local_cache_manager.cache
+                    config.cache_manager = local_cache_manager
                 await export_single_target(
-                    target, config, telegram_manager, cache_manager,
+                    target, config, telegram_manager, local_cache_manager,
                     media_processor, note_generator, http_session
                 )
                 entity_id_str = str(target.id)
@@ -387,30 +415,22 @@ async def run_export(config: Config):
                     "export_path": str(export_root),
                 }
                 export_summaries.append(summary)
-                # logger.info(f"Parsing complete for: {target.name}")
 
-            # Stage 2: Downloading posts/media
             rprint("[magenta]***Downloading posts/media***[/magenta]")
             rprint("[magenta]Downloading posts/media complete.[/magenta]")
 
-            # Stage 3: Post-processing
             rprint("[green]***Post-processing***[/green]")
             for target in config.export_targets:
+                if getattr(target, "type", None) == "single_post" or getattr(target, "message_id", None) is not None:
+                    continue
                 entity_id_str = str(target.id)
                 export_root = config.get_export_path_for_entity(entity_id_str)
 
-                # logger.info(f"Post-processing replies for '{target.name}'...")
                 await reply_linker.link_replies(entity_id_str, export_root)
-
-                # logger.info(f"Post-processing internal links for '{target.name}'...")
                 await note_generator.postprocess_all_notes(export_root, entity_id_str, cache_manager.cache)
             rprint("[green]Post-processing complete.[/green]")
 
-            # --- Second pass: Replace all telegra.ph links in all notes with local links ---
-            import re
-            from pathlib import Path
-            # logger.info("Second pass: replacing telegra.ph links in all notes...")
-            # Collect mapping from all telegra.ph notes
+
             telegraph_mapping = {}
             for target in config.export_targets:
                 entity_id_str = str(target.id)
@@ -419,7 +439,6 @@ async def run_export(config: Config):
                 if telegraph_dir.exists():
                     for note_file in telegraph_dir.glob("*.md"):
                         telegraph_url = None
-                        # Try to extract original url from the note
                         with open(note_file, "r", encoding="utf-8") as f:
                             content = f.read()
                             match = re.search(r"\*Source: (https?://telegra\.ph/[^\*]+)\*", content)
@@ -427,7 +446,6 @@ async def run_export(config: Config):
                                 telegraph_url = match.group(1).strip()
                         if telegraph_url:
                             telegraph_mapping[telegraph_url] = note_file.stem
-            # Replace in all notes
             for target in config.export_targets:
                 entity_id_str = str(target.id)
                 export_root = config.get_export_path_for_entity(entity_id_str)
@@ -436,18 +454,11 @@ async def run_export(config: Config):
                         content = f.read()
                     modified = content
                     for url, note_stem in telegraph_mapping.items():
-                        # Replace both markdown and bare links
                         modified = re.sub(rf"\[([^\]]+)\]\({re.escape(url)}\)", rf"[[{note_stem}|\1]]", modified)
                         modified = modified.replace(url, f"[[{note_stem}]]")
                     if modified != content:
                         with open(note_file, "w", encoding="utf-8") as f:
                             f.write(modified)
-            # logger.info("Second pass complete: all telegra.ph links replaced with local notes where possible.")
-
-            # Show summary table
-            # logger.info("Export Summary:")
-            # for summary in export_summaries:
-            #     logger.info(f"Name: {summary['name']} | ID: {summary['id']} | Export Path: {summary['export_path']}")
 
     except (ConfigError, TelegramConnectionError) as e:
         logger.critical(f"A critical error occurred: {e}")
@@ -460,10 +471,18 @@ async def run_export(config: Config):
             thread_executor.shutdown(wait=False)
         if process_executor:
             process_executor.shutdown(wait=False)
-        # logger.info("Export process finished.")
 
 def prompt_int(prompt, default):
-    """Prompt user for integer input with a default value."""
+    """
+    Prompt user for integer input with a default value.
+
+    Args:
+        prompt: The prompt string to display.
+        default: The default integer value.
+
+    Returns:
+        int: The user input as integer, or default if invalid.
+    """
     try:
         rprint(f"[bold]{prompt}[/bold] [dim][{default}][/dim]", end=" ")
         val = input().strip()
@@ -473,7 +492,16 @@ def prompt_int(prompt, default):
         return default
 
 def prompt_float(prompt, default):
-    """Prompt user for float input with a default value."""
+    """
+    Prompt user for float input with a default value.
+
+    Args:
+        prompt: The prompt string to display.
+        default: The default float value.
+
+    Returns:
+        float: The user input as float, or default if invalid.
+    """
     try:
         rprint(f"[bold]{prompt}[/bold] [dim][{default}][/dim]", end=" ")
         val = input().strip()
@@ -483,7 +511,15 @@ def prompt_float(prompt, default):
         return default
 
 async def interactive_config_update(config):
-    """Interactive menu for advanced config options before export."""
+    """
+    Interactive menu for advanced config options before export.
+
+    Args:
+        config: Config object to update.
+
+    Returns:
+        None
+    """
     from src.utils import clear_screen
     while True:
         logger.error("TEST ERROR TO LOG FILE ONLY")
@@ -519,6 +555,12 @@ async def main():
     """
     Main async entry point for the exporter. Loads configuration, sets up logging,
     and runs the export process. Handles startup errors and keyboard interrupts.
+
+    Args:
+        None
+
+    Returns:
+        None
     """
     try:
         config = load_config()

@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 from src.exceptions import ConfigError
 from src.utils import logger, sanitize_filename
 
-# Default paths
 DEFAULT_CACHE_PATH = Path("./tobs_cache.json")
 DEFAULT_EXPORT_PATH = Path("./debug_exports")
 
@@ -16,13 +15,28 @@ DEFAULT_EXPORT_PATH = Path("./debug_exports")
 class ExportTarget:
     """
     Represents a single export target (channel, chat, or user).
+
+    Args:
+        id (Union[str, int]): The unique identifier for the export target.
+        name (str, optional): The name of the export target. Defaults to "".
+        type (str, optional): The type of the export target. Defaults to "unknown".
+        message_id (Optional[int], optional): ID of a single message to export (for single post export). Defaults to None.
     """
     id: Union[str, int]
     name: str = ""
     type: str = "unknown"
+    message_id: Optional[int] = None
 
     def __post_init__(self):
-        """TODO: Add description."""
+        """
+        Initialize the ExportTarget and determine its type based on the id.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
         self.id = str(self.id).strip()
         if self.id.startswith('@') or 't.me/' in self.id or self.id.startswith('-100'):
             self.type = "channel"
@@ -36,20 +50,48 @@ class Config:
     """
     Main configuration class for the exporter.
     Loads and validates all settings from .env and environment variables.
+
+    Args:
+        api_id (int): Telegram API ID.
+        api_hash (str): Telegram API hash.
+        phone_number (Optional[str], optional): Telegram phone number. Defaults to None.
+        session_name (str, optional): Session name. Defaults to "tobs_session".
+        export_targets (List[ExportTarget], optional): List of export targets. Defaults to empty list.
+        export_path (Path, optional): Path for exports. Defaults to DEFAULT_EXPORT_PATH.
+        media_subdir (str, optional): Subdirectory for media. Defaults to "_media".
+        use_entity_folders (bool, optional): Whether to use entity folders. Defaults to True.
+        only_new (bool, optional): Export only new messages. Defaults to False.
+        media_download (bool, optional): Whether to download media. Defaults to True.
+        cache_manager (Any, optional): Cache manager. Defaults to None.
+        log_level (str, optional): Logging level. Defaults to "INFO".
+        max_workers (int, optional): Maximum number of workers. Defaults to 8.
+        max_process_workers (int, optional): Maximum number of process workers. Defaults to 4.
+        concurrent_downloads (int, optional): Number of concurrent downloads. Defaults to 10.
+        cache_save_interval (int, optional): Cache save interval. Defaults to 50.
+        request_delay (float, optional): Delay between requests. Defaults to 0.5.
+        message_batch_size (int, optional): Batch size for messages. Defaults to 100.
+        image_quality (int, optional): Image quality. Defaults to 85.
+        video_crf (int, optional): Video CRF. Defaults to 28.
+        video_preset (str, optional): Video preset. Defaults to "fast".
+        hw_acceleration (str, optional): Hardware acceleration. Defaults to "none".
+        use_h265 (bool, optional): Use H265 encoding. Defaults to False.
+        cache_file (Path, optional): Path to cache file. Defaults to DEFAULT_CACHE_PATH.
+        interactive_mode (bool, optional): Interactive mode. Defaults to False.
+        dialog_fetch_limit (int, optional): Dialog fetch limit. Defaults to 20.
+        proxy_type (Optional[str], optional): Proxy type. Defaults to None.
+        proxy_addr (Optional[str], optional): Proxy address. Defaults to None.
+        proxy_port (Optional[int], optional): Proxy port. Defaults to None.
+        throttle_threshold_kbps (int, optional): Throttle threshold in kbps. Defaults to 50.
+        throttle_pause_s (int, optional): Throttle pause in seconds. Defaults to 30.
     """
-    # Telegram
     api_id: int
     api_hash: str
     phone_number: Optional[str] = None
     session_name: str = "tobs_session"
     export_targets: List[ExportTarget] = field(default_factory=list)
-
-    # Paths
     export_path: Path = field(default=DEFAULT_EXPORT_PATH)
     media_subdir: str = "_media"
     use_entity_folders: bool = True
-
-    # Processing
     only_new: bool = False
     media_download: bool = True
     cache_manager: Any = None
@@ -60,35 +102,36 @@ class Config:
     cache_save_interval: int = 50
     request_delay: float = 0.5
     message_batch_size: int = 100
-
-    # Media
     image_quality: int = 85
     video_crf: int = 28
     video_preset: str = "fast"
     hw_acceleration: str = "none"
     use_h265: bool = False
-
-    # Cache and UI
     cache_file: Path = field(default=DEFAULT_CACHE_PATH)
     interactive_mode: bool = False
-    dialog_fetch_limit: int = 20  # Pagination limit
-
-    # Proxy
+    dialog_fetch_limit: int = 20
     proxy_type: Optional[str] = None
     proxy_addr: Optional[str] = None
     proxy_port: Optional[int] = None
-
-    # Throttling
     throttle_threshold_kbps: int = 50
     throttle_pause_s: int = 30
-
-    # Runtime state (not set from .env)
     export_paths: Dict[str, Path] = field(default_factory=dict, init=False)
     media_paths: Dict[str, Path] = field(default_factory=dict, init=False)
     cache: Dict[str, Any] = field(default_factory=dict, init=False)
 
     def __post_init__(self):
-        """TODO: Add description."""
+        """
+        Initialize the Config object, validate required fields, and set up paths.
+
+        Args:
+            None
+
+        Returns:
+            None
+
+        Raises:
+            ConfigError: If required configuration is missing or paths cannot be created.
+        """
         if not self.api_id or not self.api_hash:
             raise ConfigError("API_ID and API_HASH must be set in .env file")
 
@@ -107,7 +150,15 @@ class Config:
             logger.warning("No export targets defined and interactive mode is off. Nothing to do.")
 
     def _update_target_paths(self):
-        """TODO: Add description."""
+        """
+        Update export and media paths for each export target.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
         self.export_paths = {}
         self.media_paths = {}
         for target in self.export_targets:
@@ -121,28 +172,68 @@ class Config:
             self.media_paths[target_id] = media_path.resolve()
 
     def _get_entity_folder_name(self, target: ExportTarget) -> str:
-        """TODO: Add description."""
+        """
+        Generate a sanitized folder name for the export target.
+
+        Args:
+            target (ExportTarget): The export target.
+
+        Returns:
+            str: Sanitized folder name.
+        """
         name = target.name or f"id_{target.id}"
         clean_name = sanitize_filename(name, max_length=100)
         return clean_name
 
     def add_export_target(self, target: ExportTarget):
-        """TODO: Add description."""
+        """
+        Add a new export target if it does not already exist.
+
+        Args:
+            target (ExportTarget): The export target to add.
+
+        Returns:
+            None
+        """
         if str(target.id) not in [str(t.id) for t in self.export_targets]:
             self.export_targets.append(target)
             self._update_target_paths()
-            # logger.info(f"Added export target: {target.name or target.id}")
 
     def get_export_path_for_entity(self, entity_id: Union[str, int]) -> Path:
-        """TODO: Add description."""
+        """
+        Get the export path for a given entity.
+
+        Args:
+            entity_id (Union[str, int]): The entity ID.
+
+        Returns:
+            Path: The export path for the entity.
+        """
         return self.export_paths.get(str(entity_id), self.export_path)
 
     def get_media_path_for_entity(self, entity_id: Union[str, int]) -> Path:
-        """TODO: Add description."""
+        """
+        Get the media path for a given entity.
+
+        Args:
+            entity_id (Union[str, int]): The entity ID.
+
+        Returns:
+            Path: The media path for the entity.
+        """
         return self.media_paths.get(str(entity_id), self.export_path / self.media_subdir)
 
 def _parse_bool(value: Optional[Union[str, bool]], default: bool = False) -> bool:
-    """TODO: Add description."""
+    """
+    Parse a boolean value from a string or boolean.
+
+    Args:
+        value (Optional[Union[str, bool]]): The value to parse.
+        default (bool, optional): The default value if input is None. Defaults to False.
+
+    Returns:
+        bool: The parsed boolean value.
+    """
     if value is None:
         return default
     if isinstance(value, bool):
@@ -150,7 +241,18 @@ def _parse_bool(value: Optional[Union[str, bool]], default: bool = False) -> boo
     return str(value).lower() in ('true', '1', 'yes', 'y', 'on')
 
 def load_config(env_path: Union[str, Path] = ".env") -> Config:
-    """TODO: Add description."""
+    """
+    Load configuration from environment variables and .env file.
+
+    Args:
+        env_path (Union[str, Path], optional): Path to the .env file. Defaults to ".env".
+
+    Returns:
+        Config: The loaded configuration object.
+
+    Raises:
+        ConfigError: If configuration values are invalid.
+    """
     if Path(env_path).exists():
         load_dotenv(dotenv_path=env_path)
     try:

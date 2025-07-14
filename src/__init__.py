@@ -22,13 +22,10 @@ class DownloadManager:
         download_tasks = []
 
         for file_info in files_to_download:
-            # Create a partial function with preset arguments
             download_task = partial(download_function, file_info)
-            # Run the task in a separate thread
             task = loop.run_in_executor(self.executor, download_task)
             download_tasks.append(task)
 
-        # Wait for all tasks to complete
         results = await asyncio.gather(*download_tasks, return_exceptions=True)
         return results
 
@@ -36,7 +33,6 @@ class DownloadManager:
         """Shuts down the thread pool executor."""
         self.executor.shutdown()
 
-# Helper function for batch processing
 async def process_in_batches(items, batch_size, process_func):
     """
     Processes items in batches for better resource management.

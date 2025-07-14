@@ -1,6 +1,7 @@
 import asyncio
+import re
 import sys
-from time import sleep
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 from rich import print as rprint
@@ -20,17 +21,36 @@ from telethon.tl.types import Message
 
 from src.config import Config, ExportTarget
 from src.exceptions import TelegramConnectionError
-from src.utils import clear_screen, logger
+from src.utils import clear_screen, logger, notify_and_pause
 
+
+async def notify_and_pause_async(text):
+    """
+    Notify the user and pause asynchronously.
+
+    Args:
+        text (str): The message to display.
+
+    Returns:
+        None
+    """
+    notify_and_pause(text)
+    await asyncio.sleep(1)
 
 class TelegramManager:
-    """TODO: Add description."""
     """
     Manages Telegram connection, dialog selection, and user interaction.
     """
     def __init__(self, config: Config):
-        """TODO: Add description."""
-        """Initialize Telegram manager with configuration."""
+        """
+        Initialize Telegram manager with configuration.
+
+        Args:
+            config (Config): The configuration object.
+
+        Returns:
+            None
+        """
         self.config = config
         proxy_info = None
         if config.proxy_type and config.proxy_addr and config.proxy_port:
@@ -53,7 +73,9 @@ class TelegramManager:
     async def connect(self) -> bool:
         """
         Connect and authenticate with Telegram.
-        Shows a styled panel for connection and authorization.
+
+        Returns:
+            bool: True if connection and authentication are successful, False otherwise.
         """
         if self.client_connected:
             logger.info("Client already connected.")
@@ -83,7 +105,12 @@ class TelegramManager:
     async def _authenticate(self) -> bool:
         """
         Handle Telegram authentication flow.
-        Prompts user for code and 2FA password if needed.
+
+        Returns:
+            bool: True if authentication is successful, False otherwise.
+
+        Raises:
+            TelegramConnectionError: If authentication fails.
         """
         rprint("[yellow]Authorization required.[/yellow]")
         if not self.config.phone_number:
@@ -106,6 +133,9 @@ class TelegramManager:
     async def disconnect(self) -> bool:
         """
         Disconnects the Telegram client gracefully.
+
+        Returns:
+            bool: True if disconnected successfully, False otherwise.
         """
         if not self.client_connected:
             return True
@@ -120,6 +150,15 @@ class TelegramManager:
             return False
 
     async def resolve_entity(self, entity_identifier: Union[str, int]) -> Optional[Any]:
+        """
+        Resolve a Telegram entity by its identifier.
+
+        Args:
+            entity_identifier (str|int): The identifier of the entity.
+
+        Returns:
+            Optional[Any]: The resolved entity or None if not found.
+        """
         entity_id_str = str(entity_identifier).strip()
         if not entity_id_str:
             return None
@@ -146,6 +185,15 @@ class TelegramManager:
         return None
 
     async def _get_entity(self, entity_id_str: str) -> Optional[Any]:
+        """
+        Get a Telegram entity by its string identifier.
+
+        Args:
+            entity_id_str (str): The entity identifier as a string.
+
+        Returns:
+            Optional[Any]: The resolved entity or None.
+        """
         try:
             return await self.client.get_entity(entity_id_str)
         except ValueError:
@@ -154,6 +202,16 @@ class TelegramManager:
             raise
 
     async def fetch_messages(self, entity: Any, min_id: Optional[int] = None) -> AsyncGenerator[Message, None]:
+        """
+        Fetch messages from a Telegram entity.
+
+        Args:
+            entity (Any): The Telegram entity to fetch messages from.
+            min_id (Optional[int]): The minimum message ID to start from.
+
+        Yields:
+            Message: Telegram message objects.
+        """
         entity_name = getattr(entity, 'title', getattr(entity, 'username', str(entity.id)))
         logger.info(f"Fetching messages from: {entity_name} (ID: {entity.id})")
         if min_id:
@@ -169,6 +227,9 @@ class TelegramManager:
     def _display_menu(self):
         """
         Display the interactive options menu using rprint.
+
+        Returns:
+            None
         """
         clear_screen()
         rprint("-" * 40)
@@ -176,21 +237,23 @@ class TelegramManager:
         rprint(" [cyan]1.[/cyan] List recent dialogs")
         rprint(" [cyan]2.[/cyan] Enter ID/Username/Link manually")
         rprint(" [cyan]3.[/cyan] Finish selection and start export")
-        rprint(" [cyan]4.[/cyan] Exit")
+        rprint(" [cyan]4.[/cyan] Export single post by link")
+        rprint(" [cyan]5.[/cyan] Exit")
         rprint("-" * 40)
-        # Новый блок: показываем выбранные цели экспорта
         if self.config.export_targets:
             rprint("[bold green]Export targets:[/bold green]")
             for target in self.config.export_targets:
                 rprint(f" • {getattr(target, 'name', target.id) or target.id} [dim]({getattr(target, 'type', 'unknown')})[/dim]")
         else:
             rprint("[dim]No export targets selected.[/dim]")
-        rprint("[bold]Choose an option (1-4):[/bold]", end=" ")
+        print("Choose an option (1-5): ", end="")
 
     async def run_interactive_selection(self):
-        """TODO: Add description."""
         """
         Run the interactive selection menu for export targets.
+
+        Returns:
+            bool: True if selection completed, False otherwise.
         """
         if not self.client_connected:
             await self.connect()
@@ -207,20 +270,31 @@ class TelegramManager:
                 await self._select_dialog_manually()
             elif choice == '3':
                 if not self.config.export_targets:
-                    rprint("[red]No targets selected. Please select at least one.[/red]")
+                    await notify_and_pause_async("[red]No targets selected. Please select at least one.[/red]")
                 else:
-                    rprint("[green]Finished selection. Starting export...[/green]")
+                    await notify_and_pause_async("[green]Finished selection. Starting export...[/green]")
                     break
             elif choice == '4':
-                rprint("[yellow]Exiting...[/yellow]")
+                await self.export_single_post_by_link()
+            elif choice == '5':
+                await notify_and_pause_async("[yellow]Exiting...[/yellow]")
                 sys.exit(0)
             else:
-                rprint("[red]Invalid choice. Please enter a number from 1 to 4.[/red]")
+                await notify_and_pause_async("[red]Invalid choice. Please enter a number from 1 to 5.[/red]")
         return True
 
     def _display_dialogs(self, dialogs, dialog_map, start_index, page_num=None):
         """
         Display a list of dialogs with rich formatting.
+
+        Args:
+            dialogs (list): List of dialog objects.
+            dialog_map (dict): Mapping of index to dialog entity.
+            start_index (int): Starting index for display.
+            page_num (Optional[int]): Current page number.
+
+        Returns:
+            None
         """
         header = "[bold underline]Recent Dialogs:[/bold underline]"
         if page_num is not None:
@@ -233,14 +307,15 @@ class TelegramManager:
             dialog_map[i] = entity
 
     async def _list_and_select_dialogs(self):
-        """TODO: Add description."""
         """
         List recent dialogs and allow user to select them interactively.
+
+        Returns:
+            bool: True if dialogs were listed and selection attempted.
         """
-        rprint("[cyan]Fetching recent dialogs...[/cyan]")
+        await notify_and_pause_async("[cyan]Fetching recent dialogs...[/cyan]")
         offset_date, offset_id, offset_peer = None, 0, None
 
-        # For paging: keep a stack of previous pages' offsets
         page_stack = []
         page_num = 1
 
@@ -257,10 +332,9 @@ class TelegramManager:
 
                 dialogs = await self.client.get_dialogs(**get_dialogs_kwargs)
                 if not dialogs:
-                    rprint("[yellow]No more dialogs found.[/yellow]")
-                    # If on a page > 1, allow user to go back
+                    await notify_and_pause_async("[yellow]No more dialogs found.[/yellow]")
                     if page_num > 1:
-                        rprint("[bold]You are at the last page. Enter 'p' to go to previous page or 'c' to cancel:[/bold]", end=" ")
+                        print("You are at the last page. Enter 'p' to go to previous page or 'c' to cancel: ", end="")
                         selection = input().strip().lower()
                         if selection in ('c', 'cancel'):
                             break
@@ -269,22 +343,20 @@ class TelegramManager:
                                 prev = page_stack.pop()
                                 offset_date, offset_id, offset_peer = prev
                                 page_num -= 1
-                                rprint("[bold]Fetching previous page...[/bold]")
+                                await notify_and_pause_async("[bold]Fetching previous page...[/bold]")
                                 continue
                     break
 
                 dialog_map = {}
                 self._display_dialogs(dialogs, dialog_map, 1, page_num=page_num)
 
-                rprint("[bold]Enter numbers to add (e.g., 1, 3, 5), n for next page, p for previous page, or c for cancel:[/bold]", end=" ")
+                print("Enter numbers to add (e.g., 1, 3, 5), n for next page, p for previous page, or c for cancel: ", end="")
                 selection = input().strip().lower()
 
                 if selection in ('c', 'cancel'):
                     break
                 if selection in ('n', 'next'):
-                    # Save current offsets to stack for "previous page"
                     page_stack.append((offset_date, offset_id, offset_peer))
-                    # Move to next page by updating offsets based on last dialog
                     last_dialog = dialogs[-1]
                     offset_date = last_dialog.date
                     try:
@@ -295,29 +367,36 @@ class TelegramManager:
                         offset_id = 0
                     offset_peer = last_dialog.entity
                     page_num += 1
-                    rprint("[bold]Fetching next page...[/bold]")
+                    await notify_and_pause_async("[bold]Fetching next page...[/bold]")
                     continue
                 if selection in ('p', 'prev', 'previous'):
                     if page_stack:
                         prev = page_stack.pop()
                         offset_date, offset_id, offset_peer = prev
                         page_num = max(1, page_num - 1)
-                        rprint("[bold]Fetching previous page...[/bold]")
+                        await notify_and_pause_async("[bold]Fetching previous page...[/bold]")
                         continue
                     else:
                         continue
-                # Handle adding dialogs by number
                 added = await self._process_dialog_selection(selection, dialog_map)
                 if added:
-                    rprint("[green]Target(s) added.[/green]")
-                    sleep(1)
+                    pass
+
             except Exception as e:
                 logger.error(f"Error during dialog selection: {e}", exc_info=True)
                 break
         return True
 
     def _get_entity_type_name(self, entity):
-        """TODO: Add description."""
+        """
+        Return the type name of a Telegram entity.
+
+        Args:
+            entity (Any): The Telegram entity.
+
+        Returns:
+            str: The type name of the entity.
+        """
         if isinstance(entity, types.User):
             return "User"
         if isinstance(entity, types.Chat):
@@ -329,6 +408,13 @@ class TelegramManager:
     async def _process_dialog_selection(self, selection: str, dialog_map: Dict[int, Any]) -> bool:
         """
         Process user selection of dialogs by number.
+
+        Args:
+            selection (str): The user's selection input.
+            dialog_map (Dict[int, Any]): Mapping of indices to entities.
+
+        Returns:
+            bool: True if at least one dialog was added, False otherwise.
         """
         try:
             indices = [int(s.strip()) for s in selection.split(',') if s.strip()]
@@ -339,8 +425,7 @@ class TelegramManager:
             added_count = 0
             invalid_indices = [index for index in indices if index not in valid_indices]
             if invalid_indices:
-                rprint("[red]Invalid input. Enter number in range 1-20.[/red]")
-                sleep(1)
+                await notify_and_pause_async("[red]Invalid input. Enter number in range 1-20.[/red]")
                 return False
 
             for index in indices:
@@ -348,52 +433,134 @@ class TelegramManager:
                 if entity:
                     target = self._create_export_target_from_entity(entity)
                     self.config.add_export_target(target)
-                    rprint(f"[green]Added:[/green] {target.name or target.id}")
+                    await notify_and_pause_async(f"[green]Added:[/green] {target.name or target.id}")
                     added_count += 1
             return added_count > 0
         except ValueError:
-            rprint("[red]Invalid input. Please enter numbers separated by commas.[/red]")
-            sleep(1)
+            await notify_and_pause_async("[red]Invalid input. Please enter numbers separated by commas.[/red]")
             return False
 
     def _create_export_target_from_entity(self, entity) -> ExportTarget:
         """
         Create an ExportTarget from a Telegram entity.
+
+        Args:
+            entity (Any): The Telegram entity.
+
+        Returns:
+            ExportTarget: The created export target.
         """
         name = getattr(entity, 'title', getattr(entity, 'username', str(entity.id)))
         return ExportTarget(id=entity.id, name=name, type=self._get_entity_type_name(entity))
 
     async def _select_dialog_manually(self):
-        """TODO: Add description."""
         """
         Allow user to manually enter a chat/channel ID, username, or link.
+
+        Returns:
+            bool: True if manual selection completed.
         """
         while True:
-            rprint("\n[bold]Enter Chat/Channel ID, @username, or t.me/ link (or c for cancel):[/bold]", end=" ")
+            print("\nEnter Chat/Channel ID, @username, or t.me/ link (or c for cancel): ", end="")
             identifier = input().strip()
             if identifier.lower() == 'c':
                 break
             if not identifier:
                 continue
 
-            rprint(f"[dim]Resolving '{identifier}'...[/dim]")
+            await notify_and_pause_async(f"[dim]Resolving '{identifier}'...[/dim]")
             entity = await self.resolve_entity(identifier)
             if entity:
                 target = self._create_export_target_from_entity(entity)
-                rprint(f"[green]Resolved:[/green] {target.name} (Type: {target.type}, ID: {target.id})")
-                rprint("[bold]Add this target? (y/n):[/bold]", end=" ")
+                await notify_and_pause_async(f"[green]Resolved:[/green] {target.name} (Type: {target.type}, ID: {target.id})")
+                print("Add this target? (y/n): ", end="")
                 if input().strip().lower() == 'y':
                     self.config.add_export_target(target)
-                    rprint(f"[green]Added:[/green] {target.name or target.id}")
-                    sleep(1)
+                    await notify_and_pause_async(f"[green]Added:[/green] {target.name or target.id}")
                     break
             else:
-                rprint(f"[bold red]Could not resolve or access '{identifier}'. Check input and permissions.[/bold red]")
+                await notify_and_pause_async(f"[bold red]Could not resolve or access '{identifier}'. Check input and permissions.[/bold red]")
         return True
+
+    async def export_single_post_by_link(self):
+        """
+        Handler for exporting a single Telegram post by link.
+
+        Returns:
+            None
+        """
+        print("\nEnter the link to the Telegram post (e.g., https://t.me/channel/12345): ", end="")
+        link = input().strip()
+
+        match = re.match(
+            r"^https?://t\.me/(?P<username>[\w\d_]+)/(?P<post_id>\d+)$"
+            r"|^https?://t\.me/c/(?P<chan_id>\d+)/(?P<post_id2>\d+)$",
+            link
+        )
+        if not match:
+            await notify_and_pause_async("[red]Invalid link format. Please provide a valid Telegram post link.[/red]")
+            return
+
+        username = match.group("username")
+        post_id = match.group("post_id") or match.group("post_id2")
+        chan_id = match.group("chan_id")
+
+        if username:
+            entity_identifier = username
+        elif chan_id:
+            entity_identifier = f"-100{chan_id}"
+        else:
+            await notify_and_pause_async("[red]Could not extract channel and post ID from the link.[/red]")
+            return
+
+        if not post_id:
+            await notify_and_pause_async("[red]Could not extract post ID from the link.[/red]")
+            return
+
+        await notify_and_pause_async(f"[dim]Resolving channel: {entity_identifier}...[/dim]")
+        entity = await self.resolve_entity(entity_identifier)
+        if not entity:
+            await notify_and_pause_async(f"[red]Could not resolve channel '{entity_identifier}'.[/red]")
+            return
+
+        try:
+            message = await self.client.get_messages(entity, ids=int(post_id))
+        except Exception as e:
+            await notify_and_pause_async(f"[red]Failed to fetch message: {e}[/red]")
+            return
+
+        if not message:
+            await notify_and_pause_async(f"[red]Message with ID {post_id} not found in this channel.[/red]")
+            return
+        else:
+            await notify_and_pause_async(f"[green]Post found! Channel: {entity_identifier}, Post ID: {post_id}[/green]")
+
+        channel_name = getattr(entity, 'username', None) or getattr(entity, 'title', None) or str(entity.id)
+        export_dir_name = f"{channel_name}_{post_id}"
+        export_root = Path(self.config.export_path) / export_dir_name
+        media_path = export_root / (self.config.media_subdir or "_media")
+        export_root.mkdir(parents=True, exist_ok=True)
+        media_path.mkdir(parents=True, exist_ok=True)
+
+        from src.config import ExportTarget
+        single_post_target = ExportTarget(
+            id=str(entity.id),
+            name=export_dir_name,
+            type="single_post",
+            message_id=int(post_id)
+        )
+        self.config.add_export_target(single_post_target)
+        notify_and_pause("[green]Post marked for export! It will be exported when you choose 'Finish selection and start export'.[/green]")
 
     def get_client(self) -> TelegramClient:
         """
         Return the underlying TelegramClient instance.
+
+        Returns:
+            TelegramClient: The Telegram client instance.
+
+        Raises:
+            RuntimeError: If the client is not initialized.
         """
         if not self.client:
             raise RuntimeError("TelegramManager not initialized properly.")

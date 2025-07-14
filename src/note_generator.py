@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import aiofiles
 import aiohttp
-from telethon.tl.types import Message
+from telethon.tl.types import Message, User
 
 from src.config import Config
 from src.utils import (
@@ -24,7 +24,12 @@ class NoteGenerator:
     """
 
     def __init__(self, config: Config):
-        """TODO: Add description."""
+        """
+        Initialize NoteGenerator.
+
+        Args:
+            config (Config): Configuration object.
+        """
         self.config = config
         self.file_locks: Dict[Path, asyncio.Lock] = {}
         self.io_semaphore = asyncio.Semaphore(20)
@@ -35,14 +40,44 @@ class NoteGenerator:
         media_paths: List[Path],
         entity_id: Union[str, int],
         entity_export_path: Path,
+        client=None,
+        export_comments: bool = False,
+        entity_media_path: Path = None
     ) -> Optional[Path]:
-        """TODO: Add description."""
+        """
+        Create a note from a Telegram message and optionally add comments.
+
+        Args:
+            message (Message): Telegram message object.
+            media_paths (List[Path]): List of media file paths.
+            entity_id (Union[str, int]): Entity identifier.
+            entity_export_path (Path): Path to export notes.
+            client: Telethon client for exporting comments.
+            export_comments (bool, optional): Whether to export comments. Defaults to False.
+            entity_media_path (Path, optional): Path for media files.
+
+        Returns:
+            Optional[Path]: Path to the created note file, or None if failed.
+        """
         try:
             note_path = await self._prepare_note_path(message, entity_id, entity_export_path)
             if not note_path:
                 return None
 
             content = await self._generate_note_content(message, media_paths, note_path)
+
+            if export_comments and client is not None:
+                media_dir = entity_export_path / "media"
+                from src.utils import ensure_dir_exists
+                await run_in_thread_pool(ensure_dir_exists, media_dir)
+                from src.media_processor import MediaProcessor
+                media_processor = MediaProcessor(self.config, client)
+                comments_md = await self.export_comments_md(
+                    message, client, media_dir, media_processor=media_processor, entity_id=str(entity_id)
+                )
+                if comments_md:
+                    content += "\n\n---\n### Comments\n" + comments_md
+
             return await self._write_note_file(note_path, content)
 
         except Exception as e:
@@ -63,7 +98,22 @@ class NoteGenerator:
         entity_id: str,
         telegraph_mapping: dict = None
     ) -> Optional[Path]:
-        """TODO: Add description."""
+        """
+        Create a note from a Telegraph article URL.
+
+        Args:
+            session (aiohttp.ClientSession): HTTP session.
+            url (str): Telegraph article URL.
+            notes_export_path (Path): Path to export notes.
+            media_export_path (Path): Path to export media.
+            media_processor (Any): Media processor instance.
+            cache (dict): Cache dictionary.
+            entity_id (str): Entity identifier.
+            telegraph_mapping (dict, optional): Mapping for telegraph URLs.
+
+        Returns:
+            Optional[Path]: Path to the created note file, or None if failed.
+        """
         article_data = await fetch_and_parse_telegraph_to_markdown(
             session, url, media_export_path, media_processor, cache, entity_id, telegraph_mapping
         )
@@ -91,7 +141,15 @@ class NoteGenerator:
         return await self._write_note_file(note_path, final_content)
 
     async def read_note_content(self, note_path: Path) -> str:
-        """TODO: Add description."""
+        """
+        Read the content of a note file.
+
+        Args:
+            note_path (Path): Path to the note file.
+
+        Returns:
+            str: Content of the note file.
+        """
         if note_path not in self.file_locks:
             self.file_locks[note_path] = asyncio.Lock()
 
@@ -99,13 +157,147 @@ class NoteGenerator:
             async with aiofiles.open(note_path, 'r', encoding='utf-8') as f:
                 return await f.read()
 
+    async def export_comments_md(self, main_post: Message, client, media_dir: Path, media_processor=None, entity_id=None) -> str:
+        """
+        Export comments for a post in markdown format.
+
+        Args:
+            main_post (Message): Main post message.
+            client: Telethon client.
+            media_dir (Path): Directory for media files.
+            media_processor (Any, optional): MediaProcessor for sorting media.
+            entity_id (str, optional): String id of the entity (channel/chat).
+
+        Returns:
+            str: Markdown block with comments.
+        """
+        try:
+            channel_id = getattr(main_post, "chat_id", None)
+            if channel_id is None and getattr(main_post, "to_id", None):
+                channel_id = getattr(main_post.to_id, "channel_id", None)
+            if channel_id is None:
+                return ""
+            comments = []
+            async for comment in client.iter_messages(channel_id, reply_to=main_post.id, reverse=True):
+                comments.append(comment)
+
+
+            if not comments:
+                return "\n\n*No comments.*\n"
+
+            md = ""
+            for comment in comments:
+                sender = comment.sender
+                sender_name = self._get_sender_name(sender)
+                comment_text = comment.text.replace('\n', '\n> ') if comment.text else ''
+                md += f"\n> **{sender_name}** ({comment.date.strftime('%Y-%m-%d %H:%M')}):\n"
+                if comment_text:
+                    md += f"> {comment_text}\n"
+                if comment.media and media_processor is not None and entity_id is not None:
+                    media_type = media_processor.get_media_type(comment)
+                    type_subdir = media_dir / f"{media_type}s" if media_type != "unknown" else media_dir
+                    from src.utils import ensure_dir_exists, run_in_thread_pool
+                    await run_in_thread_pool(ensure_dir_exists, type_subdir)
+                    filename = media_processor._get_filename(
+                        comment.media.photo if hasattr(comment.media, "photo") else comment.media.document,
+                        comment.id,
+                        media_type,
+                        entity_id
+                    ) if hasattr(media_processor, "_get_filename") else None
+                    file_path = await comment.download_media(file=type_subdir / filename if filename else type_subdir)
+                    if file_path:
+                        file_name = Path(file_path).name
+                        relative_media_path = f"media/{media_type}s/{file_name}" if media_type != "unknown" else f"media/{file_name}"
+                        md += f"> ![[{relative_media_path}]]\n"
+                elif comment.media:
+                    file_path = await comment.download_media(file=media_dir)
+                    if file_path:
+                        file_name = Path(file_path).name
+                        relative_media_path = f"media/{file_name}"
+                        md += f"> ![[{relative_media_path}]]\n"
+            return md
+        except Exception as e:
+            logger.error(f"Failed to export comments for post {main_post.id}: {e}")
+            return ""
+
+    def _get_sender_name(self, sender):
+        """
+        Return formatted sender name.
+
+        Args:
+            sender: Sender object.
+
+        Returns:
+            str: Formatted sender name.
+        """
+        if sender is None:
+            return "Unknown"
+        if isinstance(sender, User):
+            if sender.first_name and sender.last_name:
+                return f"{sender.first_name} {sender.last_name}"
+            return sender.first_name or sender.username or f"User {sender.id}"
+        if hasattr(sender, 'title'):
+            return sender.title
+        return "Unknown"
+
+    def get_media_type(self, message: Message) -> str:
+        """
+        Determine the media type for sorting into folders.
+
+        Args:
+            message (Message): Telegram message object.
+
+        Returns:
+            str: Media type ("image", "video", "audio", "document", or "unknown").
+        """
+        if hasattr(message, "media"):
+            if message.media is None:
+                return "unknown"
+            from telethon.tl.types import (
+                DocumentAttributeAudio,
+                DocumentAttributeVideo,
+                MessageMediaDocument,
+                MessageMediaPhoto,
+            )
+            if isinstance(message.media, MessageMediaPhoto):
+                return "image"
+            if isinstance(message.media, MessageMediaDocument):
+                doc = message.media.document
+                if doc is not None and hasattr(doc, "attributes"):
+                    for attr in doc.attributes:
+                        if isinstance(attr, DocumentAttributeVideo):
+                            return "video"
+                        if isinstance(attr, DocumentAttributeAudio):
+                            return "audio"
+                return "document"
+        return "unknown"
+
     async def write_note_content(self, note_path: Path, content: str):
-        """TODO: Add description."""
+        """
+        Write content to a note file.
+
+        Args:
+            note_path (Path): Path to the note file.
+            content (str): Content to write.
+
+        Returns:
+            None
+        """
         await self._write_note_file(note_path, content)
 
     async def _prepare_note_path(self, message: Message, entity_id: Union[str, int],
                                  entity_export_path: Path) -> Optional[Path]:
-        """TODO: Add description."""
+        """
+        Prepare the file path for a note.
+
+        Args:
+            message (Message): Telegram message object.
+            entity_id (Union[str, int]): Entity identifier.
+            entity_export_path (Path): Path to export notes.
+
+        Returns:
+            Optional[Path]: Path to the note file, or None if failed.
+        """
         try:
             message_text = getattr(message, 'text', '') or ""
             first_line = message_text.split('\n', 1)[0]
@@ -128,7 +320,17 @@ class NoteGenerator:
 
     async def _generate_note_content(self, message: Message, media_paths: List[Path],
                                      note_path: Path) -> str:
-        """TODO: Add description."""
+        """
+        Generate the content for a note.
+
+        Args:
+            message (Message): Telegram message object.
+            media_paths (List[Path]): List of media file paths.
+            note_path (Path): Path to the note file.
+
+        Returns:
+            str: Generated note content.
+        """
         message_text = getattr(message, 'text', '') or ""
         content = message_text.strip() + "\n\n" if message_text else ""
         if media_paths:
@@ -138,7 +340,16 @@ class NoteGenerator:
         return content.strip()
 
     async def _generate_media_links(self, media_paths: List[Path], note_path: Path) -> List[str]:
-        """TODO: Add description."""
+        """
+        Generate markdown links for media files.
+
+        Args:
+            media_paths (List[Path]): List of media file paths.
+            note_path (Path): Path to the note file.
+
+        Returns:
+            List[str]: List of markdown links for media files.
+        """
         media_links = []
         for media_path in media_paths:
             if media_path and await run_in_thread_pool(media_path.exists):
@@ -148,7 +359,16 @@ class NoteGenerator:
         return media_links
 
     async def _write_note_file(self, note_path: Path, content: str) -> Optional[Path]:
-        """TODO: Add description."""
+        """
+        Write content to a note file with concurrency control.
+
+        Args:
+            note_path (Path): Path to the note file.
+            content (str): Content to write.
+
+        Returns:
+            Optional[Path]: Path to the written note file, or None if failed.
+        """
         if note_path not in self.file_locks:
             self.file_locks[note_path] = asyncio.Lock()
 
@@ -162,7 +382,17 @@ class NoteGenerator:
                 return None
 
     async def postprocess_all_notes(self, export_root: Path, entity_id: str, cache: dict):
-        """TODO: Add description."""
+        """
+        Post-process all notes to update Telegram links to local note links.
+
+        Args:
+            export_root (Path): Root path where notes are exported.
+            entity_id (str): Entity identifier.
+            cache (dict): Cache dictionary.
+
+        Returns:
+            None
+        """
         from rich import print as rprint
         rprint(f"[green]*** Post-processing links for entity {entity_id} ***[/green]")
 
@@ -173,7 +403,6 @@ class NoteGenerator:
 
         url_to_data = {data["telegram_url"]: data for data in processed_messages.values() if data.get("telegram_url")}
         msg_id_to_data = {msg_id: data for msg_id, data in processed_messages.items()}
-        # logger.info(f"[Postprocessing] Built lookup maps: {len(url_to_data)} URLs, {len(msg_id_to_data)} msg_ids.")
 
         def replacer(match: re.Match) -> str:
             link_text, url = match.groups()

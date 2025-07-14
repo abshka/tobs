@@ -1,35 +1,116 @@
 class ExporterError(Exception):
-    """Base exception for the exporter application."""
+    """
+    Base exception for the exporter application.
+
+    Args:
+        *args: Variable length argument list.
+        **kwargs: Arbitrary keyword arguments.
+
+    Returns:
+        None
+    """
     pass
 
 class ConfigError(ExporterError):
-    """Error related to configuration loading or validation."""
+    """
+    Exception raised for errors related to configuration loading or validation.
+
+    Args:
+        *args: Variable length argument list.
+        **kwargs: Arbitrary keyword arguments.
+
+    Returns:
+        None
+    """
     pass
 
 class CacheError(ExporterError):
-    """Error related to cache operations."""
+    """
+    Exception raised for errors related to cache operations.
+
+    Args:
+        *args: Variable length argument list.
+        **kwargs: Arbitrary keyword arguments.
+
+    Returns:
+        None
+    """
     pass
 
 class MediaProcessingError(ExporterError):
-    """Error during media download or optimization."""
+    """
+    Exception raised for errors during media download or optimization.
+
+    Args:
+        *args: Variable length argument list.
+        **kwargs: Arbitrary keyword arguments.
+
+    Returns:
+        None
+    """
     pass
 
 class NoteGenerationError(ExporterError):
-    """Error during Markdown note generation or saving."""
+    """
+    Exception raised for errors during Markdown note generation or saving.
+
+    Args:
+        *args: Variable length argument list.
+        **kwargs: Arbitrary keyword arguments.
+
+    Returns:
+        None
+    """
     pass
 
 class TelegramConnectionError(ExporterError):
-    """Error specific to Telegram connection or API interaction."""
+    """
+    Exception raised for errors specific to Telegram connection or API interaction.
+
+    Args:
+        *args: Variable length argument list.
+        **kwargs: Arbitrary keyword arguments.
+
+    Returns:
+        None
+    """
     pass
 
 class ThreadPoolError(ExporterError):
-    """Error related to thread pool execution."""
+    """
+    Exception raised for errors related to thread pool execution.
+
+    Args:
+        *args: Variable length argument list.
+        **kwargs: Arbitrary keyword arguments.
+
+    Returns:
+        None
+    """
     pass
 
 class ParallelProcessingError(ExporterError):
-    """Error during parallel processing of tasks."""
+    """
+    Exception raised for errors during parallel processing of tasks.
+
+    Args:
+        *args: Variable length argument list.
+        **kwargs: Arbitrary keyword arguments.
+
+    Returns:
+        None
+    """
     pass
 
 class BatchProcessingError(ExporterError):
-    """Error during batch processing of messages."""
+    """
+    Exception raised for errors during batch processing of messages.
+
+    Args:
+        *args: Variable length argument list.
+        **kwargs: Arbitrary keyword arguments.
+
+    Returns:
+        None
+    """
     pass

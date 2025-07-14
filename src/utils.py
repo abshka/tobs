@@ -6,18 +6,28 @@ import sys
 import urllib.parse
 from functools import partial
 from pathlib import Path
+from time import sleep
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 import aiohttp
 from bs4 import BeautifulSoup, NavigableString
 from loguru import logger
+from rich import print as rprint
 
 logger.remove()
 logger.add("exporter.log", level="WARNING", rotation="1 MB")
 
 
 class TelethonFilter(logging.Filter):
-    """TODO: Add description."""
+    """
+    Filter out unwanted Telethon log messages.
+
+    Args:
+        record: The log record.
+
+    Returns:
+        bool: True if the record should be logged, False otherwise.
+    """
     def filter(self, record):
         msg = record.getMessage()
         ignore_phrases = [
@@ -26,23 +36,46 @@ class TelethonFilter(logging.Filter):
         ]
         return not any(phrase in msg for phrase in ignore_phrases)
 
-# Применить фильтр ко всем логгерам Telethon
 logging.getLogger("telethon").addFilter(TelethonFilter())
 
 
 def clear_screen():
     """
     Clears the terminal screen (cross-platform).
+
+    Args:
+        None
+
+    Returns:
+        None
     """
     os.system('cls' if os.name == 'nt' else 'clear')
 
 T = TypeVar('T')
 R = TypeVar('R')
 
+def notify_and_pause(text: str):
+    """
+    Prints a notification and pauses for a short duration.
+
+    Args:
+        text (str): The notification text to print.
+
+    Returns:
+        None
+    """
+    rprint(text)
+    sleep(1)
+
 def setup_logging(log_level: str = "INFO"):
     """
-    Configures logging using Loguru.
-    Sets up both console and file logging with custom formatting.
+    Configures logging using Loguru. Sets up both console and file logging with custom formatting.
+
+    Args:
+        log_level (str): The logging level for console output.
+
+    Returns:
+        None
     """
     logger.remove()
 
@@ -90,6 +123,14 @@ def setup_logging(log_level: str = "INFO"):
 def sanitize_filename(text: str, max_length: int = 200, replacement: str = '') -> str:
     """
     Sanitizes a filename for safe use on all platforms.
+
+    Args:
+        text (str): The filename to sanitize.
+        max_length (int): Maximum allowed length for the filename.
+        replacement (str): Replacement string for invalid characters.
+
+    Returns:
+        str: The sanitized filename.
     """
     if not text:
         return "Untitled"
@@ -108,6 +149,13 @@ def sanitize_filename(text: str, max_length: int = 200, replacement: str = '') -
 def get_relative_path(target_path: Path, base_path: Path) -> Optional[str]:
     """
     Returns a URL-encoded relative path from base_path to target_path.
+
+    Args:
+        target_path (Path): The target file or directory path.
+        base_path (Path): The base directory path.
+
+    Returns:
+        Optional[str]: The URL-encoded relative path, or None if calculation fails.
     """
     try:
         target_abs = target_path.resolve()
@@ -124,6 +172,15 @@ def get_relative_path(target_path: Path, base_path: Path) -> Optional[str]:
 def ensure_dir_exists(path: Path):
     """
     Ensures the given directory exists, creating it if necessary.
+
+    Args:
+        path (Path): The directory path to ensure exists.
+
+    Returns:
+        None
+
+    Raises:
+        OSError: If the directory cannot be created.
     """
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -134,6 +191,14 @@ def ensure_dir_exists(path: Path):
 async def run_in_thread_pool(func: Callable[..., T], *args, **kwargs) -> T:
     """
     Runs a blocking function in a thread pool asynchronously.
+
+    Args:
+        func (Callable[..., T]): The blocking function to run.
+        *args: Positional arguments for the function.
+        **kwargs: Keyword arguments for the function.
+
+    Returns:
+        T: The result of the function.
     """
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, partial(func, *args, **kwargs))
@@ -141,6 +206,12 @@ async def run_in_thread_pool(func: Callable[..., T], *args, **kwargs) -> T:
 def find_telegram_post_links(text: str) -> List[str]:
     """
     Finds all Telegram post links in the given text.
+
+    Args:
+        text (str): The text to search for Telegram post links.
+
+    Returns:
+        List[str]: A list of Telegram post links found in the text.
     """
     if not text:
         return []
@@ -150,6 +221,12 @@ def find_telegram_post_links(text: str) -> List[str]:
 def find_telegraph_links(text: str) -> List[str]:
     """
     Finds all Telegra.ph links in the given text.
+
+    Args:
+        text (str): The text to search for Telegra.ph links.
+
+    Returns:
+        List[str]: A list of Telegra.ph links found in the text.
     """
     if not text:
         return []
@@ -167,6 +244,18 @@ async def fetch_and_parse_telegraph_to_markdown(
 ) -> Optional[Dict[str, Any]]:
     """
     Fetches and parses a Telegra.ph article to Markdown, downloads images, and replaces links.
+
+    Args:
+        session (aiohttp.ClientSession): The aiohttp session to use for HTTP requests.
+        url (str): The URL of the Telegra.ph article.
+        media_path (Path): The path to save downloaded media.
+        media_processor: The media processor object with a download_external_image method.
+        cache (Optional[dict]): Optional cache for processed messages.
+        entity_id (Optional[str]): Optional entity ID for cache lookup.
+        telegraph_mapping (Optional[dict]): Optional mapping of Telegra.ph URLs to local note names.
+
+    Returns:
+        Optional[Dict[str, Any]]: A dictionary with 'title', 'content', and 'pub_date' keys, or None on failure.
     """
     try:
         logger.debug(f"Fetching Telegra.ph article: {url}")
@@ -182,7 +271,7 @@ async def fetch_and_parse_telegraph_to_markdown(
         title = (article_content.find('h1').get_text(strip=True) if article_content.find('h1') else "Untitled Article")
 
         pub_date = None
-        if time_tag := soup.find('time'):
+        if (time_tag := soup.find('time')):
             pub_date = time_tag.get('datetime', time_tag.get_text(strip=True))[:10]
 
         img_urls = [f'https://telegra.ph{img["src"]}' if (img_src := img.get("src", "")).startswith('/') else img_src
@@ -229,11 +318,11 @@ async def fetch_and_parse_telegraph_to_markdown(
             elif element.name == 'hr':
                 markdown_lines.append("\n---\n")
             elif element.name == 'figure':
-                if img := element.find('img'):
+                if (img := element.find('img')):
                     img_src = f"https://telegra.ph{img.get('src')}" if img.get('src', '').startswith('/') else img.get('src')
-                    if local_path := image_map.get(img_src):
+                    if (local_path := image_map.get(img_src)):
                         markdown_lines.append(f"![[{local_path.name}]]")
-                        if figcaption := element.find('figcaption'):
+                        if (figcaption := element.find('figcaption')):
                             markdown_lines.append(f"*{figcaption.get_text(strip=True)}*")
 
         raw_markdown = "\n\n".join(markdown_lines)
@@ -245,12 +334,21 @@ async def fetch_and_parse_telegraph_to_markdown(
             msg_id_to_data = {msg_id: data for msg_id, data in processed_messages.items()}
 
             def tg_replacer(match: re.Match) -> str:
+                """
+                Replaces Telegram links in markdown with local file references if available.
+
+                Args:
+                    match (re.Match): The regex match object.
+
+                Returns:
+                    str: The replaced link or the original if not found.
+                """
                 link_text, tg_url = match.groups()
                 clean_url = tg_url.split('?')[0].rstrip('/')
 
                 data = url_to_data.get(clean_url)
                 if not data:
-                    if msg_id_match := re.search(r"/(\d+)$", clean_url):
+                    if (msg_id_match := re.search(r"/(\d+)$", clean_url)):
                         data = msg_id_to_data.get(msg_id_match.group(1))
 
                 if data and (fname := data.get("filename")):
@@ -267,9 +365,18 @@ async def fetch_and_parse_telegraph_to_markdown(
 
         if telegraph_mapping:
             def telegraph_replacer(match: re.Match) -> str:
+                """
+                Replaces Telegra.ph links in markdown with local note references if available.
+
+                Args:
+                    match (re.Match): The regex match object.
+
+                Returns:
+                    str: The replaced link or the original if not found.
+                """
                 link_text, telegraph_url = match.groups()
                 telegraph_url = telegraph_url.rstrip('/')
-                if note_stem := telegraph_mapping.get(telegraph_url):
+                if (note_stem := telegraph_mapping.get(telegraph_url)):
                     logger.debug(f"Replacing telegra.ph link '{telegraph_url}' with local note [[{note_stem}]]")
                     return f"[[{note_stem}|{link_text}]]"
                 return match.group(0)
