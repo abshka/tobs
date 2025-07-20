@@ -7,7 +7,7 @@ import aiofiles
 
 from src.cache_manager import CacheManager
 from src.config import Config
-from src.utils import get_relative_path, logger, run_in_thread_pool
+from src.utils import get_relative_path, logger
 
 
 class ReplyLinker:
@@ -163,9 +163,7 @@ class ReplyLinker:
             return False
 
         try:
-            relative_path = await run_in_thread_pool(
-                get_relative_path, child_path, parent_path.parent
-            )
+            relative_path = get_relative_path(child_path, parent_path.parent)
 
             if not relative_path:
                 logger.error(f"[{entity_id}] Failed to calculate relative path: {parent_path} -> {child_path}")
@@ -218,14 +216,14 @@ class ReplyLinker:
             Optional[Path]: The path to the note file if found, otherwise None.
         """
         note_path = base_path / filename
-        if await run_in_thread_pool(note_path.exists):
+        if note_path.exists():
             return note_path
 
         try:
             year = filename.split('-')[0]
             if year.isdigit() and len(year) == 4:
                 year_path = base_path / year / filename
-                if await run_in_thread_pool(year_path.exists):
+                if year_path.exists():
                     return year_path
         except Exception:
             pass

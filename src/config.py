@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -38,12 +38,15 @@ class ExportTarget:
             None
         """
         self.id = str(self.id).strip()
+        if self.type == "single_post":
+            return
         if self.id.startswith('@') or 't.me/' in self.id or self.id.startswith('-100'):
             self.type = "channel"
         elif self.id.startswith('-') and self.id[1:].isdigit():
             self.type = "chat"
         elif self.id.isdigit():
             self.type = "user"
+
 
 @dataclass
 class Config:
@@ -64,9 +67,7 @@ class Config:
         media_download (bool, optional): Whether to download media. Defaults to True.
         cache_manager (Any, optional): Cache manager. Defaults to None.
         log_level (str, optional): Logging level. Defaults to "INFO".
-        max_workers (int, optional): Maximum number of workers. Defaults to 8.
-        max_process_workers (int, optional): Maximum number of process workers. Defaults to 4.
-        concurrent_downloads (int, optional): Number of concurrent downloads. Defaults to 10.
+        workers (int, optional): Number of workers. Defaults to 8.
         cache_save_interval (int, optional): Cache save interval. Defaults to 50.
         request_delay (float, optional): Delay between requests. Defaults to 0.5.
         message_batch_size (int, optional): Batch size for messages. Defaults to 100.
@@ -96,9 +97,8 @@ class Config:
     media_download: bool = True
     cache_manager: Any = None
     log_level: str = "INFO"
-    max_workers: int = 8
-    max_process_workers: int = 4
-    concurrent_downloads: int = 10
+    workers: int = 8
+    batch_size: Optional[int] = None
     cache_save_interval: int = 50
     request_delay: float = 0.5
     message_batch_size: int = 100
@@ -118,6 +118,101 @@ class Config:
     export_paths: Dict[str, Path] = field(default_factory=dict, init=False)
     media_paths: Dict[str, Path] = field(default_factory=dict, init=False)
     cache: Dict[str, Any] = field(default_factory=dict, init=False)
+
+    def to_dict(self) -> dict:
+        """
+        Возвращает словарь только с сериализуемыми (основными) полями.
+        Исключает служебные и временные атрибуты.
+        """
+        allowed = {f.name for f in fields(self) if f.init}
+        result = {}
+        for k, v in asdict(self).items():
+            if k in allowed:
+                # Специальная обработка для export_targets
+                if k == "export_targets":
+                    result[k] = [
+                        asdict(t) if hasattr(t, "__dataclass_fields__") else t
+                        for t in v
+                    ]
+                # Path сериализуем как строку
+                elif isinstance(v, Path):
+                    result[k] = str(v)
+                else:
+                    result[k] = v
+        return result
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Config":
+        """
+        Создаёт объект Config из словаря, игнорируя лишние поля.
+        """
+        allowed = {f.name for f in fields(cls) if f.init}
+        filtered = {}
+        for k, v in d.items():
+            if k in allowed:
+                # Восстановление export_targets
+                if k == "export_targets":
+                    filtered[k] = [ExportTarget(**t) if not isinstance(t, ExportTarget) else t for t in v]
+                # Восстановление Path
+                elif k in ("export_path", "cache_file") and not isinstance(v, Path):
+                    filtered[k] = Path(v)
+                else:
+                    filtered[k] = v
+        return cls(**filtered)
+
+    @classmethod
+    def from_env(cls, env_path: Union[str, Path] = ".env") -> "Config":
+        """
+        Загружает конфиг из .env и переменных окружения.
+        """
+        if Path(env_path).exists():
+            load_dotenv(dotenv_path=env_path)
+        try:
+            proxy_port_str = os.getenv("PROXY_PORT")
+            proxy_port = int(proxy_port_str) if proxy_port_str and proxy_port_str.isdigit() else None
+
+            config_dict = {
+                "api_id": int(os.getenv("API_ID", 0)),
+                "api_hash": os.getenv("API_HASH", ""),
+                "phone_number": os.getenv("PHONE_NUMBER"),
+                "session_name": os.getenv("SESSION_NAME", "tobs_session"),
+                "export_path": Path(os.getenv("EXPORT_PATH", DEFAULT_EXPORT_PATH)),
+                "media_subdir": os.getenv("MEDIA_SUBDIR", "_media"),
+                "use_entity_folders": _parse_bool(os.getenv("USE_ENTITY_FOLDERS"), True),
+                "only_new": _parse_bool(os.getenv("ONLY_NEW"), False),
+                "media_download": _parse_bool(os.getenv("MEDIA_DOWNLOAD"), True),
+                "log_level": os.getenv("LOG_LEVEL", "INFO"),
+                "workers": int(os.getenv("WORKERS", 8)),
+                "batch_size": int(os.getenv("BATCH_SIZE")) if os.getenv("BATCH_SIZE") else None,
+                "cache_save_interval": int(os.getenv("CACHE_SAVE_INTERVAL", 50)),
+                "request_delay": float(os.getenv("REQUEST_DELAY", 0.5)),
+                "message_batch_size": int(os.getenv("MESSAGE_BATCH_SIZE", 100)),
+                "image_quality": int(os.getenv("IMAGE_QUALITY", 85)),
+                "video_crf": int(os.getenv("VIDEO_CRF", 28)),
+                "video_preset": os.getenv("VIDEO_PRESET", "fast"),
+                "hw_acceleration": os.getenv("HW_ACCELERATION", "none"),
+                "use_h265": _parse_bool(os.getenv("USE_H265"), False),
+                "cache_file": Path(os.getenv("CACHE_FILE", DEFAULT_CACHE_PATH)),
+                "interactive_mode": _parse_bool(os.getenv("INTERACTIVE_MODE"), False),
+                "dialog_fetch_limit": int(os.getenv("DIALOG_FETCH_LIMIT", 20)),
+                "proxy_type": os.getenv("PROXY_TYPE"),
+                "proxy_addr": os.getenv("PROXY_ADDR"),
+                "proxy_port": proxy_port,
+                "throttle_threshold_kbps": int(os.getenv("THROTTLE_THRESHOLD_KBPS", 50)),
+                "throttle_pause_s": int(os.getenv("THROTTLE_PAUSE_S", 30)),
+            }
+
+            export_targets = []
+            targets_str = os.getenv("EXPORT_TARGETS", "")
+            if targets_str:
+                for target_id in [t.strip() for t in targets_str.split(',') if t.strip()]:
+                    export_targets.append(ExportTarget(id=target_id))
+
+            config_dict["export_targets"] = export_targets
+            return cls(**config_dict)
+
+        except (ValueError, TypeError) as e:
+            raise ConfigError(f"Invalid configuration value: {e}") from e
 
     def __post_init__(self):
         """
@@ -239,66 +334,3 @@ def _parse_bool(value: Optional[Union[str, bool]], default: bool = False) -> boo
     if isinstance(value, bool):
         return value
     return str(value).lower() in ('true', '1', 'yes', 'y', 'on')
-
-def load_config(env_path: Union[str, Path] = ".env") -> Config:
-    """
-    Load configuration from environment variables and .env file.
-
-    Args:
-        env_path (Union[str, Path], optional): Path to the .env file. Defaults to ".env".
-
-    Returns:
-        Config: The loaded configuration object.
-
-    Raises:
-        ConfigError: If configuration values are invalid.
-    """
-    if Path(env_path).exists():
-        load_dotenv(dotenv_path=env_path)
-    try:
-        proxy_port_str = os.getenv("PROXY_PORT")
-        proxy_port = int(proxy_port_str) if proxy_port_str and proxy_port_str.isdigit() else None
-
-        config_dict = {
-            "api_id": int(os.getenv("API_ID", 0)),
-            "api_hash": os.getenv("API_HASH", ""),
-            "phone_number": os.getenv("PHONE_NUMBER"),
-            "session_name": os.getenv("SESSION_NAME", "tobs_session"),
-            "export_path": Path(os.getenv("EXPORT_PATH", DEFAULT_EXPORT_PATH)),
-            "media_subdir": os.getenv("MEDIA_SUBDIR", "_media"),
-            "use_entity_folders": _parse_bool(os.getenv("USE_ENTITY_FOLDERS"), True),
-            "only_new": _parse_bool(os.getenv("ONLY_NEW"), False),
-            "media_download": _parse_bool(os.getenv("MEDIA_DOWNLOAD"), True),
-            "log_level": os.getenv("LOG_LEVEL", "INFO"),
-            "max_workers": int(os.getenv("MAX_WORKERS", 8)),
-            "max_process_workers": int(os.getenv("MAX_PROCESS_WORKERS", 4)),
-            "concurrent_downloads": int(os.getenv("CONCURRENT_DOWNLOADS", 10)),
-            "cache_save_interval": int(os.getenv("CACHE_SAVE_INTERVAL", 50)),
-            "request_delay": float(os.getenv("REQUEST_DELAY", 0.5)),
-            "message_batch_size": int(os.getenv("MESSAGE_BATCH_SIZE", 100)),
-            "image_quality": int(os.getenv("IMAGE_QUALITY", 85)),
-            "video_crf": int(os.getenv("VIDEO_CRF", 28)),
-            "video_preset": os.getenv("VIDEO_PRESET", "fast"),
-            "hw_acceleration": os.getenv("HW_ACCELERATION", "none"),
-            "use_h265": _parse_bool(os.getenv("USE_H265"), False),
-            "cache_file": Path(os.getenv("CACHE_FILE", DEFAULT_CACHE_PATH)),
-            "interactive_mode": _parse_bool(os.getenv("INTERACTIVE_MODE"), False),
-            "dialog_fetch_limit": int(os.getenv("DIALOG_FETCH_LIMIT", 20)),
-            "proxy_type": os.getenv("PROXY_TYPE"),
-            "proxy_addr": os.getenv("PROXY_ADDR"),
-            "proxy_port": proxy_port,
-            "throttle_threshold_kbps": int(os.getenv("THROTTLE_THRESHOLD_KBPS", 50)),
-            "throttle_pause_s": int(os.getenv("THROTTLE_PAUSE_S", 30)),
-        }
-
-        export_targets = []
-        targets_str = os.getenv("EXPORT_TARGETS", "")
-        if targets_str:
-            for target_id in [t.strip() for t in targets_str.split(',') if t.strip()]:
-                export_targets.append(ExportTarget(id=target_id))
-
-        config_dict["export_targets"] = export_targets
-        return Config(**config_dict)
-
-    except (ValueError, TypeError) as e:
-        raise ConfigError(f"Invalid configuration value: {e}") from e

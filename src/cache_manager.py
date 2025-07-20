@@ -1,12 +1,11 @@
 import asyncio
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
 import aiofiles
+import ujson
 
 from src.utils import logger
 
@@ -25,10 +24,8 @@ class CacheManager:
         self.cache_path = cache_path.resolve()
         self.cache: Dict[str, Any] = {"version": 2, "entities": {}}
         self._lock = asyncio.Lock()
-        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="CacheThread")
         self._save_task: Optional[asyncio.Task] = None
         self._dirty = False
-        logger.info(f"Cache Manager initialized. Cache file: {self.cache_path}")
 
     async def load_cache(self):
         """
@@ -42,22 +39,22 @@ class CacheManager:
         """
         async with self._lock:
             if not self.cache_path.exists():
-                logger.warning(f"Cache file not found at {self.cache_path}. Starting fresh.")
                 return
             try:
                 async with aiofiles.open(self.cache_path, mode='r', encoding='utf-8') as f:
                     content = await f.read()
                 if not content:
-                    logger.warning(f"Cache file {self.cache_path} is empty.")
                     return
 
-                loop = asyncio.get_running_loop()
-                loaded_data = await loop.run_in_executor(self._pool, json.loads, content)
+                try:
+                    loaded_data = ujson.loads(content)
+                except Exception as e:
+                    logger.error(f"Cache file has invalid format or could not be parsed: {e}. Starting fresh.")
+                    return
 
                 if not isinstance(loaded_data, dict) or "version" not in loaded_data:
                     logger.error("Cache file has invalid format. Starting fresh.")
                     return
-
                 self.cache = loaded_data
                 self.cache.setdefault("entities", {})
 
@@ -105,14 +102,11 @@ class CacheManager:
             if not self._dirty:
                 return
             try:
-                loop = asyncio.get_running_loop()
-                cache_json = await loop.run_in_executor(
-                    self._pool, partial(json.dumps, self.cache, indent=2, ensure_ascii=False)
-                )
+                cache_json = ujson.dumps(self.cache, indent=2, ensure_ascii=False)
                 temp_path = self.cache_path.with_suffix('.tmp')
                 async with aiofiles.open(temp_path, mode='w', encoding='utf-8') as f:
                     await f.write(cache_json)
-                await loop.run_in_executor(self._pool, os.replace, temp_path, self.cache_path)
+                os.replace(temp_path, self.cache_path)
                 self._dirty = False
             except Exception:
                 pass

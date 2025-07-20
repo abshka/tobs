@@ -6,14 +6,22 @@ from typing import Any, Dict, List, Optional, Union
 
 import aiofiles
 import aiohttp
-from telethon.tl.types import Message, User
+from rich import print as rprint
+from telethon.tl.types import (
+    DocumentAttributeAudio,
+    DocumentAttributeVideo,
+    Message,
+    MessageMediaDocument,
+    MessageMediaPhoto,
+    User,
+)
 
 from src.config import Config
+from src.media_processor import MediaProcessor
 from src.utils import (
     ensure_dir_exists,
     fetch_and_parse_telegraph_to_markdown,
     logger,
-    run_in_thread_pool,
     sanitize_filename,
 )
 
@@ -68,12 +76,11 @@ class NoteGenerator:
 
             if export_comments and client is not None:
                 media_dir = entity_export_path / "media"
-                from src.utils import ensure_dir_exists
-                await run_in_thread_pool(ensure_dir_exists, media_dir)
-                from src.media_processor import MediaProcessor
+                ensure_dir_exists(media_dir)
+
                 media_processor = MediaProcessor(self.config, client)
                 comments_md = await self.export_comments_md(
-                    message, client, media_dir, media_processor=media_processor, entity_id=str(entity_id)
+                    message, client, media_dir, media_processor=media_processor, entity_id=str(entity_id), progress=self.progress if hasattr(self, "progress") else None
                 )
                 if comments_md:
                     content += "\n\n---\n### Comments\n" + comments_md
@@ -126,11 +133,11 @@ class NoteGenerator:
         pub_date = article_data.get('pub_date')
         date_str = pub_date if pub_date else datetime.now().strftime('%Y-%m-%d')
 
-        sanitized_title = await run_in_thread_pool(sanitize_filename, title, 80)
+        sanitized_title = sanitize_filename(title, 80)
         filename = f"{date_str}.{sanitized_title}.md"
 
         telegraph_dir = notes_export_path / 'telegra_ph'
-        await run_in_thread_pool(ensure_dir_exists, telegraph_dir)
+        ensure_dir_exists(telegraph_dir)
         note_path = telegraph_dir / filename
 
         if telegraph_mapping is not None:
@@ -157,7 +164,7 @@ class NoteGenerator:
             async with aiofiles.open(note_path, 'r', encoding='utf-8') as f:
                 return await f.read()
 
-    async def export_comments_md(self, main_post: Message, client, media_dir: Path, media_processor=None, entity_id=None) -> str:
+    async def export_comments_md(self, main_post: Message, client, media_dir: Path, media_processor=None, entity_id=None, progress=None) -> str:
         """
         Export comments for a post in markdown format.
 
@@ -186,6 +193,8 @@ class NoteGenerator:
                 return "\n\n*No comments.*\n"
 
             md = ""
+            # Собираем все комментарии с медиа
+            comment_media_info = []
             for comment in comments:
                 sender = comment.sender
                 sender_name = self._get_sender_name(sender)
@@ -194,29 +203,58 @@ class NoteGenerator:
                 if comment_text:
                     md += f"> {comment_text}\n"
                 if comment.media and media_processor is not None and entity_id is not None:
-                    media_type = media_processor.get_media_type(comment)
+                    media_type = self.get_media_type(comment)
                     type_subdir = media_dir / f"{media_type}s" if media_type != "unknown" else media_dir
-                    from src.utils import ensure_dir_exists, run_in_thread_pool
-                    await run_in_thread_pool(ensure_dir_exists, type_subdir)
+                    ensure_dir_exists(type_subdir)
                     filename = media_processor._get_filename(
                         comment.media.photo if hasattr(comment.media, "photo") else comment.media.document,
                         comment.id,
                         media_type,
                         entity_id
                     ) if hasattr(media_processor, "_get_filename") else None
-                    file_path = await comment.download_media(file=type_subdir / filename if filename else type_subdir)
-                    if file_path:
-                        file_name = Path(file_path).name
-                        relative_media_path = f"media/{media_type}s/{file_name}" if media_type != "unknown" else f"media/{file_name}"
-                        md += f"> ![[{relative_media_path}]]\n"
+                    comment_media_info.append({
+                        "comment": comment,
+                        "media_type": media_type,
+                        "type_subdir": type_subdir,
+                        "filename": filename
+                    })
                 elif comment.media:
-                    file_path = await comment.download_media(file=media_dir)
+                    comment_media_info.append({
+                        "comment": comment,
+                        "media_type": "unknown",
+                        "type_subdir": media_dir,
+                        "filename": None
+                    })
+
+            # Прогресс-бар для скачивания медиа из комментариев
+            if comment_media_info and progress is not None:
+                tasks = []
+                for info in comment_media_info:
+                    comment = info["comment"]
+                    filename = info["filename"] or f"comment_media_{comment.id}"
+                    media_type = info["media_type"]
+                    type_subdir = info["type_subdir"]
+                    total_size = getattr(comment, "file", None).size if hasattr(comment, "file") and comment.file else 0
+                    task_id = progress.add_task("download", filename=filename, total=total_size)
+                    tasks.append((comment, type_subdir, filename, media_type, task_id))
+                # Скачиваем медиа асинхронно с прогрессом
+                results = await asyncio.gather(*[
+                    t[0].download_media(file=t[1] / t[2] if t[2] else t[1])
+                    for t in tasks
+                ])
+                # Добавляем ссылки на медиа в markdown
+                for idx, info in enumerate(comment_media_info):
+                    file_path = results[idx]
                     if file_path:
                         file_name = Path(file_path).name
-                        relative_media_path = f"media/{file_name}"
+                        media_type = info["media_type"]
+                        relative_media_path = f"media/{media_type}s/{file_name}" if media_type != "unknown" else f"media/{file_name}"
                         md += f"> ![[{relative_media_path}]]\n"
             return md
         except Exception as e:
+            # Игнорируем ошибку GetRepliesRequest (нет комментариев)
+            if "The message ID used in the peer was invalid" in str(e):
+                return ""
             logger.error(f"Failed to export comments for post {main_post.id}: {e}")
             return ""
 
@@ -253,12 +291,7 @@ class NoteGenerator:
         if hasattr(message, "media"):
             if message.media is None:
                 return "unknown"
-            from telethon.tl.types import (
-                DocumentAttributeAudio,
-                DocumentAttributeVideo,
-                MessageMediaDocument,
-                MessageMediaPhoto,
-            )
+
             if isinstance(message.media, MessageMediaPhoto):
                 return "image"
             if isinstance(message.media, MessageMediaDocument):
@@ -301,7 +334,7 @@ class NoteGenerator:
         try:
             message_text = getattr(message, 'text', '') or ""
             first_line = message_text.split('\n', 1)[0]
-            sanitized_title = await run_in_thread_pool(sanitize_filename, first_line, 60)
+            sanitized_title = sanitize_filename(first_line, 60)
             message_date = getattr(message, 'date', datetime.now())
             date_str = message_date.strftime("%Y-%m-%d")
 
@@ -312,7 +345,7 @@ class NoteGenerator:
 
             year_dir = entity_export_path / str(message_date.year)
             note_path = year_dir / filename
-            await run_in_thread_pool(ensure_dir_exists, note_path.parent)
+            ensure_dir_exists(note_path.parent)
             return note_path
         except Exception as e:
             logger.error(f"Failed to prepare note path for message in entity {entity_id}: {e}", exc_info=True)
@@ -352,7 +385,7 @@ class NoteGenerator:
         """
         media_links = []
         for media_path in media_paths:
-            if media_path and await run_in_thread_pool(media_path.exists):
+            if media_path and media_path.exists():
                 media_links.append(f"![[{media_path.name}]]")
             else:
                 logger.warning(f"Media file path does not exist: {media_path}")
@@ -393,7 +426,7 @@ class NoteGenerator:
         Returns:
             None
         """
-        from rich import print as rprint
+
         rprint(f"[green]*** Post-processing links for entity {entity_id} ***[/green]")
 
         processed_messages = cache.get("entities", {}).get(entity_id, {}).get("processed_messages", {})

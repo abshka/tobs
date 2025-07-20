@@ -1,33 +1,25 @@
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 
 
 class DownloadManager:
-    """Manages parallel downloading of files using a thread pool."""
+    """Manages parallel downloading of files using asyncio."""
 
     def __init__(self, max_workers=5):
-        """Initialize the DownloadManager with a thread pool of given size."""
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        """Initialize the DownloadManager with a max_workers limit (not used in pure asyncio)."""
+        self.max_workers = max_workers
 
     async def download_files_parallel(self, files_to_download, download_function):
         """
-        Downloads files in parallel using a thread pool.
+        Downloads files in parallel using asyncio.
 
         :param files_to_download: List of files to download.
-        :param download_function: Function to download a single file.
+        :param download_function: Async function to download a single file.
         :return: List of download results.
         """
-        loop = asyncio.get_running_loop()
-        download_tasks = []
-
-        for file_info in files_to_download:
-            download_task = partial(download_function, file_info)
-            task = loop.run_in_executor(self.executor, download_task)
-            download_tasks.append(task)
-
+        download_tasks = [download_function(file_info) for file_info in files_to_download]
         results = await asyncio.gather(*download_tasks, return_exceptions=True)
         return results
+
 
     def shutdown(self):
         """Shuts down the thread pool executor."""

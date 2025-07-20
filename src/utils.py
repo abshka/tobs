@@ -2,20 +2,15 @@ import asyncio
 import logging
 import os
 import re
-import sys
 import urllib.parse
-from functools import partial
 from pathlib import Path
 from time import sleep
-from typing import Any, Callable, Dict, List, Optional, TypeVar
+from typing import Any, Dict, List, Optional, TypeVar
 
 import aiohttp
 from bs4 import BeautifulSoup, NavigableString
 from loguru import logger
 from rich import print as rprint
-
-logger.remove()
-logger.add("exporter.log", level="WARNING", rotation="1 MB")
 
 
 class TelethonFilter(logging.Filter):
@@ -79,41 +74,19 @@ def setup_logging(log_level: str = "INFO"):
     """
     logger.remove()
 
-    def formatter(record):
-        level_icon = {
-            "INFO": "ℹ️",
-            "SUCCESS": "✅",
-            "WARNING": "⚠️",
-            "ERROR": "❌",
-            "CRITICAL": "❌",
-        }.get(record["level"].name, "➡️")
-
-        if record["level"].name == "DEBUG":
-            return "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}:{function}:{line}</cyan> - <level>{message}</level>\n"
-
-        return f"{level_icon} <level>{record['message']}</level>\n"
-
-    logger.add(
-        sys.stderr,
-        level=log_level.upper(),
-        format=formatter,
-        colorize=True
-    )
-
     try:
         log_file_path = Path("tobs_exporter.log").resolve()
+        # mode='w' — очищает файл при каждом запуске
         logger.add(
             log_file_path,
-            level="DEBUG",
-            rotation="10 MB",
-            retention="7 days",
-            compression="zip",
+            level="INFO",
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
             enqueue=True,
             backtrace=True,
-            diagnose=True
+            diagnose=True,
+            mode="w"
         )
-        logger.info(f"Logging initialized. Console level: {log_level.upper()}, File level: DEBUG")
+        logger.info("Logging initialized. File level: INFO (file will be overwritten each run)")
     except Exception as e:
         logger.error(f"Failed to configure file logging: {e}", exc_info=True)
 
@@ -188,20 +161,7 @@ def ensure_dir_exists(path: Path):
         logger.error(f"Failed to create directory {path}: {e}", exc_info=True)
         raise
 
-async def run_in_thread_pool(func: Callable[..., T], *args, **kwargs) -> T:
-    """
-    Runs a blocking function in a thread pool asynchronously.
-
-    Args:
-        func (Callable[..., T]): The blocking function to run.
-        *args: Positional arguments for the function.
-        **kwargs: Keyword arguments for the function.
-
-    Returns:
-        T: The result of the function.
-    """
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, partial(func, *args, **kwargs))
+# REMOVED: run_in_thread_pool, threading is no longer used in the project.
 
 def find_telegram_post_links(text: str) -> List[str]:
     """

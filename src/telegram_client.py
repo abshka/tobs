@@ -59,7 +59,6 @@ class TelegramManager:
                 logger.warning(f"Unsupported proxy type for Telethon: '{proxy_scheme}'. Ignoring.")
             else:
                 proxy_info = (proxy_scheme, config.proxy_addr, config.proxy_port)
-                logger.info(f"Using {proxy_scheme.upper()} proxy for Telethon: {config.proxy_addr}:{config.proxy_port}")
 
         self.client = TelegramClient(
             config.session_name, config.api_id, config.api_hash,
@@ -94,9 +93,9 @@ class TelegramManager:
 
             me = await self.client.get_me()
             username = getattr(me, 'username', getattr(me, 'first_name', 'Unknown User'))
-            logger.info(f"Connected as: {username} (ID: {getattr(me, 'id', 'unknown')})")
             self.client_connected = True
             rprint(Panel(f"[bold green]Authorization successful![/bold green] [dim]Welcome, {username}[/dim]", expand=False))
+            await asyncio.sleep(1)
             return True
         except Exception as e:
             logger.error(f"Unexpected connection error: {e}", exc_info=(self.config.log_level == 'DEBUG'))
@@ -201,24 +200,23 @@ class TelegramManager:
                 return await self.client.get_entity(int(entity_id_str))
             raise
 
-    async def fetch_messages(self, entity: Any, min_id: Optional[int] = None) -> AsyncGenerator[Message, None]:
+    async def fetch_messages(self, entity: Any, limit: Optional[int] = None, min_id: Optional[int] = None) -> AsyncGenerator[Message, None]:
         """
         Fetch messages from a Telegram entity.
 
         Args:
             entity (Any): The Telegram entity to fetch messages from.
+            limit (Optional[int]): The maximum number of messages to fetch.
             min_id (Optional[int]): The minimum message ID to start from.
 
         Yields:
             Message: Telegram message objects.
         """
-        entity_name = getattr(entity, 'title', getattr(entity, 'username', str(entity.id)))
-        logger.info(f"Fetching messages from: {entity_name} (ID: {entity.id})")
         if min_id:
             logger.info(f"Starting from message ID: {min_id}")
 
         async for message in self.client.iter_messages(
-            entity=entity, limit=None, offset_id=0, reverse=True,
+            entity=entity, limit=limit, offset_id=0, reverse=True,
             min_id=min_id or 0, wait_time=self.config.request_delay
         ):
             if isinstance(message, Message) and not message.action:
@@ -276,6 +274,7 @@ class TelegramManager:
                     break
             elif choice == '4':
                 await self.export_single_post_by_link()
+                break
             elif choice == '5':
                 await notify_and_pause_async("[yellow]Exiting...[/yellow]")
                 sys.exit(0)
@@ -535,6 +534,12 @@ class TelegramManager:
         else:
             await notify_and_pause_async(f"[green]Post found! Channel: {entity_identifier}, Post ID: {post_id}[/green]")
 
+        # --- Собираем все сообщения альбома (grouped media) через отдельную функцию ---
+        messages_to_process = await self.collect_album_messages(entity, message)
+
+        # Сохраняем список сообщений для pipeline
+        self.config._single_post_messages_to_process = messages_to_process
+
         channel_name = getattr(entity, 'username', None) or getattr(entity, 'title', None) or str(entity.id)
         export_dir_name = f"{channel_name}_{post_id}"
         export_root = Path(self.config.export_path) / export_dir_name
@@ -542,15 +547,44 @@ class TelegramManager:
         export_root.mkdir(parents=True, exist_ok=True)
         media_path.mkdir(parents=True, exist_ok=True)
 
-        from src.config import ExportTarget
+
         single_post_target = ExportTarget(
             id=str(entity.id),
             name=export_dir_name,
             type="single_post",
             message_id=int(post_id)
         )
+        self.config.export_targets.clear()
         self.config.add_export_target(single_post_target)
-        notify_and_pause("[green]Post marked for export! It will be exported when you choose 'Finish selection and start export'.[/green]")
+        return True
+
+    async def collect_album_messages(self, entity, message):
+        """
+        Collect all messages belonging to the same album (grouped media) as the given message.
+
+        Args:
+            entity: Telegram entity (channel/group/user).
+            message: The main message (post) to check for grouped media.
+
+        Returns:
+            List[Message]: All messages in the album (grouped media), or [message] if not an album.
+        """
+        grouped_id = getattr(message, "grouped_id", None)
+        if not grouped_id:
+            print(f"[SinglePost] No grouped_id found for message {message.id}. Returning single message.")
+            return [message]
+
+        album_messages = await self.client.get_messages(
+            entity,
+            limit=50,
+            min_id=message.id - 25,
+            max_id=message.id + 25
+        )
+        album_messages = [m for m in album_messages if m and getattr(m, "grouped_id", None) == grouped_id]
+        album_messages.append(message)
+        album_messages = list({m.id: m for m in album_messages}.values())
+        album_messages.sort(key=lambda m: m.id)
+        return album_messages
 
     def get_client(self) -> TelegramClient:
         """

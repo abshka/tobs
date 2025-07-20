@@ -1,12 +1,13 @@
 import asyncio
-import concurrent.futures
 import mimetypes
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import List, Optional, Union
 
 import aiofiles
+import aiofiles.os
 import aiohttp
 import ffmpeg
 from PIL import ImageFile
@@ -24,13 +25,18 @@ from telethon.tl.types import (
 )
 
 from src.config import Config
-from src.utils import ensure_dir_exists, logger, run_in_thread_pool, sanitize_filename
+from src.utils import logger, sanitize_filename
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 AIOHTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
+
+async def async_ensure_dir_exists(path: Path):
+    """Асинхронно убеждается, что директория существует."""
+    await aiofiles.os.makedirs(path, exist_ok=True)
+
 
 class ProgressCallback:
     """
@@ -47,7 +53,7 @@ class ProgressCallback:
         self.last_downloaded = 0
         self.throttle_counter = 0
 
-    def __call__(self, downloaded_bytes: int, total_bytes: int):
+    async def __call__(self, downloaded_bytes: int, total_bytes: int):
         """
         Called during download to update progress and check for throttling.
 
@@ -55,13 +61,10 @@ class ProgressCallback:
             downloaded_bytes (int): Number of bytes downloaded so far.
             total_bytes (int): Total bytes to download.
         """
-        percent = int((downloaded_bytes / total_bytes) * 100) if total_bytes else 0
-        if not hasattr(self, "_last_percent") or percent // 10 != getattr(self, "_last_percent", -1):
-            rprint(f"Downloading {self.description} {percent}% ({downloaded_bytes // 1024} kb / {total_bytes // 1024} kb)")
-            self._last_percent = percent // 10
-        self._check_throttling(downloaded_bytes)
+        # Deprecated: rprint progress, now handled by rich.Progress in download functions
+        await self._check_throttling(downloaded_bytes)
 
-    def _check_throttling(self, downloaded_bytes: int):
+    async def _check_throttling(self, downloaded_bytes: int):
         """
         Checks download speed and pauses if throttling is suspected.
 
@@ -83,9 +86,8 @@ class ProgressCallback:
             self.throttle_counter = 0
 
         if self.throttle_counter >= 2:
-            logger.warning(f"Download speed is very low ({speed_kbps:.1f} KB/s). Throttling suspected. Pausing for {pause_duration}s...")
-            logger.warning(f"Throttling download: speed={speed_kbps:.1f} KB/s, pausing for {pause_duration}s")
-            time.sleep(pause_duration)
+            rprint(f"[yellow]Скорость загрузки очень низкая ({speed_kbps:.1f} KB/s). Подозрение на throttling. Пауза {pause_duration} сек...[/yellow]")
+            await asyncio.sleep(pause_duration)
             self.throttle_counter = 0
 
         self.last_check_time = now
@@ -103,15 +105,13 @@ class MediaProcessor:
     def __init__(self, config: Config, client: TelegramClient):
         self.config = config
         self.client = client
-        self.download_semaphore = asyncio.Semaphore(config.concurrent_downloads)
-        self.thread_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=config.max_workers, thread_name_prefix="MediaThread"
-        )
+        self.download_semaphore = asyncio.Semaphore(config.workers)
         self.processed_cache = {}
         self._cache_lock = asyncio.Lock()
 
     async def download_and_optimize_media(
-        self, message: Message, entity_id: Union[str, int], entity_media_path: Path
+        self, message: Message, entity_id: Union[str, int], entity_media_path: Path,
+        progress=None, task_id=None
     ) -> List[Path]:
         """
         Downloads and optimizes all media from a Telegram message.
@@ -128,8 +128,6 @@ class MediaProcessor:
             return []
 
         media_items = []
-        entity_id_str = str(entity_id)
-
         try:
             await self._add_media_from_message(message, media_items)
         except Exception as e:
@@ -139,18 +137,27 @@ class MediaProcessor:
         if not media_items:
             return []
 
-        tasks = [
-            self._process_single_item(msg, entity_id_str, media_type, entity_media_path)
-            for media_type, msg in media_items if isinstance(msg, Message)
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        entity_id_str = str(entity_id)
+        tasks = []
+        for media_type, msg in media_items:
+            tasks.append(self._process_single_item(
+                msg, entity_id_str, media_type, entity_media_path, progress, task_id
+            ))
+
+        results = []
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            rprint(f"[red]Ошибка при обработке группы медиа для сообщения {getattr(message, 'id', 'unknown')}: {e}[/red]")
+            results = []
 
         final_paths = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                media_type, media_obj = media_items[i]
-                media_id = getattr(media_obj, 'id', 'unknown')
-                logger.error(f"Failed to process {media_type} (ID: {media_id}): {result}", exc_info=True)
+                media_type, msg = media_items[i]
+                media_id = getattr(msg, 'id', 'unknown')
+                rprint(f"[red]Ошибка обработки {media_type} (ID: {media_id}): {result}[/red]")
             elif result and isinstance(result, Path):
                 final_paths.append(result)
 
@@ -173,13 +180,12 @@ class MediaProcessor:
         while attempt < max_retries:
             try:
                 async with self.download_semaphore:
-                    async with session.get(url, timeout=60) as response:
+                    async with session.get(url, timeout=60, headers=AIOHTTP_HEADERS) as response:
                         if response.status != 200:
-                            logger.error(f"Failed to download image {url}. Status: {response.status}, Reason: {response.reason}")
+                            rprint(f"[red]Ошибка скачивания изображения {url}. Status: {response.status}, Reason: {response.reason}[/red]")
                             attempt += 1
                             continue
 
-                        total_size = int(response.headers.get('content-length', 0))
                         content_type = response.headers.get('Content-Type', '')
                         ext = mimetypes.guess_extension(content_type) or '.jpg'
 
@@ -187,28 +193,21 @@ class MediaProcessor:
                         filename = f"telegraph_{base_name}_{os.urandom(4).hex()}{ext}"
 
                         images_dir = media_path / "images"
-                        await run_in_thread_pool(ensure_dir_exists, images_dir)
+                        await async_ensure_dir_exists(images_dir)
                         file_path = images_dir / filename
 
-                        if file_path.exists():
+                        if await aiofiles.os.path.exists(file_path):
                             return file_path
 
-                        downloaded = 0
-                        last_percent = -1
                         async with aiofiles.open(file_path, 'wb') as f:
                             async for chunk in response.content.iter_chunked(1024):
                                 await f.write(chunk)
-                                downloaded += len(chunk)
-                                percent = int((downloaded / total_size) * 100) if total_size else 0
-                                if percent // 10 != last_percent:
-                                    rprint(f"Downloading {filename} {percent}% ({downloaded // 1024} kb / {total_size // 1024} kb)")
-                                    last_percent = percent // 10
 
                         return file_path
             except Exception as e:
-                logger.error(f"Failed to download or save external image {url} (attempt {attempt+1}/{max_retries}): {e}", exc_info=True)
+                rprint(f"[red]Ошибка скачивания или сохранения внешнего изображения {url} (попытка {attempt+1}/{max_retries}): {e}[/red]")
                 attempt += 1
-        logger.error(f"Giving up on downloading external image {url} after {max_retries} attempts.")
+        rprint(f"[red]Отказ от скачивания внешнего изображения {url} после {max_retries} попыток.[/red]")
         return None
 
     async def _add_media_from_message(self, message: Message, media_items: List):
@@ -241,7 +240,7 @@ class MediaProcessor:
         return "audio" if any(isinstance(attr, DocumentAttributeAudio) for attr in doc.attributes) else "document"
 
     async def _process_single_item(
-            self, message: Message, entity_id_str: str, media_type: str, entity_media_path: Path
+            self, message: Message, entity_id_str: str, media_type: str, entity_media_path: Path, progress=None, task_id=None
     ) -> Optional[Path]:
         """
         Processes a single media item: downloads and optimizes it.
@@ -251,6 +250,8 @@ class MediaProcessor:
             entity_id_str (str): Entity ID as string.
             media_type (str): Type of media ('image', 'video', etc.).
             entity_media_path (Path): Path to store media files.
+            progress: Rich Progress instance (optional).
+            task_id: Progress task id (optional).
 
         Returns:
             Optional[Path]: Path to the processed media file, or None if failed.
@@ -275,12 +276,12 @@ class MediaProcessor:
                 all_media_ok = await cache_manager.all_media_files_present(
                     entity_id_str, message.id, type_subdir
                 )
-            if all_media_ok and final_path.exists():
+            if all_media_ok and await aiofiles.os.path.exists(final_path):
                 return final_path
 
-            await run_in_thread_pool(ensure_dir_exists, type_subdir)
+            await async_ensure_dir_exists(type_subdir)
 
-            downloaded_ok = await self._download_media(message, raw_download_path, filename)
+            downloaded_ok = await self._download_media(message, raw_download_path, filename, progress=progress, task_id=task_id)
             if not downloaded_ok:
                 await self._cleanup_file_async(raw_download_path)
                 return None
@@ -290,7 +291,8 @@ class MediaProcessor:
                 if raw_download_path != final_path:
                     await self._cleanup_file_async(raw_download_path)
                 if cache_manager:
-                    media_size = final_path.stat().st_size if final_path.exists() else 0
+                    stat_result = await aiofiles.os.stat(final_path)
+                    media_size = stat_result.st_size if stat_result else 0
                     await cache_manager.add_media_file_to_message(
                         entity_id_str, message.id, final_path.name, media_size
                     )
@@ -303,7 +305,7 @@ class MediaProcessor:
             logger.error(f"Error in media processing pipeline for msg {getattr(message, 'id', 'unknown')}: {e}", exc_info=True)
             return None
 
-    async def _download_media(self, message: Message, raw_download_path: Path, filename: str) -> bool:
+    async def _download_media(self, message: Message, raw_download_path: Path, filename: str, progress=None, task_id=None) -> bool:
         """
         Downloads media from a Telegram message.
 
@@ -311,19 +313,26 @@ class MediaProcessor:
             message (Message): Telegram message object.
             raw_download_path (Path): Path to save the downloaded file.
             filename (str): Name of the file being downloaded.
+            progress: Rich Progress instance (optional).
+            task_id: Progress task id (optional).
 
         Returns:
             bool: True if download succeeded, False otherwise.
         """
         try:
             async with self.download_semaphore:
-                progress_callback = ProgressCallback(self.config, filename)
+                def callback(current, total):
+                    if progress is not None and task_id is not None:
+                        progress.update(task_id, completed=current)
                 await self.client.download_media(
                     message=message,
                     file=str(raw_download_path),
-                    progress_callback=progress_callback
+                    progress_callback=callback
                 )
-                return await run_in_thread_pool(raw_download_path.exists)
+                if progress is not None and task_id is not None:
+                    total_size = getattr(message, "file", None).size if hasattr(message, "file") and message.file else 0
+                    progress.update(task_id, completed=total_size)
+                return await aiofiles.os.path.exists(raw_download_path)
         except Exception as e:
             logger.error(f"Download failed for {filename}: {e}", exc_info=True)
             return False
@@ -342,15 +351,16 @@ class MediaProcessor:
         """
         try:
             if media_type == "image":
-                import shutil
-                await run_in_thread_pool(shutil.copy, raw_path, final_path)
+                # shutil.copy is blocking, run in an executor thread
+                await asyncio.to_thread(shutil.copy, raw_path, final_path)
             elif media_type in ["video", "round_video"]:
                 await self._optimize_video(raw_path, final_path)
             elif media_type == "audio":
                 await self._optimize_audio(raw_path, final_path)
             else:
-                await run_in_thread_pool(lambda: raw_path.rename(final_path))
-            return await run_in_thread_pool(final_path.exists)
+                # Use aiofiles for async rename
+                await aiofiles.os.rename(raw_path, final_path)
+            return await aiofiles.os.path.exists(final_path)
         except Exception as e:
             logger.error(f"Failed to process {media_type} {raw_path.name}: {e}")
             return False
@@ -363,8 +373,8 @@ class MediaProcessor:
             file_path (Path): Path to the file to delete.
         """
         try:
-            if await run_in_thread_pool(file_path.exists):
-                await run_in_thread_pool(file_path.unlink)
+            if await aiofiles.os.path.exists(file_path):
+                await aiofiles.os.remove(file_path)
         except Exception as e:
             logger.warning(f"Could not clean up file {file_path}: {e}")
 
@@ -403,43 +413,15 @@ class MediaProcessor:
             safe_ext = '.' + safe_ext
         return f"{safe_base}{safe_ext}"
 
-    async def _optimize_image(self, input_path: Path, output_path: Path):
-        """
-        (Deprecated) Image optimization is not needed. Kept for compatibility.
-
-        Args:
-            input_path (Path): Path to input image.
-            output_path (Path): Path to output image.
-        """
-        pass
-
-    def _sync_optimize_image(self, input_path: Path, output_path: Path):
-        """
-        (Deprecated) Image optimization is not needed. Kept for compatibility.
-
-        Args:
-            input_path (Path): Path to input image.
-            output_path (Path): Path to output image.
-        """
-        pass
-
     async def _optimize_video(self, input_path: Path, output_path: Path):
         """
-        Asynchronously optimizes a video file.
-
-        Args:
-            input_path (Path): Path to input video.
-            output_path (Path): Path to output video.
+        Asynchronously optimizes a video file by running the sync version in a separate thread.
         """
-        await run_in_thread_pool(self._sync_optimize_video, input_path, output_path)
+        await asyncio.to_thread(self._sync_optimize_video, input_path, output_path)
 
     def _sync_optimize_video(self, input_path: Path, output_path: Path):
         """
-        Synchronously optimizes a video file using ffmpeg.
-
-        Args:
-            input_path (Path): Path to input video.
-            output_path (Path): Path to output video.
+        Synchronously optimizes a video file using ffmpeg. This is a blocking function.
         """
         try:
             hw_acceleration = getattr(self.config, 'hw_acceleration', 'none').lower()
@@ -478,142 +460,18 @@ class MediaProcessor:
         except ffmpeg.Error as e:
             stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else "No stderr"
             logger.error(f"ffmpeg failed for video {input_path.name}: {stderr}")
-            return
         except Exception as e:
             logger.error(f"Video optimization failed for {input_path.name}: {e}")
-            return
-
-    def _configure_nvidia_encoder(self, options, use_h265, crf, bitrate):
-        """
-        Configures ffmpeg options for NVIDIA hardware acceleration.
-
-        Args:
-            options (dict): ffmpeg options dictionary.
-            use_h265 (bool): Whether to use H.265 codec.
-            crf (int): Constant Rate Factor for quality.
-            bitrate (str): Target bitrate.
-        """
-        codec = 'hevc_nvenc' if use_h265 else 'h264_nvenc'
-        options.update({'c:v': codec, 'preset': 'p6', 'rc:v': 'vbr_hq', 'cq': str(crf), 'b:v': bitrate, 'spatial-aq': '1', 'temporal-aq': '1'})
-
-    def _configure_amd_encoder(self, options, use_h265, crf, bitrate):
-        """
-        Configures ffmpeg options for AMD hardware acceleration.
-
-        Args:
-            options (dict): ffmpeg options dictionary.
-            use_h265 (bool): Whether to use H.265 codec.
-            crf (int): Constant Rate Factor for quality.
-            bitrate (str): Target bitrate.
-        """
-        codec = 'hevc_amf' if use_h265 else 'h264_amf'
-        options.update({'c:v': codec, 'quality': 'quality', 'qp_i': str(crf), 'qp_p': str(crf + 2), 'b:v': bitrate.replace('k', '000')})
-
-    def _configure_intel_encoder(self, options, use_h265, bitrate):
-        """
-        Configures ffmpeg options for Intel hardware acceleration.
-
-        Args:
-            options (dict): ffmpeg options dictionary.
-            use_h265 (bool): Whether to use H.265 codec.
-            bitrate (str): Target bitrate.
-        """
-        codec = 'hevc_qsv' if use_h265 else 'h264_qsv'
-        options.update({'c:v': codec, 'preset': 'slower', 'b:v': bitrate, 'look_ahead': '1'})
-
-    def _configure_software_encoder(self, options, use_h265, crf, bitrate):
-        """
-        Configures ffmpeg options for software encoding.
-
-        Args:
-            options (dict): ffmpeg options dictionary.
-            use_h265 (bool): Whether to use H.265 codec.
-            crf (int): Constant Rate Factor for quality.
-            bitrate (str): Target bitrate.
-        """
-        if use_h265:
-            options.update({'c:v': 'libx265', 'crf': str(crf), 'preset': self.config.video_preset, 'x265-params': "profile=main:level=5.1:no-sao=1:bframes=8:rd=4:psy-rd=1.0:rect=1:aq-mode=3:aq-strength=0.8:deblock=-1:-1", 'maxrate': bitrate, 'bufsize': f"{int(bitrate.replace('k', '')) * 2}k"})
-        else:
-            options.update({'c:v': 'libx264', 'crf': str(crf), 'preset': self.config.video_preset, 'profile:v': 'high', 'level': '4.1', 'tune': 'film', 'subq': '9', 'trellis': '2', 'partitions': 'all', 'direct-pred': 'auto', 'me_method': 'umh', 'g': '250', 'maxrate': bitrate, 'bufsize': f"{int(bitrate.replace('k', '')) * 2}k"})
-
-    def _configure_audio_options(self, options, audio_stream, duration, is_voice_hint):
-        """
-        Configures ffmpeg options for audio streams.
-
-        Args:
-            options (dict): ffmpeg options dictionary.
-            audio_stream (dict): ffmpeg audio stream info.
-            duration (float): Duration of the video.
-            is_voice_hint (bool): Whether the file is likely a voice message.
-        """
-        audio_bitrate = self._calculate_audio_bitrate(audio_stream.get('bit_rate'), audio_stream.get('channels', 2))
-        options.update({'c:a': 'aac', 'b:a': audio_bitrate, 'ar': '44100', 'ac': '2'})
-        if is_voice_hint or duration > 0:
-            options['b:a'] = '64k'
-            options['ac'] = '1'
-
-    def _calculate_optimal_bitrate(self, width: int, height: int) -> str:
-        """
-        Calculates optimal video bitrate based on resolution.
-
-        Args:
-            width (int): Video width.
-            height (int): Video height.
-
-        Returns:
-            str: Optimal bitrate string (e.g., '800k').
-        """
-        pixels = width * height
-        if pixels <= 0:
-            return "500k"
-        if pixels >= 2073600:
-            return "1500k"
-        if pixels >= 921600:
-            return "800k"
-        if pixels >= 409920:
-            return "500k"
-        return "400k"
-
-    def _calculate_audio_bitrate(self, current_bitrate, channels: int) -> str:
-        """
-        Calculates optimal audio bitrate.
-
-        Args:
-            current_bitrate (Any): Current bitrate value.
-            channels (int): Number of audio channels.
-
-        Returns:
-            str: Optimal audio bitrate string (e.g., '96k').
-        """
-        if not current_bitrate:
-            return "96k" if channels > 1 else "64k"
-        try:
-            bitrate = int(current_bitrate)
-            if bitrate > 320000:
-                return "128k"
-            if bitrate > 128000:
-                return "96k"
-            return "64k"
-        except (ValueError, TypeError):
-            return "96k"
 
     async def _optimize_audio(self, input_path: Path, output_path: Path):
         """
-        Asynchronously optimizes an audio file.
-
-        Args:
-            input_path (Path): Path to input audio.
-            output_path (Path): Path to output audio.
+        Asynchronously optimizes an audio file by running the sync version in a separate thread.
         """
-        await run_in_thread_pool(self._sync_optimize_audio, input_path, output_path)
+        await asyncio.to_thread(self._sync_optimize_audio, input_path, output_path)
 
     def _sync_optimize_audio(self, input_path: Path, output_path: Path):
         """
-        Synchronously optimizes an audio file using ffmpeg.
-
-        Args:
-            input_path (Path): Path to input audio.
-            output_path (Path): Path to output audio.
+        Synchronously optimizes an audio file using ffmpeg. This is a blocking function.
         """
         try:
             probe = ffmpeg.probe(str(input_path))
@@ -671,15 +529,132 @@ class MediaProcessor:
             stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else "No stderr"
             logger.error(f"ffmpeg failed for audio {input_path.name}: {stderr}")
             try:
-                ffmpeg.input(str(input_path)).audio.output(str(output_path), c='copy').global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True, quiet=True)
-            except Exception as copy_err:
-                logger.error(f"Fallback copy also failed: {copy_err}")
-                import shutil
+                # Fallback to simple copy if optimization fails
                 shutil.copy2(input_path, output_path)
-                print(f"❌ Failed to convert audio {input_path.name} (see exporter.log for details)")
-                print("   Try updating ffmpeg or check codec support.")
-                return
+            except Exception as copy_err:
+                logger.error(f"Audio optimization and fallback copy failed for {input_path.name}: {copy_err}")
         except Exception as e:
             logger.error(f"Audio optimization failed for {input_path.name}: {e}")
-            print(f"❌ Failed to process audio {input_path.name} (see exporter.log for details)")
-            return
+
+    def _configure_nvidia_encoder(self, options, use_h265, crf, bitrate):
+        codec = 'hevc_nvenc' if use_h265 else 'h264_nvenc'
+        options.update({'c:v': codec, 'preset': 'p6', 'rc:v': 'vbr_hq', 'cq': str(crf), 'b:v': bitrate, 'spatial-aq': '1', 'temporal-aq': '1'})
+
+    def _configure_amd_encoder(self, options, use_h265, crf, bitrate):
+        codec = 'hevc_amf' if use_h265 else 'h264_amf'
+        options.update({'c:v': codec, 'quality': 'quality', 'qp_i': str(crf), 'qp_p': str(crf + 2), 'b:v': bitrate.replace('k', '000')})
+
+    def _configure_intel_encoder(self, options, use_h265, bitrate):
+        codec = 'hevc_qsv' if use_h265 else 'h264_qsv'
+        options.update({'c:v': codec, 'preset': 'slower', 'b:v': bitrate, 'look_ahead': '1'})
+
+    def _configure_software_encoder(self, options, use_h265, crf, bitrate):
+        if use_h265:
+            options.update({'c:v': 'libx265', 'crf': str(crf), 'preset': self.config.video_preset, 'x265-params': "profile=main:level=5.1:no-sao=1:bframes=8:rd=4:psy-rd=1.0:rect=1:aq-mode=3:aq-strength=0.8:deblock=-1:-1", 'maxrate': bitrate, 'bufsize': f"{int(bitrate.replace('k', '')) * 2}k"})
+        else:
+            options.update({'c:v': 'libx264', 'crf': str(crf), 'preset': self.config.video_preset, 'profile:v': 'high', 'level': '4.1', 'tune': 'film', 'subq': '9', 'trellis': '2', 'partitions': 'all', 'direct-pred': 'auto', 'me_method': 'umh', 'g': '250', 'maxrate': bitrate, 'bufsize': f"{int(bitrate.replace('k', '')) * 2}k"})
+
+    def _configure_audio_options(self, options, audio_stream, duration, is_voice_hint):
+        audio_bitrate = self._calculate_audio_bitrate(audio_stream.get('bit_rate'), audio_stream.get('channels', 2))
+        options.update({'c:a': 'aac', 'b:a': audio_bitrate, 'ar': '44100', 'ac': '2'})
+        if is_voice_hint or duration > 0:
+            options['b:a'] = '64k'
+            options['ac'] = '1'
+
+    def _calculate_optimal_bitrate(self, width: int, height: int) -> str:
+        pixels = width * height
+        if pixels <= 0:
+            return "500k"
+        if pixels >= 2073600:
+            return "1500k"
+        if pixels >= 921600:
+            return "800k"
+        if pixels >= 409920:
+            return "500k"
+        return "400k"
+
+    def _calculate_audio_bitrate(self, current_bitrate, channels: int) -> str:
+        if not current_bitrate:
+            return "96k" if channels > 1 else "64k"
+        try:
+            bitrate = int(current_bitrate)
+            if bitrate > 320000:
+                return "128k"
+            if bitrate > 128000:
+                return "96k"
+            return "64k"
+        except (ValueError, TypeError):
+            return "96k"
+
+    async def _optimize_audio(self, input_path: Path, output_path: Path):
+        """
+        Asynchronously optimizes an audio file by running the sync version in a separate thread.
+        """
+        await asyncio.to_thread(self._sync_optimize_audio, input_path, output_path)
+
+    def _sync_optimize_audio(self, input_path: Path, output_path: Path):
+        """
+        Synchronously optimizes an audio file using ffmpeg. This is a blocking function.
+        """
+        try:
+            probe = ffmpeg.probe(str(input_path))
+            audio_stream = next((s for s in probe['streams'] if s['codec_type'] == 'audio'), None)
+            if not audio_stream:
+                logger.warning(f"No audio stream in {input_path.name}, copying directly.")
+                ffmpeg.input(str(input_path)).output(str(output_path), c='copy').global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True)
+                return
+
+            channels = int(audio_stream.get('channels', 2))
+            sample_rate = int(audio_stream.get('sample_rate', 48000))
+            codec_name = audio_stream.get('codec_name', '').lower()
+            optimal_bitrate = self._calculate_audio_bitrate(audio_stream.get('bit_rate'), channels)
+            output_format = output_path.suffix.lower().lstrip('.') or 'mp3'
+
+            stream = ffmpeg.input(str(input_path)).audio
+            ffmpeg_options = {'b:a': optimal_bitrate}
+
+            if output_format in ['ogg', 'oga'] and codec_name == 'opus':
+                ffmpeg_options['ar'] = str(sample_rate) if sample_rate in [8000, 12000, 16000, 24000, 48000] else '48000'
+            else:
+                ffmpeg_options['ar'] = str(sample_rate) if sample_rate else '44100'
+
+            if output_format == 'mp3':
+                ffmpeg_options.update({'c:a': 'libmp3lame', 'q:a': '4', 'compression_level': '9'})
+            elif output_format in ['ogg', 'oga']:
+                if codec_name == 'opus':
+                    ffmpeg_options.update({'c:a': 'libopus', 'b:a': '32k' if channels == 1 else '64k', 'vbr': 'on', 'compression_level': '10'})
+                else:
+                    ffmpeg_options.update({'c:a': 'libvorbis', 'q:a': '3'})
+            elif output_format in ['m4a', 'aac']:
+                ffmpeg_options.update({'c:a': 'aac', 'q:a': '1'})
+
+            if 'voice' in input_path.name.lower() or codec_name in ['opus', 'speex']:
+                if output_format == 'ogg':
+                    ffmpeg_options.update({'c:a': 'libopus', 'b:a': '32k', 'vbr': 'on', 'compression_level': '10', 'application': 'voip'})
+                else:
+                    ffmpeg_options.update({'b:a': '48k', 'ac': '1'})
+
+            try:
+                ffmpeg.output(stream, str(output_path), **ffmpeg_options).global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True, quiet=True)
+            except ffmpeg.Error as e:
+                if 'incorrect codec parameters' in e.stderr.decode('utf-8', errors='ignore'):
+                    logger.warning(f"Codec parameter issue, trying simpler encoding for {input_path.name}")
+                    ffmpeg.input(str(input_path)).audio.output(
+                        str(output_path),
+                        c='aac' if output_format in ['m4a', 'aac'] else 'libmp3lame'
+                    ).global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True, quiet=True)
+                else:
+                    raise
+
+            if output_path.exists() and input_path.exists() and output_path.stat().st_size >= input_path.stat().st_size:
+                ffmpeg.input(str(input_path)).audio.output(str(output_path), c='copy').global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True, quiet=True)
+        except ffmpeg.Error as e:
+            stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else "No stderr"
+            logger.error(f"ffmpeg failed for audio {input_path.name}: {stderr}")
+            try:
+                # Fallback to simple copy if optimization fails
+                shutil.copy2(input_path, output_path)
+            except Exception as copy_err:
+                logger.error(f"Audio optimization and fallback copy failed for {input_path.name}: {copy_err}")
+        except Exception as e:
+            logger.error(f"Audio optimization failed for {input_path.name}: {e}")
