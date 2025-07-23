@@ -161,8 +161,6 @@ def ensure_dir_exists(path: Path):
         logger.error(f"Failed to create directory {path}: {e}", exc_info=True)
         raise
 
-# REMOVED: run_in_thread_pool, threading is no longer used in the project.
-
 def find_telegram_post_links(text: str) -> List[str]:
     """
     Finds all Telegram post links in the given text.
@@ -192,6 +190,14 @@ def find_telegraph_links(text: str) -> List[str]:
         return []
     pattern = r"https?://telegra\.ph/[\w\-]+(?:/[\w\-]+)*"
     return [match.group(0) for match in re.finditer(pattern, text)]
+
+async def log_export_completion(start_time: float):
+    """Logs the export completion message with elapsed time."""
+    end_time = asyncio.get_event_loop().time()
+    elapsed_time = end_time - start_time
+    rprint(f"\n[bold green]Export completed successfully in {elapsed_time:.2f} seconds.[/bold green]")
+    rprint("[cyan]Returning to the main menu in 4 seconds...[/cyan]")
+    await asyncio.sleep(4)
 
 async def fetch_and_parse_telegraph_to_markdown(
     session: aiohttp.ClientSession,
@@ -349,3 +355,12 @@ async def fetch_and_parse_telegraph_to_markdown(
     except Exception as e:
         logger.error(f"Error parsing Telegra.ph article {url}: {e}", exc_info=True)
         return None
+
+
+def get_bool_input(prompt: str, default: bool = False) -> bool:
+    """
+    Prompts the user for a boolean (yes/no) input.
+    """
+    default_str = "y" if default else "n"
+    response = input(f"{prompt} [Y/n] ").lower() or default_str
+    return response.startswith('y')

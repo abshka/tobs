@@ -1,17 +1,16 @@
 import asyncio
-import math
 import re
 import signal
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import aiofiles
 import aiohttp
 from aiohttp_proxy import ProxyConnector
 from rich import print as rprint
-from rich.progress import BarColumn, Live, Progress, TextColumn
+from rich.progress import BarColumn, Live, Progress, TaskID, TextColumn
 from telethon.tl.types import Message
 
 from src.cache_manager import CacheManager
@@ -61,8 +60,8 @@ async def process_message_group(
     http_session,
     export_target=None,
     telegram_manager_pass=None,
-    progress=None,
-    post_task_id=None
+    progress_queue: Optional[asyncio.Queue] = None,
+    post_task_id: Optional[any] = None
 ) -> Optional[int]:
     """
     Process a group of Telegram messages, download and optimize media in parallel, create notes,
@@ -81,8 +80,8 @@ async def process_message_group(
         media_processor: MediaProcessor instance for handling media downloads.
         note_generator: NoteGenerator instance for creating notes.
         http_session: aiohttp ClientSession for HTTP requests.
-        progress: Progress instance for progress bars.
-        post_task_id: Progress task ID for this post.
+        progress_queue: An asyncio.Queue for progress bar updates.
+        post_task_id: Custom Progress task ID for this post.
 
     Returns:
         The ID of the first processed message, or None if processing failed.
@@ -95,31 +94,34 @@ async def process_message_group(
     try:
         entity_id = int(entity_id_str)
         media_paths = []
-        semaphore = asyncio.Semaphore(getattr(config, "workers", 8))
-        all_media_messages = list(messages)
+        semaphore = asyncio.Semaphore(getattr(config, "download_workers", int(getattr(config, "workers", 8) * 1.5)))
         comments = []
-        telegram_client = telegram_manager.get_client() if hasattr(telegram_manager, "get_client") else None
-        if telegram_client is not None:
-            channel_id = getattr(first_message, "chat_id", None)
-            if channel_id is None and getattr(first_message, "to_id", None):
-                channel_id = getattr(first_message.to_id, "channel_id", None)
-            if channel_id is not None:
-                try:
-                    async for comment in telegram_client.iter_messages(channel_id, reply_to=first_message.id, reverse=True):
-                        all_media_messages.append(comment)
-                        comments.append(comment)
-                except Exception as e:
-                    if "The message ID used in the peer was invalid" in str(e):
-                        pass
-                    else:
-                        rprint(f"[yellow]Комментариев для поста {first_message.id} получить не удалось: {e}[/yellow]")
+
+        if getattr(config, "export_comments", False):
+            telegram_client = telegram_manager.get_client() if hasattr(telegram_manager, "get_client") else None
+            if telegram_client is not None:
+                channel_id = getattr(first_message, "chat_id", None)
+                if channel_id is None and getattr(first_message, "to_id", None):
+                    channel_id = getattr(first_message.to_id, "channel_id", None)
+                if channel_id is not None:
+                    try:
+                        async for comment in telegram_client.iter_messages(channel_id, reply_to=first_message.id, reverse=True):
+                            comments.append(comment)
+                    except Exception as e:
+                        if "The message ID used in the peer was invalid" in str(e):
+                            pass
+                        else:
+                            rprint(f"[yellow]Комментариев для поста {first_message.id} получить не удалось: {e}[/yellow]")
+
         media_messages = []
         for msg in messages:
             if hasattr(msg, "media") and msg.media:
                 media_messages.append(msg)
-        for comment in comments:
-            if hasattr(comment, "media") and comment.media:
-                media_messages.append(comment)
+
+        if getattr(config, "export_comments", False):
+            for comment in comments:
+                if hasattr(comment, "media") and comment.media:
+                    media_messages.append(comment)
 
         unique_media_messages = list({msg.id: msg for msg in media_messages}.values())
 
@@ -135,22 +137,28 @@ async def process_message_group(
                         size = max(photo_sizes)
             total_media_size += size if size else 0
 
-        task_total = total_media_size + 1
+        text_comment_count = 0
+        if getattr(config, "export_comments", False):
+            text_comment_count = sum(1 for c in comments if not (hasattr(c, "media") and c.media))
 
-        task_id = post_task_id
-        if progress is not None and task_id is not None:
-            progress.update(
-                task_id,
-                total=task_total,
-                description=f"Пост {first_message.id}"
-            )
+        task_total = total_media_size + text_comment_count + 1
+
+        if progress_queue is not None and post_task_id is not None:
+            await progress_queue.put({
+                "type": "update",
+                "task_id": post_task_id,
+                "data": {
+                    "total": task_total,
+                    "description": f"Пост {first_message.id}"
+                }
+            })
 
         async def download_media_task(msg):
             async with semaphore:
                 for attempt in range(3):
                     try:
                         result = await media_processor.download_and_optimize_media(
-                            msg, entity_id, entity_media_path, progress=progress, task_id=task_id
+                            msg, entity_id, entity_media_path, task_id=post_task_id, progress_queue=progress_queue
                         )
                         return result
                     except Exception as e:
@@ -167,8 +175,11 @@ async def process_message_group(
                         photo_sizes = [s.size for s in msg.media.photo.sizes if hasattr(s, 'size') and s.size]
                         if photo_sizes:
                             size_on_fail = max(photo_sizes)
-                if progress is not None and task_id is not None and size_on_fail > 0:
-                    progress.update(task_id, advance=size_on_fail)
+
+                if progress_queue is not None and post_task_id is not None and size_on_fail > 0:
+                    await progress_queue.put({
+                        "type": "update", "task_id": post_task_id, "data": {"advance": size_on_fail}
+                    })
 
                 return None
 
@@ -185,23 +196,28 @@ async def process_message_group(
             elif result:
                 media_paths.append(result)
 
-        note_generator.progress = progress
+        if progress_queue is not None and post_task_id is not None and text_comment_count > 0:
+            await progress_queue.put({
+                "type": "update", "task_id": post_task_id, "data": {"advance": text_comment_count}
+            })
+
+        note_generator.progress_queue = progress_queue
 
         try:
             note_path = await note_generator.create_note(
                 first_message, media_paths, entity_id, entity_export_path,
                 client=telegram_manager.get_client() if hasattr(telegram_manager, "get_client") else None,
-                export_comments=True,
+                export_comments=getattr(config, "export_comments", False),
                 entity_media_path=entity_media_path
             )
         except Exception as e:
             logger.error(f"[{entity_id_str}] Failed to create main note for message {first_message.id}:{e}")
-            if progress is not None and task_id is not None:
-                progress.update(task_id, advance=1, description=f"Пост {first_message.id}: Ошибка")
+            if progress_queue is not None and post_task_id is not None:
+                await progress_queue.put({"type": "update", "task_id": post_task_id, "data": {"description": f"Пост {first_message.id}: Ошибка"}})
             return None
         if not note_path:
-            if progress is not None and task_id is not None:
-                progress.update(task_id, advance=1, description=f"Пост {first_message.id}: Ошибка")
+            if progress_queue is not None and post_task_id is not None:
+                await progress_queue.put({"type": "update", "task_id": post_task_id, "data": {"description": f"Пост {first_message.id}: Ошибка"}})
             return None
 
         telegraph_links = find_telegraph_links(first_message.text)
@@ -227,15 +243,6 @@ async def process_message_group(
                     modified_content = modified_content.replace(link, local_link)
 
             def telegraph_replacer(match):
-                """
-                Replace a telegra.ph URL in the note content with a local note link if available.
-
-                Args:
-                    match: Regex match object for a telegra.ph URL.
-
-                Returns:
-                    The local note link if found, otherwise the original URL.
-                """
                 url = match.group(0)
                 note_stem = telegraph_mapping.get(url)
                 return f"[[{note_stem}]]" if note_stem else url
@@ -263,8 +270,8 @@ async def process_message_group(
                     telegram_url=telegram_url
                 )
 
-        if progress is not None and task_id is not None:
-            progress.update(task_id, advance=1, description=f"Пост {first_message.id}: Готово")
+        if progress_queue is not None and post_task_id is not None:
+            await progress_queue.put({"type": "update", "task_id": post_task_id, "data": {"advance": 1, "description": f"Пост {first_message.id}: Готово"}})
 
         return first_message.id
 
@@ -275,7 +282,7 @@ async def process_message_group(
 async def export_single_target(
     target: ExportTarget, config: Config, telegram_manager: TelegramManager,
     cache_manager: CacheManager, media_processor: MediaProcessor, note_generator: NoteGenerator,
-    http_session: aiohttp.ClientSession, progress=None, post_task_id=None
+    http_session: aiohttp.ClientSession, progress_queue=None, post_task_id=None
 ):
     """
     Export all messages and media for a single export target (Telegram entity).
@@ -288,7 +295,7 @@ async def export_single_target(
         media_processor: MediaProcessor instance for handling media downloads.
         note_generator: NoteGenerator instance for creating notes.
         http_session: aiohttp ClientSession for HTTP requests.
-        progress: Rich Progress instance for unified progress bar.
+        progress_queue: Rich Progress queue for unified progress bar.
 
     Returns:
         None
@@ -319,7 +326,7 @@ async def export_single_target(
             rprint(f"[bold cyan][{target.name}] Incremental mode. Starting after message ID: {last_processed_id}[/bold cyan]")
 
         grouped_messages = {}
-        semaphore = asyncio.Semaphore(getattr(config, "workers", 8))
+        semaphore = asyncio.Semaphore(getattr(config, "download_workers", int(getattr(config, "workers", 8) * 1.5)))
         active_tasks = set()
         successful_count = 0
         processed_count = 0
@@ -347,7 +354,7 @@ async def export_single_target(
                         messages, entity_id_str, entity_export_path, entity_media_path,
                         media_processor, note_generator, cache_manager, config,
                         http_session, telegram_manager,
-                        progress=progress,
+                        progress_queue=progress_queue,
                         post_task_id=post_task_id
                     )
                 )
@@ -371,7 +378,7 @@ async def export_single_target(
                         messages_to_process, entity_id_str, entity_export_path, entity_media_path,
                         media_processor, note_generator, cache_manager, config,
                         http_session, telegram_manager,
-                        progress=progress,
+                        progress_queue=progress_queue,
                         post_task_id=post_task_id
                     )
                     return
@@ -422,6 +429,82 @@ async def export_single_target(
             if cache_manager is not None:
                 await cache_manager.save_cache()
 
+
+async def progress_manager(progress_bar: Progress, queue: asyncio.Queue, task_map: Dict[any, TaskID]):
+    """Manages updates to a rich.Progress object from a queue, batching updates to avoid lock contention."""
+    advances = {}  # {rich_task_id: total_advance}
+    update_interval = 0.1  # 100ms, i.e., 10fps
+
+    while True:
+        pending_commands = []
+        try:
+            # Wait for the first item, with a timeout.
+            cmd = await asyncio.wait_for(queue.get(), timeout=update_interval)
+            pending_commands.append(cmd)
+
+            # Drain any other items that are already in the queue.
+            while not queue.empty():
+                pending_commands.append(queue.get_nowait())
+
+        except (asyncio.TimeoutError, asyncio.QueueEmpty):
+            # This is our chance to apply updates.
+            pass
+        except Exception as e:
+            logger.error(f"Progress manager error: {e}", exc_info=True)
+
+        for cmd in pending_commands:
+            if cmd is None:
+                # Apply any final updates and exit.
+                if advances:
+                    for task, total_advance in advances.items():
+                        if total_advance > 0:
+                            progress_bar.update(task, advance=total_advance)
+                    advances.clear()
+                queue.task_done()
+                return
+
+            try:
+                cmd_type = cmd.get("type")
+                task_id = cmd.get("task_id")
+                rich_task_id = cmd.get("rich_task_id")
+                data = cmd.get("data", {})
+
+                if cmd_type == "add":
+                    new_rich_task_id = progress_bar.add_task(data.get("description", ""), **data.get("options", {}))
+                    task_map[task_id] = new_rich_task_id
+                    progress_bar.start_task(new_rich_task_id)
+
+                elif cmd_type == "update":
+                    target_rich_task_id = task_map.get(task_id) if task_id else rich_task_id
+                    if target_rich_task_id is not None:
+                        advance = data.get("advance")
+                        if advance:
+                            advances[target_rich_task_id] = advances.get(target_rich_task_id, 0) + advance
+                        else:
+                            # Apply non-advance updates immediately.
+                            progress_bar.update(target_rich_task_id, **data)
+
+                elif cmd_type == "remove":
+                    if task_id in task_map:
+                        target_rich_task_id = task_map.pop(task_id)
+                        progress_bar.remove_task(target_rich_task_id)
+            except Exception as e:
+                logger.error(f"Error processing progress command: {cmd}, error: {e}", exc_info=True)
+            finally:
+                queue.task_done()
+
+        # Apply all batched updates for this interval.
+        if advances:
+            for task, total_advance in advances.items():
+                if total_advance > 0:
+                    try:
+                        progress_bar.update(task, advance=total_advance)
+                    except Exception:
+                        # Task might have been removed in the same batch.
+                        pass
+            advances.clear()
+
+
 async def run_export(config: Config):
     """
     Main export routine. Sets up executors, managers, and sessions, and coordinates the
@@ -436,7 +519,6 @@ async def run_export(config: Config):
     global process_executor
     telegram_manager = None
     try:
-        # ProcessPoolExecutor: только для CPU-bound задач (например, обработка изображений/видео)
         telegram_manager = TelegramManager(config)
         await telegram_manager.connect()
 
@@ -461,12 +543,8 @@ async def run_export(config: Config):
                     connector = ProxyConnector.from_url(proxy_url)
 
                 async with aiohttp.ClientSession(headers=AIOHTTP_HEADERS, connector=connector) as http_session:
-                    export_summaries = []
+                    # export_summaries = []
 
-                    post_task_ids = {}
-                    post_filenames = {}
-
-                    # Получаем entity (канал) и список сообщений (постов)
                     target = config.export_targets[0]
                     entity_id_str = str(target.id)
                     local_cache_manager = None
@@ -483,10 +561,6 @@ async def run_export(config: Config):
                         rprint(f"[bold red]Could not resolve entity for target ID: {target.id}. Skipping.[/bold red]")
                         continue
 
-                    # Потоковая асинхронная обработка сообщений (без предварительной загрузки всех сообщений)
-                    concurrency = getattr(config, "workers", 8)
-                    batch_size = concurrency * 2
-                    # Получаем количество постов для общего прогресса
                     try:
                         total_count = await telegram_manager.client.get_messages(entity, limit=0)
                         total_posts = total_count.total
@@ -495,166 +569,129 @@ async def run_export(config: Config):
                     rprint("[cyan]***Export started***[/cyan]")
                     rprint("[magenta]***Downloading posts/media***[/magenta]")
 
-                    # --- Ветвление для экспорта одного поста ---
+                    # --- Single Post Export Branch ---
                     if getattr(target, "type", None) == "single_post" or getattr(target, "message_id", None) is not None:
-                        # Получаем сам пост
                         post_id = getattr(target, "message_id", None)
                         if post_id is not None:
                             single_post_message = await telegram_manager.client.get_messages(entity, ids=post_id)
                             if not single_post_message:
                                 rprint(f"[red]Не удалось найти пост с ID {post_id}[/red]")
                                 continue
-                            # Собираем все сообщения альбома (grouped media)
                             album_messages = await telegram_manager.collect_album_messages(entity, single_post_message)
-                            # Для каждого медиа — отдельный прогресс-бар и отдельная задача
+
                             with Progress(
                                 TextColumn("{task.fields[filename]}", justify="right"),
                                 BarColumn(bar_width=None),
                                 "[progress.percentage]{task.percentage:>3.1f}%"
                             ) as progress_bar:
-                                # Добавляем общий прогресс-бар для альбома/поста
+                                progress_queue = asyncio.Queue()
+                                task_map = {}
+                                manager = asyncio.create_task(progress_manager(progress_bar, progress_queue, task_map))
+
                                 overall_task_id = progress_bar.add_task(
-                                    "Общий прогресс",
-                                    filename="Общий прогресс",
-                                    total=len(album_messages),
-                                    start=True
+                                    "Общий прогресс", filename="Общий прогресс", total=len(album_messages), start=True
                                 )
-                                tasks = []
-                                # Для каждого медиа — отдельный прогресс-бар и отдельная задача
-                                async def process_and_update(msg, idx, task_id):
+
+                                async def process_single_post_media(msg, idx):
+                                    task_id = msg.id
+                                    description = f"Медиа #{idx+1}"
+                                    await progress_queue.put({
+                                        "type": "add", "task_id": task_id,
+                                        "data": {"description": description, "options": {"total": 1, "filename": description}}
+                                    })
                                     await process_message_group(
-                                        messages=[msg],
-                                        entity_id_str=entity_id_str,
-                                        target_name=f"Медиа #{msg.id}",
+                                        messages=[msg], entity_id_str=entity_id_str, target_name=f"Медиа #{msg.id}",
                                         entity_export_path=config.get_export_path_for_entity(entity_id_str),
                                         entity_media_path=config.get_media_path_for_entity(entity_id_str),
-                                        last_processed_id=None,
-                                        config=config,
-                                        telegram_manager=telegram_manager,
-                                        cache_manager=local_cache_manager,
-                                        media_processor=media_processor,
-                                        note_generator=note_generator,
-                                        http_session=http_session,
-                                        export_target=target,
-                                        telegram_manager_pass=telegram_manager,
-                                        progress=progress_bar,
-                                        post_task_id=task_id
+                                        last_processed_id=None, config=config, telegram_manager=telegram_manager,
+                                        cache_manager=local_cache_manager, media_processor=media_processor,
+                                        note_generator=note_generator, http_session=http_session, export_target=target,
+                                        telegram_manager_pass=telegram_manager, progress_queue=progress_queue, post_task_id=task_id
                                     )
-                                    # После завершения медиа — обновить общий прогресс-бар
                                     progress_bar.update(overall_task_id, advance=1)
+                                    await progress_queue.put({"type": "remove", "task_id": task_id})
 
-                                for idx, msg in enumerate(album_messages):
-                                    task_id = progress_bar.add_task(
-                                        "download",
-                                        filename=f"Медиа #{idx+1}",
-                                        total=1,
-                                        start=False
-                                    )
-                                    progress_bar.start_task(task_id)
-                                    tasks.append(process_and_update(msg, idx, task_id))
+                                tasks = [process_single_post_media(msg, idx) for idx, msg in enumerate(album_messages)]
                                 await asyncio.gather(*tasks)
-                                # Явно завершить общий прогресс-бар на 100%
+
+                                await progress_queue.put(None)
+                                await progress_queue.join()
+                                await manager
                                 progress_bar.update(overall_task_id, completed=len(album_messages))
                         continue
 
-                    post_task_ids = {}
-                    post_filenames = {}
+                    # --- Full Channel Export Orchestrator ---
+                    async def orchestrator():
+                        message_queue = asyncio.Queue(maxsize=config.workers * 2)
+                        progress_queue = asyncio.Queue()
+                        task_map = {}
 
-                    concurrency = getattr(config, "batch_size", None) or getattr(config, "workers", 8)
-                    batch_size = concurrency * 2
-                    prefetch_threshold = math.ceil(batch_size * 0.75)
-
-                    queue = asyncio.Queue(maxsize=batch_size * 2)
-
-                    async def fetch_batches():
-                        idx = 0
-                        try:
-                            async for msg in telegram_manager.fetch_messages(entity, limit=None):
-                                await queue.put((msg, idx))
-                                idx += 1
-                        except Exception:
-                            pass
-
-                    async def worker(progress_bar, active_task_ids, overall_task_id=None):
-                        while True:
+                        async def fetch_batches():
                             try:
-                                msg, idx = await queue.get()
-                                task_id = progress_bar.add_task(
-                                    "download",
-                                    filename=f"Пост #{idx+1}",
-                                    total=None,
-                                    start=False
-                                )
-                                post_task_ids[str(getattr(msg, "id", idx))] = task_id
-                                post_filenames[str(getattr(msg, "id", idx))] = f"Пост #{idx+1}"
-                                progress_bar.start_task(task_id)
-                                active_task_ids.add(task_id)
+                                async for idx, msg in aenumerate(telegram_manager.fetch_messages(entity, limit=None)):
+                                    await message_queue.put((msg, idx))
+                            except Exception as e:
+                                logger.error(f"Fetch error: {e}")
+                            finally:
+                                # Signal workers to stop by putting None for each worker
+                                for _ in range(config.workers):
+                                    await message_queue.put(None)
+
+                        async def worker(overall_task_id=None):
+                            while True:
+                                item = await message_queue.get()
+                                if item is None:
+                                    message_queue.task_done()
+                                    break
+                                msg, idx = item
+                                task_id = msg.id
+
                                 try:
+                                    description = f"Пост #{idx+1}"
+                                    await progress_queue.put({
+                                        "type": "add", "task_id": task_id,
+                                        "data": {"description": description, "options": {"total": None, "filename": description}}
+                                    })
                                     await process_message_group(
-                                        messages=[msg],
-                                        entity_id_str=entity_id_str,
-                                        target_name=f"Пост #{idx+1}",
+                                        messages=[msg], entity_id_str=entity_id_str, target_name=description,
                                         entity_export_path=config.get_export_path_for_entity(entity_id_str),
                                         entity_media_path=config.get_media_path_for_entity(entity_id_str),
-                                        last_processed_id=None,
-                                        config=config,
-                                        telegram_manager=telegram_manager,
-                                        cache_manager=local_cache_manager,
-                                        media_processor=media_processor,
-                                        note_generator=note_generator,
-                                        http_session=http_session,
-                                        export_target=target,
-                                        telegram_manager_pass=telegram_manager,
-                                        progress=progress_bar,
-                                        post_task_id=task_id
+                                        last_processed_id=None, config=config, telegram_manager=telegram_manager,
+                                        cache_manager=local_cache_manager, media_processor=media_processor,
+                                        note_generator=note_generator, http_session=http_session,
+                                        progress_queue=progress_queue, post_task_id=task_id
                                     )
-                                    # Обновляем общий прогресс-бар
                                     if overall_task_id is not None:
-                                        progress_bar.update(overall_task_id, advance=1)
-                                except Exception:
-                                    pass
+                                        await progress_queue.put({"type": "update", "rich_task_id": overall_task_id, "data": {"advance": 1}})
+                                except Exception as e:
+                                    logger.error(f"Worker failed for msg {msg.id}: {e}", exc_info=True)
                                 finally:
-                                    active_task_ids.discard(task_id)
-                                    progress_bar.remove_task(task_id)
-                                    post_task_ids.pop(str(getattr(msg, 'id', idx)), None)
-                                    queue.task_done()
-                            except Exception:
-                                pass
+                                    await progress_queue.put({"type": "remove", "task_id": task_id})
+                                    message_queue.task_done()
 
-                    async def orchestrator():
-                        # Сообщения выводятся только один раз выше
                         progress_bar = Progress(
                             TextColumn("{task.fields[filename]}", justify="right"),
                             BarColumn(bar_width=None),
                             "[progress.percentage]{task.percentage:>3.1f}%"
                         )
-                        active_task_ids = set()
-                        # Добавляем общий прогресс-бар
-                        if total_posts:
-                            overall_task_id = progress_bar.add_task("Общий прогресс", total=total_posts, filename="Общий прогресс")
-                        else:
+                        with Live(progress_bar, refresh_per_second=10):
+                            manager = asyncio.create_task(progress_manager(progress_bar, progress_queue, task_map))
+
                             overall_task_id = None
-                        with Live(progress_bar, refresh_per_second=20):
-                            workers = [asyncio.create_task(worker(progress_bar, active_task_ids, overall_task_id)) for _ in range(config.workers)]
-                            fetch_task = asyncio.create_task(fetch_batches())
-                            while not queue.empty() or not fetch_task.done():
-                                # Показываем только активные прогресс-бары
-                                for task in list(progress_bar.tasks):
-                                    # Не удаляем общий прогресс-бар
-                                    if overall_task_id is not None and task.id == overall_task_id:
-                                        continue
-                                    if task.id not in active_task_ids:
-                                        progress_bar.remove_task(task.id)
-                                if queue.qsize() < prefetch_threshold and not fetch_task.done():
-                                    pass
-                                await asyncio.sleep(0.1)
-                            await queue.join()
-                            # Явно завершить общий прогресс-бар на 100%
+                            if total_posts:
+                                overall_task_id = progress_bar.add_task("Общий прогресс", total=total_posts, filename="Общий прогресс")
+
+                            fetcher_task = asyncio.create_task(fetch_batches())
+                            worker_tasks = [asyncio.create_task(worker(overall_task_id)) for _ in range(config.workers)]
+
+                            await fetcher_task
+                            await message_queue.join()
+
+                            await progress_queue.put(None)
+                            await asyncio.gather(*worker_tasks, manager)
+
                             if overall_task_id is not None and total_posts:
                                 progress_bar.update(overall_task_id, completed=total_posts)
-                            for w in workers:
-                                w.cancel()
-                            await asyncio.gather(*workers, return_exceptions=True)
 
                     await orchestrator()
 
@@ -703,7 +740,7 @@ async def run_export(config: Config):
                                 async with aiofiles.open(note_file, "w", encoding="utf-8") as f:
                                     await f.write(modified)
 
-        else:
+        else: # Non-interactive mode
             if not config.export_targets:
                 logger.error("No export targets specified. Exiting.")
                 return
@@ -714,8 +751,6 @@ async def run_export(config: Config):
                 connector = ProxyConnector.from_url(proxy_url)
 
             async with aiohttp.ClientSession(headers=AIOHTTP_HEADERS, connector=connector) as http_session:
-                export_summaries = []
-
                 rprint("[cyan]***Export***[/cyan]")
                 for target in config.export_targets:
                     if getattr(target, "type", None) == "single_post" or getattr(target, "message_id", None) is not None:
@@ -729,18 +764,8 @@ async def run_export(config: Config):
                         target, config, telegram_manager, local_cache_manager,
                         media_processor, note_generator, http_session
                     )
-                    entity_id_str = str(target.id)
-                    export_root = config.get_export_path_for_entity(entity_id_str)
-                    summary = {
-                        "name": target.name,
-                        "id": entity_id_str,
-                        "export_path": str(export_root),
-                    }
-                    export_summaries.append(summary)
 
-                rprint("[magenta]***Downloading posts/media***[/magenta]")
                 rprint("[magenta]Downloading posts/media complete.[/magenta]")
-
                 rprint("[green]***Post-processing***[/green]")
                 for target in config.export_targets:
                     if getattr(target, "type", None) == "single_post" or getattr(target, "message_id", None) is not None:
@@ -754,7 +779,6 @@ async def run_export(config: Config):
                         await note_generator.postprocess_all_notes(export_root, entity_id_str, cache_manager.cache)
                 rprint("[green]Post-processing complete.[/green]")
 
-
                 telegraph_mapping = {}
                 for target in config.export_targets:
                     entity_id_str = str(target.id)
@@ -762,14 +786,11 @@ async def run_export(config: Config):
                     telegraph_dir = Path(export_root) / 'telegra_ph'
                     if telegraph_dir.exists():
                         for note_file in telegraph_dir.glob("*.md"):
-                            telegraph_url = None
                             async with aiofiles.open(note_file, "r", encoding="utf-8") as f:
                                 content = await f.read()
                                 match = re.search(r"\*Source: (https?://telegra\.ph/[^\*]+)\*", content)
                                 if match:
-                                    telegraph_url = match.group(1).strip()
-                            if telegraph_url:
-                                telegraph_mapping[telegraph_url] = note_file.stem
+                                    telegraph_mapping[match.group(1).strip()] = note_file.stem
                 for target in config.export_targets:
                     entity_id_str = str(target.id)
                     export_root = config.get_export_path_for_entity(entity_id_str)
@@ -848,10 +869,12 @@ async def interactive_config_update(config):
         rprint(" [cyan]1.[/cyan] Throttle threshold (KB/s): [green]{}[/green]".format(getattr(config, 'throttle_threshold_kbps', 50)))
         rprint(" [cyan]2.[/cyan] Throttle pause (s): [green]{}[/green]".format(getattr(config, 'throttle_pause_s', 30)))
         rprint(" [cyan]3.[/cyan] Number of workers: [green]{}[/green]".format(getattr(config, 'workers', 8)))
-        rprint(" [cyan]4.[/cyan] Number of batch size: [green]{}[/green]".format(getattr(config, 'batch_size', 100)))
-        rprint(" [cyan]5.[/cyan] Continue to export")
-        rprint(" [cyan]6.[/cyan] Exit")
-        choice = input("Choose an option to change (1-6): ").strip()
+        rprint(" [cyan]4.[/cyan] Number of concurrent downloads: [green]{}[/green]".format(getattr(config, 'download_workers', int(getattr(config, 'workers', 8) * 1.5))))
+        rprint(" [cyan]5.[/cyan] Number of batch size: [green]{}[/green]".format(getattr(config, 'batch_size', 100)))
+        rprint(" [cyan]6.[/cyan] Export comments: [green]{}[/green]".format("Enabled" if getattr(config, 'export_comments', False) else "Disabled"))
+        rprint(" [cyan]7.[/cyan] Continue to export")
+        rprint(" [cyan]8.[/cyan] Exit")
+        choice = input("Choose an option to change (1-8): ").strip()
         if choice == "1":
             config.throttle_threshold_kbps = prompt_int("Throttle threshold (KB/s)", getattr(config, 'throttle_threshold_kbps', 50))
         elif choice == "2":
@@ -859,14 +882,35 @@ async def interactive_config_update(config):
         elif choice == "3":
             config.workers = prompt_int("Number of workers", getattr(config, 'workers', 8))
         elif choice == "4":
-            config.workers = prompt_int("Number of batch size", getattr(config, 'batch_size', 100))
+            config.download_workers = prompt_int("Number of concurrent downloads", getattr(config, 'download_workers', int(getattr(config, 'workers', 8) * 1.5)))
         elif choice == "5":
+            config.batch_size = prompt_int("Number of batch size", getattr(config, 'batch_size', 100))
+        elif choice == "6":
+            current_status = "Enabled" if getattr(config, 'export_comments', False) else "Disabled"
+            rprint(f"Export comments is currently [bold]{current_status}[/bold]. Enable? (y/n): ", end="")
+            val = input().strip().lower()
+            if val == 'y':
+                config.export_comments = True
+                rprint("[green]Comments export enabled.[/green]")
+            elif val == 'n':
+                config.export_comments = False
+                rprint("[green]Comments export disabled.[/green]")
+            else:
+                rprint("[yellow]Invalid input. No change made.[/yellow]")
+        elif choice == "7":
             break
-        elif choice == '6':
+        elif choice == '8':
             rprint("[yellow]Exiting...[/yellow]")
             sys.exit(0)
         else:
-            rprint("[red]Invalid choice. Please select 1-6.[/red]")
+            rprint("[red]Invalid choice. Please select 1-7.[/red]")
+
+async def aenumerate(asequence, start=0):
+    """Asynchronously enumerate an async generator."""
+    n = start
+    async for elem in asequence:
+        yield n, elem
+        n += 1
 
 async def main():
     """

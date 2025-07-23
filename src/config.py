@@ -84,6 +84,8 @@ class Config:
         proxy_port (Optional[int], optional): Proxy port. Defaults to None.
         throttle_threshold_kbps (int, optional): Throttle threshold in kbps. Defaults to 50.
         throttle_pause_s (int, optional): Throttle pause in seconds. Defaults to 30.
+        export_comments (bool, optional): Export comments mode. Defaults to False.
+
     """
     api_id: int
     api_hash: str
@@ -115,6 +117,8 @@ class Config:
     proxy_port: Optional[int] = None
     throttle_threshold_kbps: int = 50
     throttle_pause_s: int = 30
+    export_comments: bool = False
+    download_workers: Optional[int] = None  # Количество одновременных скачиваний (по умолчанию int(workers*1.5))
     export_paths: Dict[str, Path] = field(default_factory=dict, init=False)
     media_paths: Dict[str, Path] = field(default_factory=dict, init=False)
     cache: Dict[str, Any] = field(default_factory=dict, init=False)
@@ -183,6 +187,7 @@ class Config:
                 "media_download": _parse_bool(os.getenv("MEDIA_DOWNLOAD"), True),
                 "log_level": os.getenv("LOG_LEVEL", "INFO"),
                 "workers": int(os.getenv("WORKERS", 8)),
+                "download_workers": int(os.getenv("DOWNLOAD_WORKERS")) if os.getenv("DOWNLOAD_WORKERS") else int(int(os.getenv("WORKERS", 8)) * 1.5),
                 "batch_size": int(os.getenv("BATCH_SIZE")) if os.getenv("BATCH_SIZE") else None,
                 "cache_save_interval": int(os.getenv("CACHE_SAVE_INTERVAL", 50)),
                 "request_delay": float(os.getenv("REQUEST_DELAY", 0.5)),
@@ -200,6 +205,7 @@ class Config:
                 "proxy_port": proxy_port,
                 "throttle_threshold_kbps": int(os.getenv("THROTTLE_THRESHOLD_KBPS", 50)),
                 "throttle_pause_s": int(os.getenv("THROTTLE_PAUSE_S", 30)),
+                "export_comments": _parse_bool(os.getenv("EXPORT_COMMENTS"), False),
             }
 
             export_targets = []

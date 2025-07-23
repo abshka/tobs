@@ -203,28 +203,36 @@ class NoteGenerator:
                 if comment_text:
                     md += f"> {comment_text}\n"
                 if comment.media and media_processor is not None and entity_id is not None:
-                    media_type = self.get_media_type(comment)
-                    type_subdir = media_dir / f"{media_type}s" if media_type != "unknown" else media_dir
-                    ensure_dir_exists(type_subdir)
-                    filename = media_processor._get_filename(
-                        comment.media.photo if hasattr(comment.media, "photo") else comment.media.document,
-                        comment.id,
-                        media_type,
-                        entity_id
-                    ) if hasattr(media_processor, "_get_filename") else None
-                    comment_media_info.append({
-                        "comment": comment,
-                        "media_type": media_type,
-                        "type_subdir": type_subdir,
-                        "filename": filename
-                    })
+                    media_obj = (comment.media.photo if hasattr(comment.media, "photo") else getattr(comment.media, "document", None))
+                    if media_obj:
+                        media_type = self.get_media_type(comment)
+                        type_subdir = media_dir / f"{media_type}s" if media_type != "unknown" else media_dir
+                        ensure_dir_exists(type_subdir)
+                        filename = media_processor._get_filename(
+                            media_obj,
+                            comment.id,
+                            media_type,
+                            entity_id
+                        ) if hasattr(media_processor, "_get_filename") else None
+                        comment_media_info.append({
+                            "comment": comment,
+                            "media_type": media_type,
+                            "type_subdir": type_subdir,
+                            "filename": filename
+                        })
+                    elif hasattr(comment.media, "webpage") and hasattr(comment.media.webpage, "url"):
+                        md += f"> {comment.media.webpage.url}\n"
                 elif comment.media:
-                    comment_media_info.append({
-                        "comment": comment,
-                        "media_type": "unknown",
-                        "type_subdir": media_dir,
-                        "filename": None
-                    })
+                    if hasattr(comment.media, "webpage") and hasattr(comment.media.webpage, "url"):
+                        md += f"> {comment.media.webpage.url}\n"
+                    # Add to list for download only if it's not a webpage we've handled
+                    elif not hasattr(comment.media, "webpage"):
+                        comment_media_info.append({
+                            "comment": comment,
+                            "media_type": "unknown",
+                            "type_subdir": media_dir,
+                            "filename": None
+                        })
 
             # Прогресс-бар для скачивания медиа из комментариев
             if comment_media_info and progress is not None:

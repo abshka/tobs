@@ -61,7 +61,6 @@ class ProgressCallback:
             downloaded_bytes (int): Number of bytes downloaded so far.
             total_bytes (int): Total bytes to download.
         """
-        # Deprecated: rprint progress, now handled by rich.Progress in download functions
         await self._check_throttling(downloaded_bytes)
 
     async def _check_throttling(self, downloaded_bytes: int):
@@ -105,13 +104,15 @@ class MediaProcessor:
     def __init__(self, config: Config, client: TelegramClient):
         self.config = config
         self.client = client
-        self.download_semaphore = asyncio.Semaphore(config.workers)
+        self.download_semaphore = asyncio.Semaphore(
+            getattr(config, "download_workers", int(getattr(config, "workers", 8) * 1.5))
+        )
         self.processed_cache = {}
         self._cache_lock = asyncio.Lock()
 
     async def download_and_optimize_media(
         self, message: Message, entity_id: Union[str, int], entity_media_path: Path,
-        progress=None, task_id=None
+        progress_queue=None, task_id=None
     ) -> List[Path]:
         """
         Downloads and optimizes all media from a Telegram message.
@@ -120,6 +121,8 @@ class MediaProcessor:
             message (Message): Telegram message object.
             entity_id (Union[str, int]): ID of the entity (chat/user).
             entity_media_path (Path): Path to store media files.
+            progress_queue: asyncio.Queue for progress updates (optional).
+            task_id: Rich Progress task id (optional).
 
         Returns:
             List[Path]: List of paths to processed media files.
@@ -142,7 +145,7 @@ class MediaProcessor:
         tasks = []
         for media_type, msg in media_items:
             tasks.append(self._process_single_item(
-                msg, entity_id_str, media_type, entity_media_path, progress, task_id
+                msg, entity_id_str, media_type, entity_media_path, progress_queue, task_id
             ))
 
         results = []
@@ -240,7 +243,7 @@ class MediaProcessor:
         return "audio" if any(isinstance(attr, DocumentAttributeAudio) for attr in doc.attributes) else "document"
 
     async def _process_single_item(
-            self, message: Message, entity_id_str: str, media_type: str, entity_media_path: Path, progress=None, task_id=None
+            self, message: Message, entity_id_str: str, media_type: str, entity_media_path: Path, progress_queue=None, task_id=None
     ) -> Optional[Path]:
         """
         Processes a single media item: downloads and optimizes it.
@@ -250,7 +253,7 @@ class MediaProcessor:
             entity_id_str (str): Entity ID as string.
             media_type (str): Type of media ('image', 'video', etc.).
             entity_media_path (Path): Path to store media files.
-            progress: Rich Progress instance (optional).
+            progress_queue: asyncio.Queue for progress updates (optional).
             task_id: Progress task id (optional).
 
         Returns:
@@ -277,11 +280,18 @@ class MediaProcessor:
                     entity_id_str, message.id, type_subdir
                 )
             if all_media_ok and await aiofiles.os.path.exists(final_path):
+                # If file exists, we should still advance the progress bar by its size
+                if progress_queue and task_id:
+                    total_size = getattr(message.file, 'size', 0) if message.file else 0
+                    if total_size > 0:
+                         await progress_queue.put({
+                            "type": "update", "task_id": task_id, "data": {"advance": total_size}
+                        })
                 return final_path
 
             await async_ensure_dir_exists(type_subdir)
 
-            downloaded_ok = await self._download_media(message, raw_download_path, filename, progress=progress, task_id=task_id)
+            downloaded_ok = await self._download_media(message, raw_download_path, filename, progress_queue=progress_queue, task_id=task_id)
             if not downloaded_ok:
                 await self._cleanup_file_async(raw_download_path)
                 return None
@@ -305,7 +315,7 @@ class MediaProcessor:
             logger.error(f"Error in media processing pipeline for msg {getattr(message, 'id', 'unknown')}: {e}", exc_info=True)
             return None
 
-    async def _download_media(self, message: Message, raw_download_path: Path, filename: str, progress=None, task_id=None) -> bool:
+    async def _download_media(self, message: Message, raw_download_path: Path, filename: str, progress_queue=None, task_id=None) -> bool:
         """
         Downloads media from a Telegram message.
 
@@ -313,7 +323,7 @@ class MediaProcessor:
             message (Message): Telegram message object.
             raw_download_path (Path): Path to save the downloaded file.
             filename (str): Name of the file being downloaded.
-            progress: Rich Progress instance (optional).
+            progress_queue: asyncio.Queue for progress updates (optional).
             task_id: Progress task id (optional).
 
         Returns:
@@ -321,17 +331,38 @@ class MediaProcessor:
         """
         try:
             async with self.download_semaphore:
-                def callback(current, total):
-                    if progress is not None and task_id is not None:
-                        progress.update(task_id, completed=current)
+                last_reported_bytes = 0
+
+                async def callback(current, total):
+                    nonlocal last_reported_bytes
+                    if progress_queue is not None and task_id is not None:
+                        advanced = current - last_reported_bytes
+                        if advanced > 0:
+                            await progress_queue.put({
+                                "type": "update",
+                                "task_id": task_id,
+                                "data": {"advance": advanced}
+                            })
+                            last_reported_bytes = current
+
                 await self.client.download_media(
                     message=message,
                     file=str(raw_download_path),
                     progress_callback=callback
                 )
-                if progress is not None and task_id is not None:
-                    total_size = getattr(message, "file", None).size if hasattr(message, "file") and message.file else 0
-                    progress.update(task_id, completed=total_size)
+
+                # After download, ensure the progress is complete by advancing the remainder.
+                if progress_queue is not None and task_id is not None:
+                    total_size = getattr(message.file, 'size', 0) if message.file else 0
+                    if total_size > 0:
+                        remaining = total_size - last_reported_bytes
+                        if remaining > 0:
+                            await progress_queue.put({
+                                "type": "update",
+                                "task_id": task_id,
+                                "data": {"advance": remaining}
+                            })
+
                 return await aiofiles.os.path.exists(raw_download_path)
         except Exception as e:
             logger.error(f"Download failed for {filename}: {e}", exc_info=True)
@@ -430,7 +461,7 @@ class MediaProcessor:
             video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
             if not video_stream:
                 logger.warning(f"No video stream in {input_path.name}, copying directly.")
-                ffmpeg.input(str(input_path)).output(str(output_path), c='copy').global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True)
+                ffmpeg.input(str(input_path)).output(str(output_path), c='copy').global_args('-hide_banner', '-loglevel', 'error', '-nostats').run(capture_stderr=True, overwrite_output=True)
                 return
 
             width = int(video_stream.get('width', 0))
@@ -441,27 +472,61 @@ class MediaProcessor:
             base_crf = getattr(self.config, 'video_crf', 23)
             compression_crf = min(base_crf + 5, 35)
 
-            if hw_acceleration == 'nvidia':
-                self._configure_nvidia_encoder(ffmpeg_options, use_h265, compression_crf, optimal_bitrate)
-            elif hw_acceleration == 'amd':
-                self._configure_amd_encoder(ffmpeg_options, use_h265, compression_crf, optimal_bitrate)
-            elif hw_acceleration == 'intel':
-                self._configure_intel_encoder(ffmpeg_options, use_h265, optimal_bitrate)
+            output_ext = output_path.suffix.lower()
+
+            # --- Video Codec Selection ---
+            if output_ext == ".webm":
+                # WebM requires compatible codecs. Use libvpx-vp9 for video.
+                ffmpeg_options['c:v'] = 'libvpx-vp9'
+                ffmpeg_options.update({'crf': str(compression_crf), 'b:v': optimal_bitrate})
             else:
-                self._configure_software_encoder(ffmpeg_options, use_h265, compression_crf, optimal_bitrate)
+                # For other formats, use the existing hardware acceleration logic.
+                if hw_acceleration == 'nvidia':
+                    self._configure_nvidia_encoder(ffmpeg_options, use_h265, compression_crf, optimal_bitrate)
+                elif hw_acceleration == 'amd':
+                    self._configure_amd_encoder(ffmpeg_options, use_h265, compression_crf, optimal_bitrate)
+                elif hw_acceleration == 'intel':
+                    self._configure_intel_encoder(ffmpeg_options, use_h265, optimal_bitrate)
+                else:
+                    self._configure_software_encoder(ffmpeg_options, use_h265, compression_crf, optimal_bitrate)
 
+            # --- Audio Codec Selection ---
             if audio_stream := next((s for s in probe['streams'] if s['codec_type'] == 'audio'), None):
-                self._configure_audio_options(ffmpeg_options, audio_stream, float(video_stream.get('duration', 0)), 'voice' in input_path.name.lower())
+                if output_ext == ".webm":
+                    # WebM requires Opus or Vorbis. Use libopus for audio.
+                    ffmpeg_options.update({'c:a': 'libopus', 'b:a': '64k'})
+                else:
+                    # Original audio configuration for other formats.
+                    self._configure_audio_options(ffmpeg_options, audio_stream, float(video_stream.get('duration', 0)), 'voice' in input_path.name.lower())
 
-            ffmpeg.output(stream, str(output_path), **ffmpeg_options).global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True)
 
+            process = ffmpeg.output(stream, str(output_path), **ffmpeg_options).global_args('-hide_banner', '-loglevel', 'error', '-nostats')
+
+            try:
+                # Правильный вызов без check=True
+                process.run(capture_stderr=True, overwrite_output=True)
+            except ffmpeg.Error as e:
+                args = process.get_args()
+                stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else "No stderr"
+                logger.error(f"ffmpeg failed for video {input_path.name}. Command: `ffmpeg {' '.join(args)}`. Stderr: {stderr}")
+                # Копируем исходный файл, если оптимизация провалилась
+                if not output_path.exists() or output_path.stat().st_size == 0:
+                    shutil.copy(input_path, output_path)
+                return
+
+            # Если оптимизированный файл больше исходного, копируем исходный
             if output_path.exists() and input_path.exists() and output_path.stat().st_size >= input_path.stat().st_size:
-                ffmpeg.input(str(input_path)).output(str(output_path), c='copy').global_args('-hide_banner', '-loglevel', 'fatal', '-nostats').run(capture_stderr=True, overwrite_output=True)
+                shutil.copy(input_path, output_path)
+
         except ffmpeg.Error as e:
             stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else "No stderr"
-            logger.error(f"ffmpeg failed for video {input_path.name}: {stderr}")
+            logger.error(f"ffmpeg setup failed for video {input_path.name}: {stderr}")
+            if not output_path.exists() or output_path.stat().st_size == 0:
+                shutil.copy(input_path, output_path)
         except Exception as e:
             logger.error(f"Video optimization failed for {input_path.name}: {e}")
+            if not output_path.exists() or output_path.stat().st_size == 0:
+                shutil.copy(input_path, output_path)
 
     async def _optimize_audio(self, input_path: Path, output_path: Path):
         """

@@ -217,8 +217,7 @@ class TelegramManager:
 
         async for message in self.client.iter_messages(
             entity=entity, limit=limit, offset_id=0, reverse=True,
-            min_id=min_id or 0, wait_time=self.config.request_delay
-        ):
+            min_id=min_id or 0, wait_time=self.config.request_delay):
             if isinstance(message, Message) and not message.action:
                 yield message
 
@@ -556,7 +555,7 @@ class TelegramManager:
         )
         self.config.export_targets.clear()
         self.config.add_export_target(single_post_target)
-        return True
+        return
 
     async def collect_album_messages(self, entity, message):
         """
@@ -571,7 +570,6 @@ class TelegramManager:
         """
         grouped_id = getattr(message, "grouped_id", None)
         if not grouped_id:
-            print(f"[SinglePost] No grouped_id found for message {message.id}. Returning single message.")
             return [message]
 
         album_messages = await self.client.get_messages(
