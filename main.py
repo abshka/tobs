@@ -94,7 +94,7 @@ async def process_message_group(
     try:
         entity_id = int(entity_id_str)
         media_paths = []
-        semaphore = asyncio.Semaphore(getattr(config, "download_workers", int(getattr(config, "workers", 8) * 1.5)))
+        semaphore = asyncio.Semaphore(config.performance.download_workers)
         comments = []
 
         if getattr(config, "export_comments", False):
@@ -326,7 +326,7 @@ async def export_single_target(
             rprint(f"[bold cyan][{target.name}] Incremental mode. Starting after message ID: {last_processed_id}[/bold cyan]")
 
         grouped_messages = {}
-        semaphore = asyncio.Semaphore(getattr(config, "download_workers", int(getattr(config, "workers", 8) * 1.5)))
+        semaphore = asyncio.Semaphore(config.performance.download_workers)
         active_tasks = set()
         successful_count = 0
         processed_count = 0
@@ -413,7 +413,7 @@ async def export_single_target(
                         await _process_group(message.id)
                     last_message_time = current_time
 
-                    if processed_count % getattr(config, "cache_save_interval", 10) == 0 and cache_manager is not None:
+                    if processed_count % config.performance.cache_save_interval == 0 and cache_manager is not None:
                         await cache_manager.schedule_background_save()
 
                 for gid in list(grouped_messages.keys()):
@@ -622,7 +622,7 @@ async def run_export(config: Config):
 
                     # --- Full Channel Export Orchestrator ---
                     async def orchestrator():
-                        message_queue = asyncio.Queue(maxsize=config.workers * 2)
+                        message_queue = asyncio.Queue(maxsize=config.performance.workers * 2)
                         progress_queue = asyncio.Queue()
                         task_map = {}
 
@@ -634,7 +634,7 @@ async def run_export(config: Config):
                                 logger.error(f"Fetch error: {e}")
                             finally:
                                 # Signal workers to stop by putting None for each worker
-                                for _ in range(config.workers):
+                                for _ in range(config.performance.workers):
                                     await message_queue.put(None)
 
                         async def worker(overall_task_id=None):
@@ -682,7 +682,7 @@ async def run_export(config: Config):
                                 overall_task_id = progress_bar.add_task("Общий прогресс", total=total_posts, filename="Общий прогресс")
 
                             fetcher_task = asyncio.create_task(fetch_batches())
-                            worker_tasks = [asyncio.create_task(worker(overall_task_id)) for _ in range(config.workers)]
+                            worker_tasks = [asyncio.create_task(worker(overall_task_id)) for _ in range(config.performance.workers)]
 
                             await fetcher_task
                             await message_queue.join()
@@ -721,7 +721,7 @@ async def run_export(config: Config):
                                 telegraph_url = None
                                 async with aiofiles.open(note_file, "r", encoding="utf-8") as f:
                                     content = await f.read()
-                                    match = re.search(r"\*Source: (https?://telegra\.ph/[^\*]+)\*", content)
+                                    match = re.search(r"\*Source: (https?://telegra\\.ph/[^\*]+)\*", content)
                                     if match:
                                         telegraph_url = match.group(1).strip()
                                 if telegraph_url:
@@ -788,7 +788,7 @@ async def run_export(config: Config):
                         for note_file in telegraph_dir.glob("*.md"):
                             async with aiofiles.open(note_file, "r", encoding="utf-8") as f:
                                 content = await f.read()
-                                match = re.search(r"\*Source: (https?://telegra\.ph/[^\*]+)\*", content)
+                                match = re.search(r"\*Source: (https?://telegra\\.ph/[^\*]+)\*", content)
                                 if match:
                                     telegraph_mapping[match.group(1).strip()] = note_file.stem
                 for target in config.export_targets:
@@ -866,25 +866,25 @@ async def interactive_config_update(config):
     while True:
         clear_screen()
         rprint("[bold yellow]Advanced Config Options:[/bold yellow]")
-        rprint(" [cyan]1.[/cyan] Throttle threshold (KB/s): [green]{}[/green]".format(getattr(config, 'throttle_threshold_kbps', 50)))
-        rprint(" [cyan]2.[/cyan] Throttle pause (s): [green]{}[/green]".format(getattr(config, 'throttle_pause_s', 30)))
-        rprint(" [cyan]3.[/cyan] Number of workers: [green]{}[/green]".format(getattr(config, 'workers', 8)))
-        rprint(" [cyan]4.[/cyan] Number of concurrent downloads: [green]{}[/green]".format(getattr(config, 'download_workers', int(getattr(config, 'workers', 8) * 1.5))))
-        rprint(" [cyan]5.[/cyan] Number of batch size: [green]{}[/green]".format(getattr(config, 'batch_size', 100)))
+        rprint(" [cyan]1.[/cyan] Throttle threshold (KB/s): [green]{}[/green]".format(config.performance.throttle_threshold_kbps))
+        rprint(" [cyan]2.[/cyan] Throttle pause (s): [green]{}[/green]".format(config.performance.throttle_pause_s))
+        rprint(" [cyan]3.[/cyan] Number of workers: [green]{}[/green]".format(config.performance.workers))
+        rprint(" [cyan]4.[/cyan] Number of concurrent downloads: [green]{}[/green]".format(config.performance.download_workers))
+        rprint(" [cyan]5.[/cyan] Number of batch size: [green]{}[/green]".format(config.performance.batch_size))
         rprint(" [cyan]6.[/cyan] Export comments: [green]{}[/green]".format("Enabled" if getattr(config, 'export_comments', False) else "Disabled"))
         rprint(" [cyan]7.[/cyan] Continue to export")
         rprint(" [cyan]8.[/cyan] Exit")
         choice = input("Choose an option to change (1-8): ").strip()
         if choice == "1":
-            config.throttle_threshold_kbps = prompt_int("Throttle threshold (KB/s)", getattr(config, 'throttle_threshold_kbps', 50))
+            config.performance.throttle_threshold_kbps = prompt_int("Throttle threshold (KB/s)", config.performance.throttle_threshold_kbps)
         elif choice == "2":
-            config.throttle_pause_s = prompt_int("Throttle pause (s)", getattr(config, 'throttle_pause_s', 30))
+            config.performance.throttle_pause_s = prompt_int("Throttle pause (s)", config.performance.throttle_pause_s)
         elif choice == "3":
-            config.workers = prompt_int("Number of workers", getattr(config, 'workers', 8))
+            config.performance.workers = prompt_int("Number of workers", config.performance.workers)
         elif choice == "4":
-            config.download_workers = prompt_int("Number of concurrent downloads", getattr(config, 'download_workers', int(getattr(config, 'workers', 8) * 1.5)))
+            config.performance.download_workers = prompt_int("Number of concurrent downloads", config.performance.download_workers)
         elif choice == "5":
-            config.batch_size = prompt_int("Number of batch size", getattr(config, 'batch_size', 100))
+            config.performance.batch_size = prompt_int("Number of batch size", config.performance.batch_size)
         elif choice == "6":
             current_status = "Enabled" if getattr(config, 'export_comments', False) else "Disabled"
             rprint(f"Export comments is currently [bold]{current_status}[/bold]. Enable? (y/n): ", end="")
