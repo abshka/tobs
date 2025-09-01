@@ -4,7 +4,7 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import aiofiles
 import aiofiles.os
@@ -24,7 +24,9 @@ from telethon.tl.types import (
     Photo,
 )
 
+from src.concurrency_manager import ConcurrencyManager
 from src.config import Config
+from src.retry_manager import throttle_manager
 from src.utils import logger, sanitize_filename
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -36,8 +38,6 @@ AIOHTTP_HEADERS = {
 async def async_ensure_dir_exists(path: Path):
     """Асинхронно убеждается, что директория существует."""
     await aiofiles.os.makedirs(path, exist_ok=True)
-
-
 class ProgressCallback:
     """
     Callback for tracking and logging download progress, and handling throttling.
@@ -51,7 +51,7 @@ class ProgressCallback:
         self.description = description
         self.last_check_time = time.time()
         self.last_downloaded = 0
-        self.throttle_counter = 0
+        self.operation_name = f"download_{description}"
 
     async def __call__(self, downloaded_bytes: int, total_bytes: int):
         """
@@ -65,7 +65,7 @@ class ProgressCallback:
 
     async def _check_throttling(self, downloaded_bytes: int):
         """
-        Checks download speed and pauses if throttling is suspected.
+        Checks download speed and applies throttle management.
 
         Args:
             downloaded_bytes (int): Number of bytes downloaded so far.
@@ -76,23 +76,15 @@ class ProgressCallback:
             return
 
         speed_kbps = ((downloaded_bytes - self.last_downloaded) / elapsed) / 1024
-        threshold = getattr(self.config, 'throttle_threshold_kbps', 50)
-        pause_duration = getattr(self.config, 'throttle_pause_s', 30)
 
-        if 0 < speed_kbps < threshold:
-            self.throttle_counter += 1
-        else:
-            self.throttle_counter = 0
+        # Record speed for throttle detection
+        throttle_manager.record_speed(self.operation_name, speed_kbps)
 
-        if self.throttle_counter >= 2:
-            rprint(f"[yellow]Скорость загрузки очень низкая ({speed_kbps:.1f} KB/s). Подозрение на throttling. Пауза {pause_duration} сек...[/yellow]")
-            await asyncio.sleep(pause_duration)
-            self.throttle_counter = 0
+        # Apply adaptive delay if throttling detected
+        await throttle_manager.adaptive_delay(self.operation_name)
 
         self.last_check_time = now
         self.last_downloaded = downloaded_bytes
-
-
 class MediaProcessor:
     """
     Handles downloading, optimizing, and managing media files from Telegram messages.
@@ -101,14 +93,33 @@ class MediaProcessor:
         config (Config): Configuration object.
         client (TelegramClient): Telethon client instance.
     """
-    def __init__(self, config: Config, client: TelegramClient):
+    def __init__(self, config: Config, client: TelegramClient, concurrency_manager: ConcurrencyManager):
         self.config = config
         self.client = client
-        self.download_semaphore = asyncio.Semaphore(
-            getattr(config, "download_workers", int(getattr(config, "workers", 8) * 1.5))
-        )
+        self.concurrency_manager = concurrency_manager
         self.processed_cache = {}
+        self.metadata_cache = {}
         self._cache_lock = asyncio.Lock()
+
+    async def get_media_metadata(self, message: Message) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves media metadata from cache or Telegram, without downloading the file.
+        """
+        media_id = getattr(message.media, 'id', message.id)
+        if media_id in self.metadata_cache:
+            return self.metadata_cache[media_id]
+
+        if not message.file:
+            return None
+
+        metadata = {
+            "size": message.file.size,
+            "mime_type": message.file.mime_type,
+            "name": message.file.name,
+            "attributes": getattr(message.file, "attributes", None)
+        }
+        self.metadata_cache[media_id] = metadata
+        return metadata
 
     async def download_and_optimize_media(
         self, message: Message, entity_id: Union[str, int], entity_media_path: Path,
@@ -139,8 +150,6 @@ class MediaProcessor:
 
         if not media_items:
             return []
-
-
         entity_id_str = str(entity_id)
         tasks = []
         for media_type, msg in media_items:
@@ -182,7 +191,7 @@ class MediaProcessor:
         attempt = 0
         while attempt < max_retries:
             try:
-                async with self.download_semaphore:
+                async with self.concurrency_manager.download_semaphore:
                     async with session.get(url, timeout=60, headers=AIOHTTP_HEADERS) as response:
                         if response.status != 200:
                             rprint(f"[red]Ошибка скачивания изображения {url}. Status: {response.status}, Reason: {response.reason}[/red]")
@@ -330,7 +339,7 @@ class MediaProcessor:
             bool: True if download succeeded, False otherwise.
         """
         try:
-            async with self.download_semaphore:
+            async with self.concurrency_manager.download_semaphore:
                 last_reported_bytes = 0
 
                 async def callback(current, total):
@@ -474,7 +483,6 @@ class MediaProcessor:
 
             output_ext = output_path.suffix.lower()
 
-            # --- Video Codec Selection ---
             if output_ext == ".webm":
                 # WebM requires compatible codecs. Use libvpx-vp9 for video.
                 ffmpeg_options['c:v'] = 'libvpx-vp9'
@@ -490,7 +498,6 @@ class MediaProcessor:
                 else:
                     self._configure_software_encoder(ffmpeg_options, use_h265, compression_crf, optimal_bitrate)
 
-            # --- Audio Codec Selection ---
             if audio_stream := next((s for s in probe['streams'] if s['codec_type'] == 'audio'), None):
                 if output_ext == ".webm":
                     # WebM requires Opus or Vorbis. Use libopus for audio.
@@ -498,8 +505,6 @@ class MediaProcessor:
                 else:
                     # Original audio configuration for other formats.
                     self._configure_audio_options(ffmpeg_options, audio_stream, float(video_stream.get('duration', 0)), 'voice' in input_path.name.lower())
-
-
             process = ffmpeg.output(stream, str(output_path), **ffmpeg_options).global_args('-hide_banner', '-loglevel', 'error', '-nostats')
 
             try:

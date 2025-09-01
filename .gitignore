@@ -1,10 +1,69 @@
+# Environment and configuration
 .env
+.env.local
+.env.production
+
+# Virtual environments
 .venv/
-.ropeproject/
-exporter.log
-tobs_session.session
-tobs_session.session-journal
+venv/
+env/
+
+# Python cache
 __pycache__/
-src/__pycache__/
-tobs_exporter.log
-.python-version
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.ropeproject/
+
+# Telegram session files
+*.session
+*.session-journal
+tobs_session.*
+
+# Log files
+*.log
+logs/
+tobs_exporter.log*
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Project specific
+exports/
+downloads/
+media/

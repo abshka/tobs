@@ -6,14 +6,13 @@ from typing import Dict, List, Optional, Set, Tuple, Union
 import aiofiles
 
 from src.cache_manager import CacheManager
+from src.concurrency_manager import ConcurrencyManager
 from src.config import Config
 from src.utils import get_relative_path, logger
-
-
 class ReplyLinker:
     """Handles linking replies between messages for a specific entity."""
 
-    def __init__(self, config: Config, cache_manager: CacheManager):
+    def __init__(self, config: Config, cache_manager: CacheManager, concurrency_manager: ConcurrencyManager):
         """
         Initialize the ReplyLinker.
 
@@ -25,7 +24,7 @@ class ReplyLinker:
         """
         self.config = config
         self.cache_manager = cache_manager
-        self.io_semaphore = asyncio.Semaphore(20)
+        self.concurrency_manager = concurrency_manager
         self.file_locks: Dict[Path, asyncio.Lock] = {}
 
     async def link_replies(self, entity_id: str, entity_export_path: Path):
@@ -106,7 +105,7 @@ class ReplyLinker:
                 tasks.append(task)
 
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-            success_count += sum(1 for result in batch_results if result is True)
+            success_count += sum(1 for result in batch_results if result)
 
         return success_count
 
@@ -138,7 +137,7 @@ class ReplyLinker:
                 tasks.append(task)
 
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-            success_count += sum(1 for result in batch_results if result is True)
+            success_count += sum(1 for result in batch_results if result)
 
         return success_count
 
@@ -248,7 +247,7 @@ class ReplyLinker:
 
         checks = (check_existing,) if isinstance(check_existing, str) else check_existing
 
-        async with self.io_semaphore:
+        async with self.concurrency_manager.io_semaphore:
             async with file_lock:
                 try:
                     async with aiofiles.open(file_path, mode='r+', encoding='utf-8') as f:

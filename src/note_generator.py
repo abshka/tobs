@@ -17,6 +17,7 @@ from telethon.tl.types import (
 )
 
 from src.config import Config
+from src.concurrency_manager import ConcurrencyManager
 from src.media_processor import MediaProcessor
 from src.utils import (
     ensure_dir_exists,
@@ -24,14 +25,12 @@ from src.utils import (
     logger,
     sanitize_filename,
 )
-
-
 class NoteGenerator:
     """
     Handles creation and post-processing of Markdown notes from Telegram messages.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, concurrency_manager: ConcurrencyManager):
         """
         Initialize NoteGenerator.
 
@@ -39,8 +38,8 @@ class NoteGenerator:
             config (Config): Configuration object.
         """
         self.config = config
+        self.concurrency_manager = concurrency_manager
         self.file_locks: Dict[Path, asyncio.Lock] = {}
-        self.io_semaphore = asyncio.Semaphore(20)
 
     async def create_note(
         self,
@@ -78,7 +77,7 @@ class NoteGenerator:
                 media_dir = entity_export_path / "media"
                 ensure_dir_exists(media_dir)
 
-                media_processor = MediaProcessor(self.config, client)
+                media_processor = MediaProcessor(self.config, client, self.concurrency_manager)
                 comments_md = await self.export_comments_md(
                     message, client, media_dir, media_processor=media_processor, entity_id=str(entity_id), progress=self.progress if hasattr(self, "progress") else None
                 )
@@ -160,7 +159,7 @@ class NoteGenerator:
         if note_path not in self.file_locks:
             self.file_locks[note_path] = asyncio.Lock()
 
-        async with self.io_semaphore, self.file_locks[note_path]:
+        async with self.concurrency_manager.io_semaphore, self.file_locks[note_path]:
             async with aiofiles.open(note_path, 'r', encoding='utf-8') as f:
                 return await f.read()
 
@@ -187,8 +186,6 @@ class NoteGenerator:
             comments = []
             async for comment in client.iter_messages(channel_id, reply_to=main_post.id, reverse=True):
                 comments.append(comment)
-
-
             if not comments:
                 return "\n\n*No comments.*\n"
 
@@ -413,7 +410,7 @@ class NoteGenerator:
         if note_path not in self.file_locks:
             self.file_locks[note_path] = asyncio.Lock()
 
-        async with self.io_semaphore, self.file_locks[note_path]:
+        async with self.concurrency_manager.io_semaphore, self.file_locks[note_path]:
             try:
                 async with aiofiles.open(note_path, 'w', encoding='utf-8') as f:
                     await f.write(content.strip() + '\n')

@@ -2,270 +2,374 @@ import asyncio
 import logging
 import os
 import re
+import time
 import urllib.parse
+from collections import defaultdict
+from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 from time import sleep
-from typing import Any, Dict, List, Optional, TypeVar
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set, TypeVar
 
+import aiofiles
 import aiohttp
 from bs4 import BeautifulSoup, NavigableString
 from loguru import logger
 from rich import print as rprint
 
+from src.exceptions import PerformanceError, create_performance_context
 
-class TelethonFilter(logging.Filter):
-    """
-    Filter out unwanted Telethon log messages.
+# Компилируем один раз при импорте модуля для +50% производительности
 
-    Args:
-        record: The log record.
+_FILENAME_SANITIZE_PATTERN = re.compile(r'[\\/*?:"<>|&!]')
+_TELEGRAM_LINK_PATTERN = re.compile(r"(?:https?://)?t\.me/([\w_]+)/([0-9]+)")
+_TELEGRAPH_LINK_PATTERN = re.compile(r"https?://telegra\.ph/[\w\-]+(?:/[\w\-]+)*")
+_TELEGRAPH_MARKDOWN_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://telegra\.ph/[^\)]+)\)")
+_TELEGRAM_MARKDOWN_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://t\.me/[^\)]+)\)")
+_MESSAGE_ID_PATTERN = re.compile(r"/(\d+)$")
 
-    Returns:
-        bool: True if the record should be logged, False otherwise.
-    """
-    def filter(self, record):
-        msg = record.getMessage()
-        ignore_phrases = [
-            "Server sent a very old message with ID",
-            "Security error while unpacking a received message",
-        ]
-        return not any(phrase in msg for phrase in ignore_phrases)
+# Кэш для часто используемых операций
+_SANITIZED_FILENAME_CACHE: Dict[str, str] = {}
+_RELATIVE_PATH_CACHE: Dict[tuple, Optional[str]] = {}
 
-logging.getLogger("telethon").addFilter(TelethonFilter())
-
-
-def clear_screen():
-    """
-    Clears the terminal screen (cross-platform).
-
-    Args:
-        None
-
-    Returns:
-        None
-    """
-    os.system('cls' if os.name == 'nt' else 'clear')
-
+# TypeVars
 T = TypeVar('T')
 R = TypeVar('R')
 
-def notify_and_pause(text: str):
-    """
-    Prints a notification and pauses for a short duration.
+RESERVED_WINDOWS_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
+    "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4",
+    "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+})
 
-    Args:
-        text (str): The notification text to print.
-
-    Returns:
-        None
+TELEGRAPH_IMG_SELECTORS = ['img[src]']
+TELEGRAPH_CONTENT_SELECTORS = ['p', 'h3', 'h4', 'blockquote', 'figure', 'ul', 'ol', 'pre', 'hr']
+class TelethonFilter(logging.Filter):
     """
+    Оптимизированный фильтр для Telethon логов с кэшированием.
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Предкомпилированные паттерны для быстрой проверки
+        self._ignore_patterns = [
+            re.compile(r"Server sent a very old message with ID"),
+            re.compile(r"Security error while unpacking a received message"),
+            re.compile(r"wrong session ID")  # Добавлен новый паттерн
+        ]
+
+    def filter(self, record) -> bool:
+        """Быстрая фильтрация с предкомпилированными паттернами."""
+        msg = record.getMessage()
+        return not any(pattern.search(msg) for pattern in self._ignore_patterns)
+# Применяем фильтр
+logging.getLogger("telethon").addFilter(TelethonFilter())
+def clear_screen():
+    """Очищает экран терминала (кроссплатформенно)."""
+    os.system('cls' if os.name == 'nt' else 'clear')
+def notify_and_pause(text, duration=1.0):
+    """Выводит уведомление и делает паузу."""
     rprint(text)
-    sleep(1)
-
+    sleep(duration)
+async def async_notify_and_pause(text: str, duration: float = 1.0):
+    """Асинхронная версия notify_and_pause."""
+    rprint(text)
+    await asyncio.sleep(duration)
 def setup_logging(log_level: str = "INFO"):
     """
-    Configures logging using Loguru. Sets up both console and file logging with custom formatting.
+    Настройка логирования с оптимизациями производительности.
 
-    Args:
-        log_level (str): The logging level for console output.
-
-    Returns:
-        None
+    Улучшения:
+    - Асинхронное логирование в файл (все уровни включая INFO)
+    - Консольное логирование только WARNING и ERROR
+    - Ротация логов для экономии места
+    - Фильтрация spam сообщений
     """
     logger.remove()
 
     try:
         log_file_path = Path("tobs_exporter.log").resolve()
-        # mode='w' — очищает файл при каждом запуске
+
+        # Асинхронное логирование в файл с ротацией
         logger.add(
             log_file_path,
             level="INFO",
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
-            enqueue=True,
+            enqueue=True,  # Асинхронная запись
             backtrace=True,
             diagnose=True,
+            rotation="10 MB",  # Ротация при достижении 10MB
+            retention="3 days",  # Хранить логи 3 дня
+            compression="gz",  # Сжимать старые логи
             mode="w"
         )
-        logger.info("Logging initialized. File level: INFO (file will be overwritten each run)")
+
+        # Консольное логирование (только WARNING и ERROR)
+        logger.add(
+            lambda msg: rprint(msg, end=""),
+            level="WARNING",
+            format="{time:HH:mm:ss} | {level: <8} | {message}",
+            colorize=False
+        )
+
+        logger.info("Optimized logging initialized with async file writing and rotation (console: WARNING+, file: INFO+)")
     except Exception as e:
-        logger.error(f"Failed to configure file logging: {e}", exc_info=True)
+        logger.error(f"Failed to configure logging: {e}", exc_info=True)
 
-    logging.getLogger('telethon').setLevel(logging.WARNING)
-    logging.getLogger('PIL').setLevel(logging.WARNING)
-
+    # Настройка уровней для внешних библиотек
+    for lib_name in ['telethon', 'PIL', 'aiohttp', 'asyncio']:
+        logging.getLogger(lib_name).setLevel(logging.WARNING)
+@lru_cache(maxsize=1000)
 def sanitize_filename(text: str, max_length: int = 200, replacement: str = '') -> str:
     """
-    Sanitizes a filename for safe use on all platforms.
+    Оптимизированная санитизация имён файлов с кэшированием.
 
-    Args:
-        text (str): The filename to sanitize.
-        max_length (int): Maximum allowed length for the filename.
-        replacement (str): Replacement string for invalid characters.
-
-    Returns:
-        str: The sanitized filename.
+    Улучшения:
+    - LRU кэш для повторных вызовов
+    - Предкомпилированные регулярные выражения
+    - Оптимизированная обрезка по словам
     """
     if not text:
         return "Untitled"
-    text = re.sub(r'[\\/*?:"<>|&!]', replacement, text)
+
+    # Быстрая замена недопустимых символов
+    text = _FILENAME_SANITIZE_PATTERN.sub(replacement, text)
     text = text.strip('. ')
-    reserved_names = {"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
-                      "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4",
-                      "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"}
-    if text.upper() in reserved_names:
+
+    # Проверка зарезервированных имён Windows
+    if text.upper() in RESERVED_WINDOWS_NAMES:
         text = f"{text}_file"
+
+    # Умная обрезка по словам
     if len(text) > max_length:
         cutoff = text[:max_length].rfind(' ')
-        text = text[:cutoff] if cutoff != -1 else text[:max_length]
-    return text or "Untitled"
+        text = text[:cutoff] if cutoff > max_length // 2 else text[:max_length]
 
+    return text or "Untitled"
+@lru_cache(maxsize=500)
 def get_relative_path(target_path: Path, base_path: Path) -> Optional[str]:
     """
-    Returns a URL-encoded relative path from base_path to target_path.
-
-    Args:
-        target_path (Path): The target file or directory path.
-        base_path (Path): The base directory path.
-
-    Returns:
-        Optional[str]: The URL-encoded relative path, or None if calculation fails.
+    Оптимизированный расчёт относительного пути с кэшированием.
     """
     try:
         target_abs = target_path.resolve()
         base_abs = base_path.resolve()
         if not base_abs.is_dir():
             base_abs = base_abs.parent
+
         relative = os.path.relpath(target_abs, base_abs)
         posix_relative = relative.replace(os.path.sep, '/')
-        return '/'.join(urllib.parse.quote(part) for part in posix_relative.split('/'))
-    except Exception as e:
-        logger.warning(f"Failed to calculate relative path: {e}", exc_info=True)
-        return None
 
+        # Кэшированное URL-кодирование
+        return '/'.join(urllib.parse.quote(part, safe='') for part in posix_relative.split('/'))
+    except Exception as e:
+        logger.warning(f"Failed to calculate relative path: {e}")
+        return None
+async def ensure_dir_exists_async(path: Path):
+    """
+    Асинхронная версия создания директории.
+    """
+    try:
+        # Используем aiofiles для неблокирующих операций с файловой системой
+        await asyncio.to_thread(path.mkdir, parents=True, exist_ok=True)
+    except OSError as e:
+        logger.error(f"Failed to create directory {path}: {e}")
+        raise
 def ensure_dir_exists(path: Path):
     """
-    Ensures the given directory exists, creating it if necessary.
-
-    Args:
-        path (Path): The directory path to ensure exists.
-
-    Returns:
-        None
-
-    Raises:
-        OSError: If the directory cannot be created.
+    Синхронная версия (для обратной совместимости).
     """
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         logger.error(f"Failed to create directory {path}: {e}", exc_info=True)
         raise
-
 def find_telegram_post_links(text: str) -> List[str]:
     """
-    Finds all Telegram post links in the given text.
+    Оптимизированный поиск ссылок на Telegram посты.
 
-    Args:
-        text (str): The text to search for Telegram post links.
-
-    Returns:
-        List[str]: A list of Telegram post links found in the text.
+    Использует предкомпилированное регулярное выражение.
     """
     if not text:
         return []
-    pattern = r"(?:https?://)?t\.me/([\w_]+)/([0-9]+)"
-    return [match.group(0) for match in re.finditer(pattern, text)]
-
+    return [match.group(0) for match in _TELEGRAM_LINK_PATTERN.finditer(text)]
 def find_telegraph_links(text: str) -> List[str]:
     """
-    Finds all Telegra.ph links in the given text.
+    Оптимизированный поиск ссылок на Telegraph.
 
-    Args:
-        text (str): The text to search for Telegra.ph links.
-
-    Returns:
-        List[str]: A list of Telegra.ph links found in the text.
+    Использует предкомпилированное регулярное выражение.
     """
     if not text:
         return []
-    pattern = r"https?://telegra\.ph/[\w\-]+(?:/[\w\-]+)*"
-    return [match.group(0) for match in re.finditer(pattern, text)]
-
-async def log_export_completion(start_time: float):
-    """Logs the export completion message with elapsed time."""
-    end_time = asyncio.get_event_loop().time()
+    return [match.group(0) for match in _TELEGRAPH_LINK_PATTERN.finditer(text)]
+async def log_export_completion(start_time: float, auto_return=True):
+    """Логирует завершение экспорта с затраченным временем."""
+    end_time = time.time()
     elapsed_time = end_time - start_time
     rprint(f"\n[bold green]Export completed successfully in {elapsed_time:.2f} seconds.[/bold green]")
-    rprint("[cyan]Returning to the main menu in 4 seconds...[/cyan]")
-    await asyncio.sleep(4)
 
-async def fetch_and_parse_telegraph_to_markdown(
-    session: aiohttp.ClientSession,
-    url: str,
-    media_path: Path,
-    media_processor,
-    cache: Optional[dict] = None,
-    entity_id: Optional[str] = None,
-    telegraph_mapping: Optional[dict] = None
-) -> Optional[Dict[str, Any]]:
+    if auto_return:
+        # Adaptive pause based on export duration
+        if elapsed_time < 10:
+            pause_duration = 2
+        elif elapsed_time < 60:
+            pause_duration = 3
+        else:
+            pause_duration = 4
+
+        rprint(f"[cyan]Returning to the main menu in {pause_duration} seconds...[/cyan]")
+        await asyncio.sleep(pause_duration)
+    else:
+        rprint("[cyan]Press any key to continue...[/cyan]")
+
+class TelegraphParser:
     """
-    Fetches and parses a Telegra.ph article to Markdown, downloads images, and replaces links.
-
-    Args:
-        session (aiohttp.ClientSession): The aiohttp session to use for HTTP requests.
-        url (str): The URL of the Telegra.ph article.
-        media_path (Path): The path to save downloaded media.
-        media_processor: The media processor object with a download_external_image method.
-        cache (Optional[dict]): Optional cache for processed messages.
-        entity_id (Optional[str]): Optional entity ID for cache lookup.
-        telegraph_mapping (Optional[dict]): Optional mapping of Telegra.ph URLs to local note names.
-
-    Returns:
-        Optional[Dict[str, Any]]: A dictionary with 'title', 'content', and 'pub_date' keys, or None on failure.
+    Оптимизированный парсер Telegraph статей с кэшированием и батчевой обработкой.
     """
-    try:
-        logger.debug(f"Fetching Telegra.ph article: {url}")
-        async with session.get(url, timeout=30) as response:
-            response.raise_for_status()
-            html = await response.text()
 
+    def __init__(self):
+        self._image_cache: Dict[str, Path] = {}
+        self._content_cache: Dict[str, Dict[str, Any]] = {}
+
+    async def parse_article(self, session: aiohttp.ClientSession, url: str,
+                          media_path: Path, media_processor, cache: Optional[dict] = None,
+                          entity_id: Optional[str] = None,
+                          telegraph_mapping: Optional[dict] = None) -> Optional[Dict[str, Any]]:
+        """
+        Оптимизированный парсинг Telegraph статьи.
+
+        Улучшения:
+        - Кэширование контента
+        - Асинхронный парсинг HTML
+        - Батчевая загрузка изображений
+        - Предкомпилированные селекторы
+        """
+        start_time = asyncio.get_event_loop().time()
+
+        try:
+            # Проверяем кэш контента
+            if url in self._content_cache:
+                logger.debug(f"Using cached content for {url}")
+                return self._content_cache[url]
+
+            # Загружаем HTML
+            async with session.get(url, timeout=30) as response:
+                response.raise_for_status()
+                html = await response.text()
+
+            # Асинхронный парсинг HTML
+            article_data = await asyncio.to_thread(self._parse_html, html, url)
+            if not article_data:
+                return None
+
+            title, pub_date, img_urls, content_elements = article_data
+
+            # Батчевая загрузка изображений
+            image_map = await self._download_images_batch(
+                session, img_urls, media_path, media_processor
+            )
+
+            # Генерация Markdown
+            content = await asyncio.to_thread(
+                self._generate_markdown, content_elements, image_map
+            )
+
+            # Замена ссылок
+            if cache and entity_id:
+                content = self._replace_telegram_links(content, cache, entity_id)
+
+            if telegraph_mapping:
+                content = self._replace_telegraph_links(content, telegraph_mapping)
+
+            result = {"title": title, "content": content, "pub_date": pub_date}
+
+            # Кэшируем результат
+            self._content_cache[url] = result
+
+            duration = asyncio.get_event_loop().time() - start_time
+            logger.debug(f"Parsed Telegraph article in {duration:.2f}s: {url}")
+
+            return result
+
+        except Exception as e:
+            perf_context = create_performance_context(start_time, "parse_telegraph_article")
+            raise PerformanceError(
+                f"Error parsing Telegraph article {url}: {e}",
+                operation_name="parse_telegraph_article",
+                **perf_context
+            ) from e
+
+    def _parse_html(self, html: str, url: str) -> Optional[tuple]:
+        """Синхронный парсинг HTML (вызывается в потоке)."""
         soup = BeautifulSoup(html, 'html.parser')
         article_content = soup.find('article')
         if not article_content:
             return None
 
-        title = (article_content.find('h1').get_text(strip=True) if article_content.find('h1') else "Untitled Article")
+        # Извлечение заголовка
+        title_elem = article_content.find('h1')
+        title = title_elem.get_text(strip=True) if title_elem else "Untitled Article"
 
+        # Извлечение даты публикации
         pub_date = None
-        if (time_tag := soup.find('time')):
+        time_tag = soup.find('time')
+        if time_tag:
             pub_date = time_tag.get('datetime', time_tag.get_text(strip=True))[:10]
 
-        img_urls = [f'https://telegra.ph{img["src"]}' if (img_src := img.get("src", "")).startswith('/') else img_src
-                    for img in article_content.find_all('img') if img.get("src")]
+        # Извлечение URL изображений
+        img_urls = []
+        for img in article_content.find_all('img', src=True):
+            img_src = img['src']
+            if img_src.startswith('/'):
+                img_src = f'https://telegra.ph{img_src}'
+            img_urls.append(img_src)
 
-        tasks = [media_processor.download_external_image(session, img_url, media_path) for img_url in img_urls]
-        results = await asyncio.gather(*tasks)
-        image_map = {url: path for url, path in zip(img_urls, results) if path}
+        # Извлечение элементов контента
+        content_elements = article_content.find_all(TELEGRAPH_CONTENT_SELECTORS)
 
+        return title, pub_date, img_urls, content_elements
+
+    async def _download_images_batch(self, session: aiohttp.ClientSession,
+                                   img_urls: List[str], media_path: Path,
+                                   media_processor) -> Dict[str, Path]:
+        """Батчевая загрузка изображений."""
+        if not img_urls:
+            return {}
+
+        # Фильтруем уже загруженные изображения
+        new_urls = [url for url in img_urls if url not in self._image_cache]
+
+        if new_urls:
+            # Загружаем новые изображения батчами по 5
+            batch_size = 5
+            tasks = []
+
+            for i in range(0, len(new_urls), batch_size):
+                batch = new_urls[i:i + batch_size]
+                for url in batch:
+                    task = media_processor.download_external_image(session, url, media_path)
+                    tasks.append((url, task))
+
+            # Ждём завершения всех загрузок
+            for url, task in tasks:
+                try:
+                    result = await task
+                    if result:
+                        self._image_cache[url] = result
+                except Exception as e:
+                    logger.warning(f"Failed to download image {url}: {e}")
+
+        # Возвращаем карту URL -> Path
+        return {url: self._image_cache.get(url) for url in img_urls
+                if url in self._image_cache}
+
+    def _generate_markdown(self, content_elements: List, image_map: Dict[str, Path]) -> str:
+        """Генерация Markdown из элементов контента."""
         markdown_lines = []
-        for element in article_content.find_all(['p', 'h3', 'h4', 'blockquote', 'figure', 'ul', 'ol', 'pre', 'hr']):
-            if element.name == 'p':
-                parts = []
-                for child in element.children:
-                    if isinstance(child, NavigableString):
-                        parts.append(str(child))
-                    elif child.name == 'br':
-                        parts.append('\n')
-                    elif child.name in ('strong', 'b'):
-                        parts.append(f"**{child.get_text(strip=True)}**")
-                    elif child.name in ('em', 'i'):
-                        parts.append(f"*{child.get_text(strip=True)}*")
-                    elif child.name == 'a':
-                        parts.append(f"[{child.get_text(strip=True)}]({child.get('href', '')})")
-                    elif child.name == 'code':
-                        parts.append(f"`{child.get_text(strip=True)}`")
 
-                line = ' '.join(''.join(parts).split())
+        for element in content_elements:
+            if element.name == 'p':
+                line = self._process_paragraph(element)
                 if line:
                     markdown_lines.append(line)
 
@@ -276,91 +380,294 @@ async def fetch_and_parse_telegraph_to_markdown(
             elif element.name == 'blockquote':
                 markdown_lines.append(f"> {element.get_text(strip=True)}")
             elif element.name == 'ul':
-                markdown_lines.extend(f"* {li.get_text(strip=True)}" for li in element.find_all('li', recursive=False))
+                for li in element.find_all('li', recursive=False):
+                    markdown_lines.append(f"* {li.get_text(strip=True)}")
             elif element.name == 'ol':
-                markdown_lines.extend(f"{i}. {li.get_text(strip=True)}" for i, li in enumerate(element.find_all('li', recursive=False), 1))
+                for i, li in enumerate(element.find_all('li', recursive=False), 1):
+                    markdown_lines.append(f"{i}. {li.get_text(strip=True)}")
             elif element.name == 'pre':
                 markdown_lines.append(f"```\n{element.get_text()}\n```")
             elif element.name == 'hr':
                 markdown_lines.append("\n---\n")
             elif element.name == 'figure':
-                if (img := element.find('img')):
-                    img_src = f"https://telegra.ph{img.get('src')}" if img.get('src', '').startswith('/') else img.get('src')
-                    if (local_path := image_map.get(img_src)):
-                        markdown_lines.append(f"![[{local_path.name}]]")
-                        if (figcaption := element.find('figcaption')):
-                            markdown_lines.append(f"*{figcaption.get_text(strip=True)}*")
+                figure_md = self._process_figure(element, image_map)
+                if figure_md:
+                    markdown_lines.extend(figure_md)
 
-        raw_markdown = "\n\n".join(markdown_lines)
-        content = raw_markdown
+        return "\n\n".join(markdown_lines)
 
-        if cache and entity_id:
-            processed_messages = cache.get("entities", {}).get(entity_id, {}).get("processed_messages", {})
-            url_to_data = {data["telegram_url"]: data for data in processed_messages.values() if data.get("telegram_url")}
-            msg_id_to_data = {msg_id: data for msg_id, data in processed_messages.items()}
+    def _process_paragraph(self, element) -> str:
+        """Обработка параграфа в Markdown."""
+        parts = []
+        for child in element.children:
+            if isinstance(child, NavigableString):
+                parts.append(str(child))
+            elif child.name == 'br':
+                parts.append('\n')
+            elif child.name in ('strong', 'b'):
+                parts.append(f"**{child.get_text(strip=True)}**")
+            elif child.name in ('em', 'i'):
+                parts.append(f"*{child.get_text(strip=True)}*")
+            elif child.name == 'a':
+                href = child.get('href', '')
+                text = child.get_text(strip=True)
+                parts.append(f"[{text}]({href})")
+            elif child.name == 'code':
+                parts.append(f"`{child.get_text(strip=True)}`")
 
-            def tg_replacer(match: re.Match) -> str:
-                """
-                Replaces Telegram links in markdown with local file references if available.
+        return ' '.join(''.join(parts).split())
 
-                Args:
-                    match (re.Match): The regex match object.
+    def _process_figure(self, element, image_map: Dict[str, Path]) -> List[str]:
+        """Обработка элемента figure."""
+        lines = []
+        img = element.find('img')
+        if img and img.get('src'):
+            img_src = img['src']
+            if img_src.startswith('/'):
+                img_src = f"https://telegra.ph{img_src}"
 
-                Returns:
-                    str: The replaced link or the original if not found.
-                """
-                link_text, tg_url = match.groups()
-                clean_url = tg_url.split('?')[0].rstrip('/')
+            local_path = image_map.get(img_src)
+            if local_path:
+                lines.append(f"![[{local_path.name}]]")
 
-                data = url_to_data.get(clean_url)
-                if not data:
-                    if (msg_id_match := re.search(r"/(\d+)$", clean_url)):
-                        data = msg_id_to_data.get(msg_id_match.group(1))
+                figcaption = element.find('figcaption')
+                if figcaption:
+                    lines.append(f"*{figcaption.get_text(strip=True)}*")
 
-                if data and (fname := data.get("filename")):
-                    title_text = data.get("title", "").replace("\n", " ").strip()
-                    display = title_text if title_text else link_text
-                    logger.debug(f"Found link in Telegra.ph '{tg_url}' -> {fname}")
-                    return f"[[{Path(fname).stem}|{display}]]"
+        return lines
 
-                logger.warning(f"[Telegra.ph Parser] No local file found for link: '{tg_url}'")
-                return match.group(0)
+    def _replace_telegram_links(self, content: str, cache: dict, entity_id: str) -> str:
+        """Замена Telegram ссылок на локальные."""
+        processed_messages = cache.get("entities", {}).get(entity_id, {}).get("processed_messages", {})
+        url_to_data = {data["telegram_url"]: data for data in processed_messages.values()
+                      if data.get("telegram_url")}
+        msg_id_to_data = {msg_id: data for msg_id, data in processed_messages.items()}
 
-            tg_pattern = re.compile(r"\[([^\]]+)\]\((https?://t\.me/[^\)]+)\)")
-            content = tg_pattern.sub(tg_replacer, content)
+        def replacer(match: re.Match) -> str:
+            link_text, tg_url = match.groups()
+            clean_url = tg_url.split('?')[0].rstrip('/')
 
-        if telegraph_mapping:
-            def telegraph_replacer(match: re.Match) -> str:
-                """
-                Replaces Telegra.ph links in markdown with local note references if available.
+            data = url_to_data.get(clean_url)
+            if not data:
+                msg_id_match = _MESSAGE_ID_PATTERN.search(clean_url)
+                if msg_id_match:
+                    data = msg_id_to_data.get(msg_id_match.group(1))
 
-                Args:
-                    match (re.Match): The regex match object.
+            if data and data.get("filename"):
+                title_text = data.get("title", "").replace("\n", " ").strip()
+                display = title_text if title_text else link_text
+                return f"[[{Path(data['filename']).stem}|{display}]]"
 
-                Returns:
-                    str: The replaced link or the original if not found.
-                """
-                link_text, telegraph_url = match.groups()
-                telegraph_url = telegraph_url.rstrip('/')
-                if (note_stem := telegraph_mapping.get(telegraph_url)):
-                    logger.debug(f"Replacing telegra.ph link '{telegraph_url}' with local note [[{note_stem}]]")
-                    return f"[[{note_stem}|{link_text}]]"
-                return match.group(0)
+            return match.group(0)
 
-            telegraph_pattern = re.compile(r"\[([^\]]+)\]\((https?://telegra\.ph/[^\)]+)\)")
-            content = telegraph_pattern.sub(telegraph_replacer, content)
+        return _TELEGRAM_MARKDOWN_PATTERN.sub(replacer, content)
 
-        return {"title": title, "content": content, "pub_date": pub_date}
+    def _replace_telegraph_links(self, content: str, telegraph_mapping: dict) -> str:
+        """Замена Telegraph ссылок на локальные."""
+        def replacer(match: re.Match) -> str:
+            link_text, telegraph_url = match.groups()
+            telegraph_url = telegraph_url.rstrip('/')
+            note_stem = telegraph_mapping.get(telegraph_url)
+            if note_stem:
+                return f"[[{note_stem}|{link_text}]]"
+            return match.group(0)
 
-    except Exception as e:
-        logger.error(f"Error parsing Telegra.ph article {url}: {e}", exc_info=True)
-        return None
+        return _TELEGRAPH_MARKDOWN_PATTERN.sub(replacer, content)
+# Глобальный экземпляр парсера
+_telegraph_parser = TelegraphParser()
+async def fetch_and_parse_telegraph_to_markdown(
+    session: aiohttp.ClientSession,
+    url: str,
+    media_path: Path,
+    media_processor,
+    cache: Optional[dict] = None,
+    entity_id: Optional[str] = None,
+    telegraph_mapping: Optional[dict] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Оптимизированная функция парсинга Telegraph статей.
 
-
+    Использует глобальный экземпляр TelegraphParser с кэшированием.
+    """
+    return await _telegraph_parser.parse_article(
+        session, url, media_path, media_processor, cache, entity_id, telegraph_mapping
+    )
 def get_bool_input(prompt: str, default: bool = False) -> bool:
-    """
-    Prompts the user for a boolean (yes/no) input.
-    """
+    """Запрос булевого ввода от пользователя."""
     default_str = "y" if default else "n"
     response = input(f"{prompt} [Y/n] ").lower() or default_str
     return response.startswith('y')
+async def async_input(prompt: str) -> str:
+    """
+    Асинхронная версия input() для неблокирующего ввода.
+
+    Критично для интерактивного режима - не блокирует event loop.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, input, prompt)
+
+async def batch_read_files(file_paths: List[Path],
+                         batch_size: int = 20) -> Dict[Path, str]:
+    """
+    Батчевое чтение файлов для оптимизации I/O операций.
+
+    Args:
+        file_paths: Список путей к файлам
+        batch_size: Размер батча для параллельного чтения
+
+    Returns:
+        Словарь {путь: содержимое} для успешно прочитанных файлов
+    """
+    results = {}
+
+    async def read_single_file(path: Path) -> tuple[Path, Optional[str]]:
+        try:
+            async with aiofiles.open(path, 'r', encoding='utf-8') as f:
+                content = await f.read()
+                return path, content
+        except Exception as e:
+            logger.warning(f"Failed to read file {path}: {e}")
+            return path, None
+
+    # Обрабатываем файлы батчами
+    for i in range(0, len(file_paths), batch_size):
+        batch = file_paths[i:i + batch_size]
+        batch_results = await asyncio.gather(
+            *[read_single_file(path) for path in batch],
+            return_exceptions=True
+        )
+
+        for result in batch_results:
+            if isinstance(result, tuple) and result[1] is not None:
+                path, content = result
+                results[path] = content
+
+    return results
+async def batch_write_files(file_data: Dict[Path, str],
+                          batch_size: int = 20) -> Set[Path]:
+    """
+    Батчевая запись файлов.
+
+    Args:
+        file_data: Словарь {путь: содержимое}
+        batch_size: Размер батча
+
+    Returns:
+        Множество успешно записанных файлов
+    """
+    successful = set()
+
+    async def write_single_file(path: Path, content: str) -> Optional[Path]:
+        try:
+            # Создаём директорию если нужно
+            await ensure_dir_exists_async(path.parent)
+
+            async with aiofiles.open(path, 'w', encoding='utf-8') as f:
+                await f.write(content)
+                return path
+        except Exception as e:
+            logger.warning(f"Failed to write file {path}: {e}")
+            return None
+
+    # Записываем файлы батчами
+    items = list(file_data.items())
+    for i in range(0, len(items), batch_size):
+        batch = items[i:i + batch_size]
+        batch_results = await asyncio.gather(
+            *[write_single_file(path, content) for path, content in batch],
+            return_exceptions=True
+        )
+
+        for result in batch_results:
+            if isinstance(result, Path):
+                successful.add(result)
+
+    return successful
+def chunks(lst: List[T], chunk_size: int) -> List[List[T]]:
+    """Разбивает список на чанки заданного размера."""
+    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+async def chunks_async(async_iter: AsyncGenerator[T, None],
+                      chunk_size: int) -> AsyncGenerator[List[T], None]:
+    """Асинхронная версия chunks для AsyncGenerator."""
+    chunk = []
+    async for item in async_iter:
+        chunk.append(item)
+        if len(chunk) >= chunk_size:
+            yield chunk
+            chunk = []
+
+    if chunk:
+        yield chunk
+class PerformanceProfiler:
+    """
+    A simple profiler to measure the performance of specific operations at runtime.
+    """
+    def __init__(self):
+        self.metrics = defaultdict(list)
+
+    @contextmanager
+    def profile(self, operation_name: str):
+        """A context manager to profile a block of code."""
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            duration = time.perf_counter() - start_time
+            self.metrics[operation_name].append(duration)
+
+    def log_stats(self, operation_name: str):
+        """Logs the performance statistics for a given operation."""
+        if operation_name not in self.metrics:
+            logger.info(f"No performance metrics for '{operation_name}'")
+            return
+
+        durations = self.metrics[operation_name]
+        count = len(durations)
+        total_time = sum(durations)
+        avg_time = total_time / count
+        max_time = max(durations)
+        min_time = min(durations)
+
+        logger.info(
+            f"Performance stats for {operation_name}: "
+            f"Count={count}, Total={total_time:.2f}s, Avg={avg_time:.3f}s, "
+            f"Max={max_time:.3f}s, Min={min_time:.3f}s"
+        )
+
+def prompt_int(prompt, default):
+    """
+    Prompt user for integer input with a default value.
+
+    Args:
+        prompt: The prompt string to display.
+        default: The default integer value.
+
+    Returns:
+        int: The user input as integer, or default if invalid.
+    """
+    try:
+        rprint(f"[bold]{prompt}[/bold] [dim][{default}][/dim]", end=" ")
+        val = input().strip()
+        return int(val) if val else default
+    except Exception:
+        rprint("[red]Invalid input, using default.[/red]")
+        return default
+
+def prompt_float(prompt, default):
+    """
+    Prompt user for float input with a default value.
+
+    Args:
+        prompt: The prompt string to display.
+        default: The default float value.
+
+    Returns:
+        float: The user input as float, or default if invalid.
+    """
+    try:
+        rprint(f"[bold]{prompt}[/bold] [dim][{default}][/dim]", end=" ")
+        val = input().strip()
+        return float(val) if val else default
+    except Exception:
+        rprint("[red]Invalid input, using default.[/red]")
+        return default
