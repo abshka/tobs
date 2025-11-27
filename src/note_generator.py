@@ -643,18 +643,6 @@ class NoteGenerator:
 """
         return header
 
-    async def append_message_to_topic_note(self, note_path: Path, message_content: str):
-        try:
-            if note_path.exists():
-                async with aiofiles.open(note_path, "a", encoding="utf-8") as f:
-                    await f.write(f"\n{message_content}\n")
-            else:
-                async with aiofiles.open(note_path, "w", encoding="utf-8") as f:
-                    await f.write(f"{message_content}\n")
-        except Exception as e:
-            logger.error(f"Error appending to topic note {note_path}: {e}")
-            raise
-
     def _format_media_info(self, message: Any, relative_media_path: str) -> str:
         if not message.media:
             return ""
@@ -758,12 +746,15 @@ class NoteGenerator:
             self._buffer_locks[note_path] = asyncio.Lock()
         return self._buffer_locks[note_path]
 
-    async def append_message_to_topic_note_buffered(
+    async def append_message_to_topic_note(
         self, note_path: Path, message_content: str
     ):
         """
-        Буферизованная запись сообщения в файл (оптимизация #3).
+        Запись сообщения в файл с буферизацией (оптимизировано).
         Накапливает несколько сообщений перед записью на диск.
+        
+        Note: Обязательно вызовите flush_all_buffers() или shutdown() 
+        перед завершением работы!
         """
         lock = await self._get_buffer_lock(note_path)
         async with lock:

@@ -154,6 +154,7 @@ async def run_export(args, config: Config) -> None:
     telegram_manager = None
     media_processor = None
     http_session = None
+    note_generator = None
 
     try:
         # Initialize core systems
@@ -253,6 +254,8 @@ async def run_export(args, config: Config) -> None:
     finally:
         # Cleanup
         rprint("[bold cyan]Cleaning up...[/bold cyan]")
+        if note_generator:
+            await note_generator.shutdown()
         if http_session:
             await http_session.close()
         if media_processor:
@@ -265,6 +268,13 @@ async def run_export(args, config: Config) -> None:
 
 async def async_main():
     """Async main entry point."""
+    # Initialize variables for cleanup
+    core_manager = None
+    telegram_manager = None
+    http_session = None
+    media_processor = None
+    note_generator = None
+    
     # Setup signal handlers
     signal.signal(signal.SIGINT, handle_sigint)
 
@@ -382,6 +392,8 @@ async def async_main():
                         )
 
                 finally:
+                    if note_generator:
+                        await note_generator.shutdown()
                     if http_session:
                         await http_session.close()
             else:
