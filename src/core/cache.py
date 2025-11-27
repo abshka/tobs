@@ -3,7 +3,6 @@
 """
 
 import asyncio
-import json
 import logging
 import pickle
 import time
@@ -15,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 import aiofiles
+import orjson
 
 logger = logging.getLogger(__name__)
 
@@ -196,9 +196,8 @@ class CacheManager:
             elif isinstance(data, bytes):
                 raw_data = data
             else:
-                # Для сложных объектов сериализуем в JSON
-                json_str = json.dumps(data, ensure_ascii=False, default=str)
-                raw_data = json_str.encode("utf-8")
+                # Для сложных объектов сериализуем в JSON с помощью orjson
+                raw_data = orjson.dumps(data, option=orjson.OPT_NON_STR_KEYS)
 
             if len(raw_data) < self.compression_threshold:
                 return data, False, "none"
@@ -230,12 +229,12 @@ class CacheManager:
         try:
             if compression_type == "gzip":
                 decompressed_bytes = zlib.decompress(data)
-                decompressed_str = decompressed_bytes.decode("utf-8")
-                # Пытаемся распарсить как JSON, если не получается - возвращаем строку
+                # Используем orjson для разбора JSON
                 try:
-                    return json.loads(decompressed_str)
-                except json.JSONDecodeError:
-                    return decompressed_str
+                    return orjson.loads(decompressed_bytes)
+                except orjson.JSONDecodeError:
+                    # Если не JSON, возвращаем как строку
+                    return decompressed_bytes.decode("utf-8")
             elif compression_type == "pickle":
                 return pickle.loads(zlib.decompress(data))
         except Exception as e:
@@ -362,14 +361,14 @@ class CacheManager:
             return
 
         try:
-            async with aiofiles.open(self.cache_path, "r", encoding="utf-8") as f:
+            async with aiofiles.open(self.cache_path, "rb") as f:
                 content = await f.read()
 
             if not content.strip():
                 logger.info("Cache file is empty")
                 return
 
-            data = json.loads(content)
+            data = orjson.loads(content)
 
             if isinstance(data, dict) and "entries" in data:
                 entries_data = data["entries"]
@@ -397,7 +396,7 @@ class CacheManager:
 
                 logger.info(f"Loaded {loaded_count} cache entries")
 
-        except json.JSONDecodeError as e:
+        except orjson.JSONDecodeError as e:
             logger.error(f"Invalid JSON in cache file: {e}")
             await self._try_restore_from_backup()
         except Exception as e:
@@ -411,10 +410,10 @@ class CacheManager:
             return
 
         try:
-            async with aiofiles.open(self.backup_path, "r", encoding="utf-8") as f:
+            async with aiofiles.open(self.backup_path, "rb") as f:
                 content = await f.read()
 
-            data = json.loads(content)
+            data = orjson.loads(content)
             # Аналогично загрузке основного файла
             if isinstance(data, dict) and "entries" in data:
                 entries_data = data["entries"]
@@ -442,11 +441,9 @@ class CacheManager:
         try:
             # Создаем резервную копию
             if self.cache_path.exists():
-                async with aiofiles.open(self.cache_path, "r", encoding="utf-8") as src:
+                async with aiofiles.open(self.cache_path, "rb") as src:
                     content = await src.read()
-                async with aiofiles.open(
-                    self.backup_path, "w", encoding="utf-8"
-                ) as dst:
+                async with aiofiles.open(self.backup_path, "wb") as dst:
                     await dst.write(content)
 
             # Подготавливаем данные
@@ -465,11 +462,14 @@ class CacheManager:
                         if isinstance(entries_dict, dict):
                             entries_dict[key] = asdict(entry)
 
-            # Сохраняем
-            json_str = json.dumps(cache_data, ensure_ascii=False, indent=2, default=str)
+            # Сохраняем с orjson (гораздо быстрее)
+            json_bytes = orjson.dumps(
+                cache_data,
+                option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS
+            )
 
-            async with aiofiles.open(self.cache_path, "w", encoding="utf-8") as f:
-                await f.write(json_str)
+            async with aiofiles.open(self.cache_path, "wb") as f:
+                await f.write(json_bytes)
 
             self._dirty = False
             logger.debug(f"Cache saved with {len(self._cache)} entries")

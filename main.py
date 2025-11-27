@@ -176,8 +176,13 @@ async def run_export(args, config: Config) -> None:
         )
         await telegram_manager.connect()
 
-        # Initialize HTTP session
-        http_session = aiohttp.ClientSession()
+        # Initialize HTTP session with optimized connection pooling
+        connector = aiohttp.TCPConnector(
+            limit=100,              # Total connection pool size
+            limit_per_host=30,      # Connections per host
+            ttl_dns_cache=300,      # DNS cache TTL (5 min)
+        )
+        http_session = aiohttp.ClientSession(connector=connector)
 
         # Initialize Media Processor (Phase 3 integration)
         rprint("[bold cyan]Initializing media processor...[/bold cyan]")
@@ -327,8 +332,13 @@ async def async_main():
                 connection_manager = core_manager.get_connection_manager()
                 performance_monitor = core_manager.get_performance_monitor()
 
-                # Initialize HTTP session
-                http_session = aiohttp.ClientSession()
+                # Initialize HTTP session with optimized connection pooling
+                connector = aiohttp.TCPConnector(
+                    limit=100,              # Total connection pool size
+                    limit_per_host=30,      # Connections per host
+                    ttl_dns_cache=300,      # DNS cache TTL (5 min)
+                )
+                http_session = aiohttp.ClientSession(connector=connector)
 
                 try:
                     # Initialize Media Processor

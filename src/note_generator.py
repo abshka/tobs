@@ -1,6 +1,7 @@
 import asyncio
 import urllib.parse
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -46,6 +47,13 @@ class NoteGenerator:
         self.connection_manager = connection_manager
         self.cache_manager = cache_manager
         self.file_locks: Dict[Path, asyncio.Lock] = {}
+        
+        # Буферизация записи (оптимизация #3)
+        self._write_buffers: Dict[Path, List[str]] = {}
+        self._buffer_locks: Dict[Path, asyncio.Lock] = {}
+        self._buffer_size = 10  # Сколько сообщений буферизировать
+        self._flush_task: Optional[asyncio.Task] = None
+        self._shutdown = False
 
     async def create_note(
         self,
@@ -742,3 +750,70 @@ class NoteGenerator:
                 f"Error formatting message {getattr(message, 'id', 'unknown')}: {e}"
             )
             return f"\n---\n## Сообщение {getattr(message, 'id', 'unknown')}\n**Ошибка форматирования**\n\n"
+
+
+    async def _get_buffer_lock(self, note_path: Path) -> asyncio.Lock:
+        """Получить или создать lock для буфера файла."""
+        if note_path not in self._buffer_locks:
+            self._buffer_locks[note_path] = asyncio.Lock()
+        return self._buffer_locks[note_path]
+
+    async def append_message_to_topic_note_buffered(
+        self, note_path: Path, message_content: str
+    ):
+        """
+        Буферизованная запись сообщения в файл (оптимизация #3).
+        Накапливает несколько сообщений перед записью на диск.
+        """
+        lock = await self._get_buffer_lock(note_path)
+        async with lock:
+            # Инициализируем буфер если нужно
+            if note_path not in self._write_buffers:
+                self._write_buffers[note_path] = []
+            
+            # Добавляем сообщение в буфер
+            self._write_buffers[note_path].append(message_content)
+            
+            # Если буфер полон, сбрасываем на диск
+            if len(self._write_buffers[note_path]) >= self._buffer_size:
+                await self._flush_buffer(note_path)
+
+    async def _flush_buffer(self, note_path: Path):
+        """Сбросить буфер на диск."""
+        if note_path not in self._write_buffers or not self._write_buffers[note_path]:
+            return
+        
+        try:
+            # Собираем все сообщения из буфера
+            messages = self._write_buffers[note_path]
+            content = "\n" + "\n".join(messages) + "\n"
+            
+            # Записываем все сразу
+            if note_path.exists():
+                async with aiofiles.open(note_path, "a", encoding="utf-8") as f:
+                    await f.write(content)
+            else:
+                async with aiofiles.open(note_path, "w", encoding="utf-8") as f:
+                    await f.write(content)
+            
+            # Очищаем буфер
+            self._write_buffers[note_path] = []
+            logger.debug(f"Flushed {len(messages)} messages to {note_path.name}")
+            
+        except Exception as e:
+            logger.error(f"Error flushing buffer for {note_path}: {e}")
+            raise
+
+    async def flush_all_buffers(self):
+        """Сбросить все буферы на диск (вызывать перед завершением)."""
+        for note_path in list(self._write_buffers.keys()):
+            lock = await self._get_buffer_lock(note_path)
+            async with lock:
+                await self._flush_buffer(note_path)
+        logger.info(f"Flushed all write buffers ({len(self._write_buffers)} files)")
+
+    async def shutdown(self):
+        """Корректное завершение работы."""
+        self._shutdown = True
+        await self.flush_all_buffers()
+        logger.info("NoteGenerator shutdown complete")

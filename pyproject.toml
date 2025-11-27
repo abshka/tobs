@@ -44,11 +44,11 @@ dependencies = [
   "soupsieve==2.8",
   "telethon==1.41.0",
   "typing-extensions==4.15.0",
-  "ujson==5.11.0",
   "urllib3==2.5.0",
   "win32-setctime==1.2.0; sys_platform == 'win32'",
   "yarl==1.20.1",
   "faster-whisper>=1.1.0",
+  "orjson>=3.11.4",
 ]
 
 [dependency-groups]

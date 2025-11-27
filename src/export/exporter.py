@@ -283,11 +283,12 @@ class Exporter:
                     logger.info(f"📊 Starting streaming export for {entity_name}...")
 
                     # Retry loop for FloodWaitError with single-pass processing
-                    max_retries = 3
+                    max_retries = 10  # Increased from 3 to handle persistent FloodWait
                     retry_count = 0
                     processing_started = False
                     # Track offset for resuming after FloodWait
                     current_offset_id = 0
+                    consecutive_flood_waits = 0
 
                     while retry_count < max_retries:
                         try:
@@ -329,6 +330,8 @@ class Exporter:
                                                 cache_key, entity_data
                                             )
                                             entity_reporter.save_metrics()
+                                            # Reset consecutive flood waits on successful batch
+                                            consecutive_flood_waits = 0
                                             logger.info(
                                                 f"💾 Periodic save: {message_count} messages processed for {entity_name}"
                                             )
@@ -473,9 +476,17 @@ class Exporter:
 
                         except FloodWaitError as e:
                             retry_count += 1
+                            consecutive_flood_waits += 1
                             wait_time = e.seconds
+                            
+                            # Add exponential backoff buffer (caps at 60s extra)
+                            backoff_buffer = min(consecutive_flood_waits * 5, 60)
+                            total_wait = wait_time + backoff_buffer
+                            
                             logger.warning(
-                                f"⏳ FloodWait detected: need to wait {wait_time}s (attempt {retry_count}/{max_retries})"
+                                f"⏳ FloodWait detected: Telegram requires {wait_time}s wait "
+                                f"(+ {backoff_buffer}s buffer = {total_wait}s total) "
+                                f"(attempt {retry_count}/{max_retries})"
                             )
                             logger.info(
                                 f"  📍 Current progress: {message_count} messages processed, last message ID: {current_offset_id}"
@@ -483,16 +494,37 @@ class Exporter:
                             logger.info(
                                 f"  🔄 Will resume from message ID: {current_offset_id} (offset_id parameter)"
                             )
+                            
                             if retry_count < max_retries:
                                 logger.info(
-                                    f"⏱️  Waiting {wait_time + 1} seconds before retry..."
+                                    f"⏱️  Waiting {total_wait} seconds before retry..."
                                 )
-                                await asyncio.sleep(wait_time + 1)
+                                # Update progress bar to show we're waiting
+                                progress.update(
+                                    task_id_progress,
+                                    description=f"[yellow]⏳ FloodWait: waiting {total_wait}s (retry {retry_count}/{max_retries})[/yellow]",
+                                )
+                                await asyncio.sleep(total_wait)
+                                
+                                # Reset description after wait
+                                progress.update(
+                                    task_id_progress,
+                                    description=f"[cyan]Exporting {entity_name}... (resuming)",
+                                )
+                                logger.info("🔄 Resuming export after FloodWait...")
                             else:
                                 logger.error(
-                                    "❌ Max retries reached for FloodWait, aborting"
+                                    f"❌ Max retries ({max_retries}) reached for FloodWait"
                                 )
-                                raise
+                                logger.warning(
+                                    f"⚠️  Partial export completed: {message_count} messages saved to {chat_file}"
+                                )
+                                # Don't raise - allow partial export to be saved
+                                entity_reporter.record_error(
+                                    "FloodWait max retries exceeded",
+                                    {"messages_processed": message_count, "media_downloaded": media_count}
+                                )
+                                break  # Exit retry loop with partial results
 
             # Update total messages count in file
             await self._update_message_count(chat_file, message_count)

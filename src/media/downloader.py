@@ -124,6 +124,7 @@ class MediaDownloader:
         self._persistent_download_attempts += 1
 
         temp_path = self.temp_dir / f"persistent_{message.id}.tmp"
+        MAX_PERSISTENT_ATTEMPTS = 50  # Абсолютный лимит попыток
         max_consecutive_failures = 5
         attempt = 0
         consecutive_failures = 0
@@ -133,7 +134,7 @@ class MediaDownloader:
             f"🔄 Starting persistent download for message {message.id}: {file_size_mb:.2f} MB"
         )
 
-        while True:
+        while attempt < MAX_PERSISTENT_ATTEMPTS:
             attempt += 1
 
             # Проверяем текущий размер файла
@@ -249,6 +250,12 @@ class MediaDownloader:
                         )
                         self._persistent_download_successes += 1
                         return temp_path
+                    # Если использовали > 80% попыток, прекращаем
+                    elif attempt >= MAX_PERSISTENT_ATTEMPTS * 0.8:
+                        logger.error(
+                            f"❌ Giving up after {attempt} attempts ({completion_percent:.1f}% complete)"
+                        )
+                        return None
                     else:
                         # Слишком мало данных, перезапускаем с чистого листа
                         logger.warning(
