@@ -406,6 +406,10 @@ class Config:
     process_images: bool = True  # По умолчанию включено
     deferred_processing: bool = True  # 🚀 NEW: Process media AFTER export to save CPU/Network bandwidth
 
+    # 🚀 Async media download - downloads happen in background, don't block message export
+    async_media_download: bool = True  # Enable background download queue
+    async_download_workers: int = 0  # 0 = auto (derived from performance.download_workers)
+
     # Audio transcription settings (v3.0.0)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     transcription_timeout: float = 1800.0  # 30 minutes for individual transcription
@@ -483,6 +487,11 @@ class Config:
             self.performance = PerformanceSettings.auto_configure(
                 self.performance_profile
             )
+
+        # 🚀 Auto-configure async_download_workers from performance settings
+        if self.async_download_workers == 0:
+            # Derive from performance.download_workers (typically 1/3 to avoid overwhelming Telegram)
+            self.async_download_workers = max(3, self.performance.download_workers // 3)
 
         # Если путь к кэшу не абсолютный — делаем его относительным к export_path
         if not Path(self.cache_file).is_absolute():
@@ -620,9 +629,12 @@ class Config:
         logger.info(
             f"Workers: {self.performance.workers}, Download workers: {self.performance.download_workers}"
         )
+        logger.info(f"Async download workers: {self.async_download_workers}")
         logger.info(f"Memory limit: {self.performance.memory_limit_mb}MB")
         logger.info(f"Export path: {self.export_path}")
         logger.info(f"Cache file: {self.cache_file}")
+        logger.info(f"Takeout enabled: {self.use_takeout}")
+        logger.info(f"Async media download: {self.async_media_download}")
 
     def add_export_target(self, target: ExportTarget):
         """Добавить новую цель экспорта если её ещё нет."""
@@ -866,6 +878,9 @@ class Config:
                 ),
                 "sharding_enabled": _parse_bool(os.getenv("SHARDING_ENABLED"), False),
                 "shard_count": int(os.getenv("SHARD_COUNT", "4")),
+                # Async media download
+                "async_media_download": _parse_bool(os.getenv("ASYNC_MEDIA_DOWNLOAD"), True),
+                "async_download_workers": int(os.getenv("ASYNC_DOWNLOAD_WORKERS", "0")),  # 0 = auto
                 "log_level": os.getenv("LOG_LEVEL", "INFO"),
                 # Производительность
                 "performance_profile": performance_profile,
