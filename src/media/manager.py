@@ -469,7 +469,7 @@ class MediaProcessor:
         elif media_type == "audio":
             return self.config.download_audio
         else:
-            # "document", "webpage", "unknown", stickers, etc.
+            # "document", "webpage", "unknown", "sticker", etc.
             return self.config.download_other
 
     def _determine_media_type(self, message: Message) -> Optional[str]:
@@ -484,7 +484,18 @@ class MediaProcessor:
             return "photo"
         elif media_type == "MessageMediaDocument":
             if hasattr(media, "document") and media.document:
-                mime_type = getattr(media.document, "mime_type", "")
+                doc = media.document
+                
+                # Check for sticker attribute first (stickers have image/* mime but are "other")
+                if hasattr(doc, "attributes") and doc.attributes:
+                    for attr in doc.attributes:
+                        attr_name = type(attr).__name__
+                        if attr_name == "DocumentAttributeSticker":
+                            return "sticker"  # Stickers go to "other" category
+                        elif attr_name == "DocumentAttributeAnimated":
+                            return "sticker"  # Animated stickers too
+                
+                mime_type = getattr(doc, "mime_type", "")
                 if mime_type.startswith("video/"):
                     return "video"
                 elif mime_type.startswith("audio/"):
