@@ -122,7 +122,9 @@ class MetadataExtractor:
                     return metadata
 
                 except Exception as e:
-                    logger.warning(f"FFmpeg probe failed for {file_path}: {e}")
+                    # Only log as warning if file size > 0, otherwise it's expected for empty files
+                    if file_path.exists() and file_path.stat().st_size > 0:
+                        logger.warning(f"FFmpeg probe failed for {file_path}: {e}")
                     return {}
 
             return await loop.run_in_executor(self.io_executor, probe_file)

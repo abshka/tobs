@@ -6,12 +6,12 @@ Provides modular user interface functionality.
 
 import asyncio
 from pathlib import Path
-from typing import List, Literal, cast
+from typing import List, Literal, Optional, cast
 
 from rich import print as rprint
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
+from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
 from ..config import Config, ExportTarget
@@ -178,13 +178,16 @@ class InteractiveUI:
 
             entity_map = {}
             for i, entity in enumerate(page_entities, 1):
-                entity_type = type(entity).__name__
+                # Use our smart type detection instead of raw type name
+                entity_type = self._get_entity_type(entity)
+                # Capitalize for display
+                display_type = entity_type.replace("_", " ").title()
                 entity_id = getattr(entity, "id", "Unknown")
                 entity_title = getattr(
                     entity, "title", getattr(entity, "username", str(entity_id))
                 )
 
-                table.add_row(str(i), entity_title, entity_type, str(entity_id))
+                table.add_row(str(i), entity_title, display_type, str(entity_id))
                 entity_map[i] = entity
 
             self.console.print(table)
@@ -229,18 +232,41 @@ class InteractiveUI:
                         for num in selected_nums:
                             if num in entity_map:
                                 entity = entity_map[num]
-                                target = ExportTarget(
-                                    id=entity.id,
-                                    name=get_entity_display_name(entity),
-                                    type=self._get_entity_type(entity),
-                                )
-                                # Check if already added and add using proper method
-                                if not any(
-                                    t.id == target.id
+                                entity_type = self._get_entity_type(entity)
+                                entity_name = get_entity_display_name(entity)
+
+                                # Check if already added
+                                if any(
+                                    t.id == entity.id
                                     for t in self.config.export_targets
                                 ):
-                                    self.config.add_export_target(target)
-                                    added_count += 1
+                                    rprint(
+                                        f"[yellow]Target '{entity_name}' is already added.[/yellow]"
+                                    )
+                                    continue
+
+                                # Different handling based on entity type
+                                if entity_type == "forum":
+                                    # Handle forum selection (show topics)
+                                    await self._handle_forum_target_selection(
+                                        entity, entity_name
+                                    )
+                                elif entity_type in ["channel", "chat"]:
+                                    # Handle channel/group with message range selection
+                                    await self._handle_regular_target_selection(
+                                        entity, entity_name, entity_type
+                                    )
+                                elif entity_type == "user":
+                                    # Handle user (private chat) with message range selection
+                                    await self._handle_regular_target_selection(
+                                        entity, entity_name, entity_type
+                                    )
+                                else:
+                                    rprint(
+                                        f"[yellow]Unknown entity type: {entity_type}[/yellow]"
+                                    )
+
+                                added_count += 1
 
                         if added_count > 0:
                             rprint(f"[green]Added {added_count} target(s).[/green]")
@@ -256,6 +282,175 @@ class InteractiveUI:
                         "[red]Invalid input. Please enter numbers separated by commas or spaces.[/red]"
                     )
                     input("\nPress Enter to continue...")
+
+    async def _handle_regular_target_selection(
+        self, entity, entity_name: str, entity_type: str
+    ):
+        """
+        Handle selection for regular targets (channels, chats, users) with message range options.
+        """
+        # Show message ID preview
+        latest_id = await self._show_message_id_preview(entity, entity_name)
+
+        # Ask user to choose input method
+        input_mode = Prompt.ask(
+            f"\n[cyan]How do you want to specify the export range for '{entity_name}'?[/cyan]",
+            choices=["all", "last", "from_id"],
+            default="all",
+        )
+
+        start_message_id = 0  # Default: all messages
+
+        if input_mode == "last":
+            # User wants last N messages
+            last_n_input = Prompt.ask(
+                "[cyan]How many last messages to export?[/cyan]\n"
+                "[dim](e.g., 50, 100, 500)[/dim]",
+                default="100",
+            ).strip()
+
+            try:
+                last_n = int(last_n_input)
+                if last_n <= 0:
+                    rprint("[yellow]Invalid count, using all messages[/yellow]")
+                    start_message_id = 0
+                elif latest_id is not None:
+                    # Calculate start_message_id from latest_id - N + 1
+                    calculated_id = max(0, latest_id - last_n + 1)
+                    start_message_id = calculated_id
+                    rprint(
+                        f"[green]✓ Will export last {last_n} messages (from ID {calculated_id})[/green]"
+                    )
+                else:
+                    rprint(
+                        "[yellow]⚠️  Could not determine latest message ID, using all messages[/yellow]"
+                    )
+                    start_message_id = 0
+            except ValueError:
+                rprint("[yellow]Invalid input, using all messages[/yellow]")
+                start_message_id = 0
+
+        elif input_mode == "from_id":
+            # User wants to specify exact message ID
+            start_id_input = Prompt.ask(
+                "[cyan]Start from message ID?[/cyan]\n[dim](Enter message ID)[/dim]",
+                default="0",
+            ).strip()
+
+            try:
+                start_message_id = int(start_id_input)
+                if start_message_id < 0:
+                    start_message_id = 0
+                    rprint("[yellow]Invalid ID, using 0 (all messages)[/yellow]")
+                elif start_message_id > 0:
+                    rprint(
+                        f"[green]✓ Will start from message ID: {start_message_id}[/green]"
+                    )
+            except ValueError:
+                start_message_id = 0
+                rprint("[yellow]Invalid input, using 0 (all messages)[/yellow]")
+
+        # Create and add target
+        target = ExportTarget(
+            id=entity.id,
+            name=entity_name,
+            type=entity_type,
+            start_message_id=start_message_id,
+        )
+        self.config.add_export_target(target)
+        rprint(f"[green]✓ Added: {entity_name}[/green]")
+
+    async def _handle_forum_target_selection(self, entity, entity_name: str):
+        """
+        Handle selection for forum targets with topic selection.
+        """
+        rprint(f"\n[cyan]📋 '{entity_name}' is a forum with topics[/cyan]")
+
+        # Fetch forum topics
+        rprint("[dim]Fetching forum topics...[/dim]")
+        try:
+            topics = await self.telegram_manager.get_forum_topics(entity)
+        except Exception as e:
+            logger.error(f"Failed to fetch forum topics for {entity_name}: {e}")
+            rprint(f"[red]✗ Error fetching forum topics: {e}[/red]")
+            rprint(
+                "[yellow]This forum might be inaccessible or have restricted permissions[/yellow]"
+            )
+            return
+
+        if not topics:
+            rprint("[yellow]⚠️  No topics found in this forum[/yellow]")
+            rprint(
+                "[dim]This could mean the forum is empty or you don't have access[/dim]"
+            )
+            return
+
+        # Display topics (all topics including closed ones)
+        rprint(f"\n[bold cyan]Available topics in '{entity_name}':[/bold cyan]")
+        for i, topic in enumerate(topics, 1):
+            status = ""
+            if topic.is_pinned:
+                status += " 📌"
+            if topic.is_closed:
+                status += " 🔒"
+            rprint(f"  {i}. {topic.title} ({topic.message_count} messages){status}")
+
+        # Ask user what to export
+        rprint("\n[bold]What would you like to export?[/bold]")
+        export_choice = Prompt.ask(
+            "[cyan]Choose option[/cyan]",
+            choices=["all", "select", "cancel"],
+            default="all",
+        )
+
+        if export_choice == "cancel":
+            rprint("[dim]Cancelled forum selection[/dim]")
+            return
+
+        if export_choice == "all":
+            # Export all topics
+            target = ExportTarget(
+                id=entity.id,
+                name=entity_name,
+                type="forum",
+                is_forum=True,
+                export_all_topics=True,
+            )
+            self.config.add_export_target(target)
+            rprint(f"[green]✓ Added all topics from: {entity_name}[/green]")
+
+        elif export_choice == "select":
+            # Export specific topics
+            selection = Prompt.ask(
+                "[cyan]Enter topic numbers (comma-separated, e.g., 1,3,5)[/cyan]"
+            ).strip()
+
+            try:
+                selected_indices = [int(x.strip()) - 1 for x in selection.split(",")]
+                added_topics = []
+
+                for idx in selected_indices:
+                    if 0 <= idx < len(topics):
+                        topic = topics[idx]
+                        target = ExportTarget(
+                            id=entity.id,
+                            name=f"{entity_name} > {topic.title}",
+                            type="forum_topic",
+                            topic_id=topic.topic_id,
+                            is_forum=True,
+                            export_all_topics=False,
+                        )
+                        self.config.add_export_target(target)
+                        added_topics.append(topic.title)
+                    else:
+                        rprint(f"[yellow]⚠️  Invalid topic number: {idx + 1}[/yellow]")
+
+                if added_topics:
+                    rprint(f"[green]✓ Added {len(added_topics)} topic(s):[/green]")
+                    for topic_title in added_topics:
+                        rprint(f"  • {topic_title}")
+            except ValueError:
+                rprint("[red]Invalid format. Please use comma-separated numbers.[/red]")
 
     async def _add_target_by_link(self):
         """
@@ -280,8 +475,17 @@ class InteractiveUI:
         try:
             rprint("\n[cyan]Resolving target...[/cyan]")
 
+            # Use robust link parser first
+            from src.utils import LinkParser
+            parsed = LinkParser.parse(link_input)
+            
+            resolve_input = link_input
+            if parsed and parsed["peer"]:
+                resolve_input = parsed["peer"]
+                rprint(f"[dim]Detected peer from link: {resolve_input}[/dim]")
+
             # Attempt to resolve the entity
-            entity = await self.telegram_manager.resolve_entity(link_input)
+            entity = await self.telegram_manager.resolve_entity(resolve_input)
 
             if not entity:
                 rprint(
@@ -307,21 +511,23 @@ class InteractiveUI:
                 input("\nPress Enter to continue...")
                 return
 
-            # Create and add target
-            target = ExportTarget(
-                id=entity_id,
-                name=entity_name,
-                type=self._get_entity_type(entity),
-            )
+            # Different handling based on entity type
+            entity_type = self._get_entity_type(entity)
 
-            self.config.add_export_target(target)
+            if entity_type == "forum":
+                # Handle forum selection (show topics)
+                await self._handle_forum_target_selection(entity, entity_name)
+            elif entity_type in ["channel", "chat", "user"]:
+                # Handle channel/group/user with message range selection
+                await self._handle_regular_target_selection(
+                    entity, entity_name, entity_type
+                )
+            else:
+                rprint(f"[yellow]Unknown entity type: {entity_type}[/yellow]")
+                input("\nPress Enter to continue...")
+                return
 
-            rprint(
-                f"\n[green]✓ Successfully added target:[/green]\n"
-                f"  Name: {entity_name}\n"
-                f"  ID: {entity_id}\n"
-                f"  Type: {target.type}"
-            )
+            rprint(f"\n[green]✓ Successfully added target: {entity_name}[/green]")
             input("\nPress Enter to continue...")
 
         except Exception as e:
@@ -345,7 +551,127 @@ class InteractiveUI:
             "ChannelForbidden": "channel",
         }
 
-        return type_mapping.get(entity_type, "unknown")
+        base_type = type_mapping.get(entity_type, "unknown")
+
+        # Check if it's a forum (Channel with forum=True)
+        if base_type == "channel" and hasattr(entity, "forum") and entity.forum:
+            return "forum"
+
+        return base_type
+
+    async def _show_message_id_preview(self, entity, entity_name: str) -> Optional[int]:
+        """
+        Fetch and display message ID information for an entity.
+        Shows latest message ID, approximate total, and recent message previews.
+
+        Args:
+            entity: Telegram entity to preview
+            entity_name: Display name of the entity
+
+        Returns:
+            Latest message ID if found, None otherwise
+        """
+        try:
+            rprint(
+                f"\n[cyan]📊 Fetching message information for '{entity_name}'...[/cyan]"
+            )
+
+            # Fetch latest 3 messages for preview
+            messages = []
+            async for msg in self.telegram_manager.client.iter_messages(
+                entity, limit=3
+            ):
+                if msg:  # Skip empty messages
+                    messages.append(msg)
+
+            if not messages:
+                rprint("[yellow]⚠️  No messages found in this chat[/yellow]")
+                return None
+
+            # Display message ID information
+            latest = messages[0]
+            # Convert UTC to local timezone
+            if latest.date:
+                if latest.date.tzinfo is None:
+                    import datetime
+
+                    latest_date_utc = latest.date.replace(tzinfo=datetime.timezone.utc)
+                else:
+                    latest_date_utc = latest.date
+                local_date = latest_date_utc.astimezone()
+                latest_date = local_date.strftime("%b %d, %H:%M")
+            else:
+                latest_date = "Unknown"
+
+            rprint(f"\n[bold cyan]📊 Message ID Information:[/bold cyan]")
+            rprint(f"Latest message ID: [cyan]{latest.id}[/cyan] ({latest_date})\n")
+
+            # Display recent message previews
+            rprint("[bold]Recent messages preview:[/bold]")
+            # Reverse messages to show in chronological order (oldest -> newest)
+            for i, msg in enumerate(reversed(messages)):
+                # Get message text or media indicator
+                if msg.text:
+                    text = msg.text.replace("\n", " ")  # Remove newlines
+                    if len(text) > 50:
+                        text = text[:50] + "..."
+                elif msg.media:
+                    text = f"[{self._get_media_type(msg)}]"
+                else:
+                    text = "[empty message]"
+
+                # Format message date (convert UTC to local)
+                if msg.date:
+                    import datetime
+
+                    if msg.date.tzinfo is None:
+                        msg_date_utc = msg.date.replace(tzinfo=datetime.timezone.utc)
+                    else:
+                        msg_date_utc = msg.date
+                    local_msg_date = msg_date_utc.astimezone()
+                    msg_date = local_msg_date.strftime("%b %d, %H:%M")
+                else:
+                    msg_date = "?"
+
+                # Display with nice formatting
+                connector = "├─" if i < len(messages) - 1 else "└─"
+                rprint(
+                    f'[green]{connector}[/green] ID [cyan]{msg.id}[/cyan] ({msg_date}): "{text}"'
+                )
+
+            rprint(
+                f"\n[dim]💡 Tip: You can export all messages, last N messages, or start from specific ID[/dim]"
+            )
+
+            return latest.id
+
+        except Exception as e:
+            logger.debug(f"Failed to fetch message preview: {e}")
+            rprint(f"[yellow]⚠️  Unable to fetch message info: {e}[/yellow]")
+            rprint(
+                "[dim]You can still enter a message ID manually if you know it[/dim]"
+            )
+            return None
+
+    def _get_media_type(self, message) -> str:
+        """Get human-readable media type from message."""
+        if not message.media:
+            return "No media"
+
+        media_type = type(message.media).__name__
+        type_mapping = {
+            "MessageMediaPhoto": "Photo",
+            "MessageMediaDocument": "Document",
+            "MessageMediaVideo": "Video",
+            "MessageMediaAudio": "Audio",
+            "MessageMediaVoice": "Voice",
+            "MessageMediaContact": "Contact",
+            "MessageMediaLocation": "Location",
+            "MessageMediaPoll": "Poll",
+            "MessageMediaSticker": "Sticker",
+            "MessageMediaGif": "GIF",
+        }
+        return type_mapping.get(media_type, "Media")
 
     def _show_selected_targets(self):
         """Display currently selected export targets."""
@@ -416,9 +742,9 @@ class InteractiveUI:
 
             # Configuration options
             rprint("\n[bold]Configuration Options:[/bold]")
-            rprint("1. Toggle media download")
+            rprint("1. Configure media download settings")
             rprint("2. Set export path")
-            rprint("3. Configure media settings")
+            rprint("3. Configure media processing settings")
             rprint("4. Return to main menu")
 
             choice = Prompt.ask(
@@ -426,9 +752,7 @@ class InteractiveUI:
             )
 
             if choice == "1":
-                self.config.media_download = not self.config.media_download
-                status = "enabled" if self.config.media_download else "disabled"
-                rprint(f"[green]Media download {status}.[/green]")
+                await self._configure_media_download_settings()
                 input("\nPress Enter to continue...")
             elif choice == "2":
                 new_path = Prompt.ask(
@@ -450,7 +774,10 @@ class InteractiveUI:
         table.add_column("Value", style="green")
 
         table.add_row("Export Path", str(self.config.export_path))
-        table.add_row("Media Download", "✓" if self.config.media_download else "✗")
+        table.add_row("Download Photos", "✓" if self.config.download_photos else "✗")
+        table.add_row("Download Videos", "✓" if self.config.download_videos else "✗")
+        table.add_row("Download Audio", "✓" if self.config.download_audio else "✗")
+        table.add_row("Download Other", "✓" if self.config.download_other else "✗")
         table.add_row("Selected Targets", str(len(self.config.export_targets)))
 
         # Media processing settings
@@ -473,6 +800,101 @@ class InteractiveUI:
             table.add_row("  Device", device)
 
         self.console.print(table)
+
+    async def _configure_media_download_settings(self):
+        """Configure individual media download settings."""
+        while True:
+            clear_screen()
+            rprint("[bold cyan]Media Download Settings[/bold cyan]")
+            rprint("=" * 40)
+            rprint(
+                "[dim]Configure which types of media to download during export[/dim]"
+            )
+
+            # Show current settings
+            photos_status = "✓ Enabled" if self.config.download_photos else "✗ Disabled"
+            videos_status = "✓ Enabled" if self.config.download_videos else "✗ Disabled"
+            audio_status = "✓ Enabled" if self.config.download_audio else "✗ Disabled"
+            other_status = "✓ Enabled" if self.config.download_other else "✗ Disabled"
+
+            rprint("\n[bold]Current Settings:[/bold]")
+            rprint(f"1. Photos: {photos_status}")
+            rprint(f"2. Videos: {videos_status}")
+            rprint(f"3. Audio: {audio_status}")
+            rprint(f"4. Other (stickers, docs): {other_status}")
+            
+            # Extension filters display
+            inc_str = ", ".join(self.config.include_extensions) if self.config.include_extensions else "None"
+            exc_str = ", ".join(self.config.exclude_extensions) if self.config.exclude_extensions else "None"
+            rprint(f"5. Included Extensions: [cyan]{inc_str}[/cyan]")
+            rprint(f"6. Excluded Extensions: [cyan]{exc_str}[/cyan]")
+            
+            rprint("7. Enable all types")
+            rprint("8. Disable all types")
+            rprint("9. Return")
+
+            choice = Prompt.ask(
+                "Choose option",
+                choices=["1", "2", "3", "4", "5", "6", "7", "8", "9"],
+                default="9",
+            )
+
+            if choice == "1":
+                self.config.download_photos = not self.config.download_photos
+                status = "enabled" if self.config.download_photos else "disabled"
+                rprint(f"[green]Photo download {status}[/green]")
+                input("Press Enter to continue...")
+            elif choice == "2":
+                self.config.download_videos = not self.config.download_videos
+                status = "enabled" if self.config.download_videos else "disabled"
+                rprint(f"[green]Video download {status}[/green]")
+                input("Press Enter to continue...")
+            elif choice == "3":
+                self.config.download_audio = not self.config.download_audio
+                status = "enabled" if self.config.download_audio else "disabled"
+                rprint(f"[green]Audio download {status}[/green]")
+                input("Press Enter to continue...")
+            elif choice == "4":
+                self.config.download_other = not self.config.download_other
+                status = "enabled" if self.config.download_other else "disabled"
+                rprint(f"[green]Other media download {status}[/green]")
+                input("Press Enter to continue...")
+            elif choice == "5":
+                rprint("[dim]Enter extensions separated by comma (e.g. jpg, png, mp4)[/dim]")
+                rprint("[dim]Leave empty to clear list[/dim]")
+                inp = Prompt.ask("Extensions to INCLUDE")
+                if not inp.strip():
+                    self.config.include_extensions = []
+                else:
+                    self.config.include_extensions = [e.strip().lower().replace('.', '') for e in inp.split(',') if e.strip()]
+                rprint(f"[green]Updated include list: {self.config.include_extensions}[/green]")
+                input("Press Enter to continue...")
+            elif choice == "6":
+                rprint("[dim]Enter extensions separated by comma (e.g. zip, rar, exe)[/dim]")
+                rprint("[dim]Leave empty to clear list[/dim]")
+                inp = Prompt.ask("Extensions to EXCLUDE")
+                if not inp.strip():
+                    self.config.exclude_extensions = []
+                else:
+                    self.config.exclude_extensions = [e.strip().lower().replace('.', '') for e in inp.split(',') if e.strip()]
+                rprint(f"[green]Updated exclude list: {self.config.exclude_extensions}[/green]")
+                input("Press Enter to continue...")
+            elif choice == "7":
+                self.config.download_photos = True
+                self.config.download_videos = True
+                self.config.download_audio = True
+                self.config.download_other = True
+                rprint("[green]All media downloads enabled[/green]")
+                input("Press Enter to continue...")
+            elif choice == "8":
+                self.config.download_photos = False
+                self.config.download_videos = False
+                self.config.download_audio = False
+                self.config.download_other = False
+                rprint("[green]All media downloads disabled[/green]")
+                input("Press Enter to continue...")
+            elif choice == "9":
+                break
 
     async def _configure_media_settings(self):
         """Configure media-specific settings."""
@@ -659,30 +1081,67 @@ class InteractiveUI:
 
     async def _configure_performance(self):
         """Configure performance settings."""
-        clear_screen()
-        rprint("[bold cyan]Performance Configuration[/bold cyan]")
-        rprint("=" * 40)
+        while True:
+            clear_screen()
+            rprint("[bold cyan]Performance Configuration[/bold cyan]")
+            rprint("=" * 40)
 
-        # Show available profiles
-        profiles = ["conservative", "balanced", "aggressive"]
+            # Show current settings
+            rprint(
+                f"\nCurrent Profile: [green]{self.config.performance_profile}[/green]"
+            )
+            sharding_status = "Enabled" if self.config.sharding_enabled else "Disabled"
+            rprint(f"Sharding (Parallel Export): [green]{sharding_status}[/green]")
+            if self.config.sharding_enabled:
+                rprint(f"Shard Count: [green]{self.config.shard_count}[/green]")
 
-        rprint("\n[bold]Performance Profiles:[/bold]")
-        for i, profile in enumerate(profiles, 1):
-            rprint(f"{i}. {profile.title()}")
+            rprint("\n[bold]Options:[/bold]")
+            rprint("1. Change Performance Profile")
+            rprint("2. Configure Sharding")
+            rprint("3. Return")
 
-        choice = Prompt.ask("Select profile", choices=["1", "2", "3"], default="3")
+            choice = Prompt.ask("Select option", choices=["1", "2", "3"], default="3")
 
-        profile_map = {"1": "conservative", "2": "balanced", "3": "aggressive"}
-        selected_profile = cast(
-            Literal["conservative", "balanced", "aggressive", "custom"],
-            profile_map[choice],
-        )
+            if choice == "1":
+                # Show available profiles
+                profiles = ["conservative", "balanced", "aggressive"]
 
-        # Create performance profile (simplified)
-        self.config.performance_profile = selected_profile
+                rprint("\n[bold]Performance Profiles:[/bold]")
+                for i, profile in enumerate(profiles, 1):
+                    rprint(f"{i}. {profile.title()}")
 
-        rprint(f"[green]Performance profile set to: {selected_profile}[/green]")
-        input("\nPress Enter to continue...")
+                p_choice = Prompt.ask(
+                    "Select profile", choices=["1", "2", "3"], default="2"
+                )
+                profile_map = {"1": "conservative", "2": "balanced", "3": "aggressive"}
+                selected_profile = cast(
+                    Literal["conservative", "balanced", "aggressive", "custom"],
+                    profile_map[p_choice],
+                )
+                self.config.update_performance_profile(selected_profile)
+                rprint(f"[green]Performance profile set to: {selected_profile}[/green]")
+                input("\nPress Enter to continue...")
+
+            elif choice == "2":
+                enable_sharding = Confirm.ask(
+                    "Enable parallel export (sharding)?",
+                    default=self.config.sharding_enabled,
+                )
+                self.config.sharding_enabled = enable_sharding
+
+                if enable_sharding:
+                    shard_count = IntPrompt.ask(
+                        "Number of workers (shards)",
+                        default=self.config.shard_count,
+                        show_default=True,
+                    )
+                    self.config.shard_count = max(1, shard_count)
+
+                rprint("[green]Sharding configuration updated.[/green]")
+                input("\nPress Enter to continue...")
+
+            elif choice == "3":
+                break
 
 
 async def run_interactive_configuration(

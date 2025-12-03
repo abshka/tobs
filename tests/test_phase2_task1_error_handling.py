@@ -129,7 +129,6 @@ class TestHealthCheckErrorResilience:
         caplog.set_level(logging.ERROR)
 
         manager = CoreSystemManager()
-        await manager.initialize()
 
         error_count = 0
 
@@ -145,6 +144,7 @@ class TestHealthCheckErrorResilience:
             with patch.object(
                 manager, "_perform_health_check", side_effect=always_fails
             ):
+                await manager.initialize()
                 # Wait for multiple error iterations
                 await asyncio.sleep(0.2)
 

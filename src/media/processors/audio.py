@@ -74,8 +74,8 @@ class AudioProcessor(BaseProcessor):
                 return await self._copy_file(task)
 
             # Проверка целостности аудио файла
-            if self.validator:
-                is_valid = await self.validator.validate_file(task.input_path)
+            if self.validator and hasattr(self.validator, 'validate_file_integrity'):
+                is_valid = await self.validator.validate_file_integrity(task.input_path)
                 if not is_valid:
                     logger.warning(
                         f"Audio file integrity check failed, using fallback copy: {task.input_path}"

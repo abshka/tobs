@@ -3,13 +3,13 @@
 Собирает метрики, создает отчеты и анализирует производительность экспорта.
 """
 
-import json
 import platform
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+import orjson
 import psutil
 
 from src.core.performance import PerformanceMonitor
@@ -48,6 +48,9 @@ class ExportMetrics:
     # Ошибки
     errors: List[Dict[str, Any]] = field(default_factory=list)
     warnings: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Worker stats (for sharded export)
+    worker_stats: Dict[int, Dict[str, int]] = field(default_factory=dict)
 
     # Настройки экспорта
     export_settings: Dict[str, Any] = field(default_factory=dict)
@@ -282,8 +285,8 @@ class ExportReporter:
                 "timestamp": time.time(),
             }
 
-            with open(self.monitoring_file, "w", encoding="utf-8") as f:
-                json.dump(monitoring_data, f, indent=2, ensure_ascii=False)
+            with open(self.monitoring_file, "wb") as f:
+                f.write(orjson.dumps(monitoring_data, option=orjson.OPT_INDENT_2))
 
         except Exception as e:
             logger.error(f"Failed to save monitoring data for {self.entity_id}: {e}")
@@ -322,8 +325,8 @@ class ExportReporter:
             return None
 
         try:
-            with open(self.monitoring_file, "r", encoding="utf-8") as f:
-                report_data = json.load(f)
+            with open(self.monitoring_file, "rb") as f:
+                report_data = orjson.loads(f.read())
 
             # Восстанавливаем объекты из словарей
             metrics_data = report_data["metrics"]

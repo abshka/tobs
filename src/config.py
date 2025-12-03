@@ -24,7 +24,9 @@ RECOMMENDED_MEMORY_GB = 8
 
 # ⏱️ Таймауты для асинхронных операций (Phase 2 Task 2.2)
 ITER_MESSAGES_TIMEOUT = 300  # 5 минут для fetching сообщений
-EXPORT_OPERATION_TIMEOUT = 600  # 10 минут для экспорта одной сущности
+EXPORT_OPERATION_TIMEOUT = (
+    7200  # 2 часа для экспорта одной сущности (значительно увеличено)
+)
 QUEUE_OPERATION_TIMEOUT = 30  # 30 секунд для получения задачи из очереди
 HEALTH_CHECK_TIMEOUT = 10  # 10 секунд для health check
 MEDIA_DOWNLOAD_TIMEOUT = 3600  # 1 час для скачивания медиа
@@ -40,6 +42,9 @@ class ExportTarget:
     name: str = ""
     type: str = "unknown"
     message_id: Optional[int] = None
+    start_message_id: Optional[int] = (
+        0  # Start export from this message ID (0 = from beginning)
+    )
 
     # Новые поля для оптимизации
     estimated_messages: Optional[int] = None  # Примерное количество сообщений
@@ -80,7 +85,14 @@ class ExportTarget:
             return
 
         # Если тип уже правильно установлен, не переписываем его
-        if self.type in ["forum_topic", "forum_chat", "channel", "chat", "user"]:
+        if self.type in [
+            "forum_topic",
+            "forum_chat",
+            "forum",
+            "channel",
+            "chat",
+            "user",
+        ]:
             return
 
         # Улучшенное определение типа сущности
@@ -159,8 +171,12 @@ class PerformanceSettings:
     persistent_download_min_size_mb: int = (
         1  # Минимальный размер для упорного режима (почти все файлы)
     )
-    persistent_max_failures: int = 20  # Максимум неудач подряд перед отказом
-    persistent_chunk_timeout: int = 600  # Базовый таймаут для частей (10 минут)
+    persistent_max_failures: int = (
+        30  # Максимум неудач подряд перед отказом (увеличено)
+    )
+    persistent_chunk_timeout: int = (
+        1200  # Базовый таймаут для частей (20 минут, увеличено)
+    )
 
     # Параллельные загрузки
     enable_parallel_download: bool = False  # Отключено по умолчанию для надежности
@@ -223,8 +239,8 @@ class PerformanceSettings:
                 # Упорные загрузки для консервативного профиля
                 enable_persistent_download=True,
                 persistent_download_min_size_mb=1,
-                persistent_max_failures=15,
-                persistent_chunk_timeout=900,  # 15 минут для медленных соединений
+                persistent_max_failures=25,  # Увеличено для DC migration
+                persistent_chunk_timeout=1500,  # 25 минут для медленных соединений
                 # Параллельные загрузки отключены для надежности
                 enable_parallel_download=False,
                 max_parallel_connections=4,
@@ -255,8 +271,8 @@ class PerformanceSettings:
                 # Упорные загрузки для сбалансированного профиля
                 enable_persistent_download=True,
                 persistent_download_min_size_mb=1,
-                persistent_max_failures=20,
-                persistent_chunk_timeout=600,  # 10 минут
+                persistent_max_failures=30,  # Увеличено
+                persistent_chunk_timeout=1200,  # 20 минут
                 # Параллельные загрузки отключены для надежности
                 enable_parallel_download=False,
                 max_parallel_connections=8,
@@ -287,8 +303,8 @@ class PerformanceSettings:
                 # Упорные загрузки для агрессивного профиля
                 enable_persistent_download=True,
                 persistent_download_min_size_mb=1,
-                persistent_max_failures=25,
-                persistent_chunk_timeout=600,  # 10 минут
+                persistent_max_failures=35,  # Увеличено
+                persistent_chunk_timeout=1200,  # 20 минут
                 enable_parallel_download=True,
                 max_parallel_connections=12,
                 max_concurrent_downloads=3,
@@ -332,6 +348,7 @@ class Config:
 
     phone_number: Optional[str] = None
     session_name: str = "tobs_session"
+    tdata_path: Optional[str] = None  # Path to Telegram Desktop tdata folder
     request_delay: float = 0.5
 
     # Core system settings
@@ -351,18 +368,49 @@ class Config:
     use_entity_folders: bool = True
     use_structured_export: bool = True  # Новая структурированная организация
     only_new: bool = True
+    # Media download settings - granular control
+    download_photos: bool = True  # Download photos and images
+    download_videos: bool = True  # Download videos
+    download_audio: bool = True  # Download audio files
+    download_other: bool = True  # Download stickers, documents, and other media
+    # Backward compatibility - deprecated, will be removed in future version
     media_download: bool = True
-    export_comments: bool = False
+    
+    # Extension filtering (tdl-style)
+    include_extensions: List[str] = field(default_factory=list)
+    exclude_extensions: List[str] = field(default_factory=list)
+
+    export_comments: bool = False  # Export comments for posts
+
+    # Takeout settings
+    use_takeout: bool = False  # Use Telegram Takeout for export
+    takeout_fallback_delay: float = 1.0  # Delay in seconds if Takeout fails/disabled
+
+    # Sharding settings (Parallel Takeout)
+    sharding_enabled: bool = False  # Enable parallel export using cloned sessions
+    shard_count: int = 4  # Number of worker sessions/connections
+
+    @property
+    def any_media_download_enabled(self) -> bool:
+        """Check if any type of media download is enabled."""
+        return (
+            self.download_photos
+            or self.download_videos
+            or self.download_audio
+            or self.download_other
+        )
 
     # Media processing settings
     process_video: bool = False  # По умолчанию выключено (как в MediaProcessor)
     process_audio: bool = True  # По умолчанию включено
     process_images: bool = True  # По умолчанию включено
+    deferred_processing: bool = True  # 🚀 NEW: Process media AFTER export to save CPU/Network bandwidth
 
     # Audio transcription settings (v3.0.0)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
+    transcription_timeout: float = 1800.0  # 30 minutes for individual transcription
 
-    export_closed_topics: bool = False  # Экспортировать закрытые топики
+    # Forum export settings
     export_pinned_topics_first: bool = (
         True  # Экспортировать закрепленные топики первыми
     )
@@ -371,6 +419,16 @@ class Config:
     )
     create_topic_summaries: bool = True  # Создавать summary файлы для топиков
     forum_structure_mode: str = "by_topic"  # "by_topic" или "flat"
+
+    # Lazy loading settings
+    enable_lazy_loading: bool = False  # Enable lazy loading for media and content
+    lazy_media_metadata_dir: str = "lazy_metadata"  # Directory for lazy media metadata
+    lazy_topic_pagination: bool = False  # Enable topic pagination for forums
+    lazy_topic_page_size: int = 50  # Number of topics per page when paginated
+    lazy_message_pagination: bool = False  # Enable message pagination for large chats
+    lazy_message_page_size: int = 1000  # Number of messages per page when paginated
+    lazy_preview_mode: bool = False  # Enable preview mode with limited messages
+    lazy_preview_limit: int = 100  # Number of messages to load in preview mode
 
     performance_profile: PerformanceProfile = "balanced"
     performance: PerformanceSettings = field(default_factory=PerformanceSettings)
@@ -596,6 +654,10 @@ class Config:
 
     def update_performance_profile(self, profile: PerformanceProfile):
         """Обновить профиль производительности."""
+        if profile not in ["conservative", "balanced", "aggressive", "custom"]:
+            logger.warning(f"Unknown performance profile '{profile}', using 'balanced'")
+            profile = "balanced"
+
         self.performance_profile = profile
         self.performance = PerformanceSettings.auto_configure(profile)
         logger.info(f"Updated performance profile to: {profile}")
@@ -681,8 +743,6 @@ class Config:
                     filtered[k] = PerformanceSettings(**v)
                 elif k == "transcription" and isinstance(v, dict):
                     filtered[k] = TranscriptionConfig(**v)
-                elif k in ("export_path", "cache_file") and not isinstance(v, Path):
-                    filtered[k] = Path(v)
                 else:
                     filtered[k] = v
         return cls(**filtered)
@@ -792,8 +852,20 @@ class Config:
                     os.getenv("USE_STRUCTURED_EXPORT"), True
                 ),
                 "only_new": _parse_bool(os.getenv("ONLY_NEW"), False),
-                "media_download": _parse_bool(os.getenv("MEDIA_DOWNLOAD"), True),
+                "download_photos": _parse_bool(os.getenv("DOWNLOAD_PHOTOS"), True),
+                "download_videos": _parse_bool(os.getenv("DOWNLOAD_VIDEOS"), True),
+                "download_audio": _parse_bool(os.getenv("DOWNLOAD_AUDIO"), True),
+                "download_other": _parse_bool(os.getenv("DOWNLOAD_OTHER"), True),
+                "media_download": _parse_bool(
+                    os.getenv("MEDIA_DOWNLOAD"), True
+                ),  # Backward compatibility
                 "export_comments": _parse_bool(os.getenv("EXPORT_COMMENTS"), False),
+                "use_takeout": _parse_bool(os.getenv("USE_TAKEOUT"), False),
+                "takeout_fallback_delay": float(
+                    os.getenv("TAKEOUT_FALLBACK_DELAY", "1.0")
+                ),
+                "sharding_enabled": _parse_bool(os.getenv("SHARDING_ENABLED"), False),
+                "shard_count": int(os.getenv("SHARD_COUNT", "4")),
                 "log_level": os.getenv("LOG_LEVEL", "INFO"),
                 # Производительность
                 "performance_profile": performance_profile,
@@ -819,6 +891,9 @@ class Config:
                     cache_enabled=_parse_bool(
                         os.getenv("TRANSCRIPTION_CACHE_ENABLED"), True
                     ),
+                ),
+                "transcription_timeout": float(
+                    os.getenv("TRANSCRIPTION_TIMEOUT", "1800.0")
                 ),
                 # Кэширование
                 "cache_file": os.getenv("CACHE_FILE", str(DEFAULT_CACHE_PATH)),

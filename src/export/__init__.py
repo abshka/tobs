@@ -9,13 +9,11 @@ This module provides:
 - Modular export workflow management
 """
 
-from .exporter import Exporter, ExportStatistics, print_export_summary, run_export
-
+from .exporter import Exporter, ExportStatistics, ForumTopic, print_export_summary, run_export
 
 __all__ = [
     "Exporter",
     "ExportStatistics",
-    "ForumExporter",
     "ForumTopic",
     "run_export",
     "print_export_summary",

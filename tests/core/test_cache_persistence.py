@@ -12,6 +12,9 @@ Tests cover:
 
 import asyncio
 import json
+import base64
+import pickle
+import zlib
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch, mock_open as sync_mock_open
@@ -333,7 +336,7 @@ async def test_save_cache_creates_backup(temp_cache_path, sample_cache_json):
         mock_file.__aexit__.return_value = False
         
         nonlocal backup_write_called
-        if "backup" in str(path) and mode == "w":
+        if "backup" in str(path) and "w" in mode:
             async def track_backup_write(content):
                 nonlocal backup_write_called
                 backup_write_called = True
@@ -536,6 +539,46 @@ async def test_save_cache_serializes_entries_correctly(temp_cache_path):
     assert "access_count" in entry_data
 
 
+@pytest.mark.asyncio
+async def test_save_cache_encodes_bytes_as_base64(temp_cache_path):
+    """Ensure that bytes in entry.data are encoded as base64 when saving cache."""
+    manager = CacheManager(temp_cache_path, compression=CompressionType.PICKLE, compression_threshold=1)
+    # Create content that will be pickled and compressed
+    complex_data = {
+        "items": set(range(50)),
+        "text": "x" * 200,
+    }
+    await manager.set("key1", complex_data)
+
+    written_content = None
+
+    def create_write_mock():
+        mock_file = AsyncMock()
+        mock_file.__aenter__.return_value = mock_file
+        mock_file.__aexit__.return_value = False
+
+        async def capture_write(content):
+            nonlocal written_content
+            written_content = content
+
+        mock_file.write = capture_write
+        return mock_file
+
+    with patch("src.core.cache.Path.exists", return_value=False):
+        with patch("aiofiles.open", side_effect=lambda *args, **kwargs: create_write_mock()):
+            await manager._save_cache()
+
+    data = json.loads(written_content)
+    entry_data = data["entries"]["key1"]
+    assert "data" in entry_data
+    # If compressed bytes were present, we should have data_encoding == 'base64'
+    assert entry_data.get("data_encoding") == "base64"
+    assert isinstance(entry_data["data"], str)
+    # Also confirm that it decodes back to bytes
+    decoded = base64.b64decode(entry_data["data"].encode("ascii"))
+    assert isinstance(decoded, (bytes, bytearray))
+
+
 # ============================================================================
 # _try_restore_from_backup() TESTS
 # ============================================================================
@@ -554,6 +597,48 @@ async def test_restore_from_backup_success(temp_cache_path, sample_cache_json):
 
     assert len(manager._cache) == 2
     assert "key1" in manager._cache
+
+
+@pytest.mark.asyncio
+async def test_restore_from_backup_handles_base64_encoded_entries(temp_cache_path):
+    """Restore entries that had data base64-encoded (e.g., compressed bytes)."""
+    manager = CacheManager(temp_cache_path)
+
+    # Create compressed pickled data
+    original_value = {"items": set(range(10)), "text": "x" * 200}
+    pickled_raw = pickle.dumps(original_value)
+    compressed_bytes = zlib.compress(pickled_raw)
+    b64 = base64.b64encode(compressed_bytes).decode("ascii")
+
+    backup_json = {
+        "version": 2,
+        "timestamp": time.time(),
+        "strategy": "simple",
+        "compression": "pickle",
+        "entries": {
+            "key1": {
+                "data": b64,
+                "created_at": time.time(),
+                "last_accessed": time.time(),
+                "access_count": 1,
+                "ttl": None,
+                "compressed": True,
+                "compression_type": "pickle",
+                "data_encoding": "base64",
+            }
+        },
+    }
+
+    mock_file = create_async_file_mock(json.dumps(backup_json))
+
+    with patch("src.core.cache.Path.exists", return_value=True):
+        with patch("aiofiles.open", return_value=mock_file):
+            await manager._try_restore_from_backup()
+
+    # Now we should have entry present and get() should return original value
+    assert "key1" in manager._cache
+    result = await manager.get("key1")
+    assert result == original_value
 
 
 @pytest.mark.asyncio

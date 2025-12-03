@@ -719,6 +719,22 @@ class TestCacheManagerCompression:
         assert result == large_data
 
     @pytest.mark.asyncio
+    async def test_gzip_fallback_to_pickle_for_set(self, cache_manager_gzip):
+        """GZIP compressor should fallback to pickle for non-JSON-serializable types (like set)."""
+        data_with_set = {"items": set(range(50)), "text": "x" * 200}
+        await cache_manager_gzip.set("key_set", data_with_set)
+
+        stats = cache_manager_gzip.get_stats()
+        assert stats.compression_fallbacks >= 1
+
+        entry = cache_manager_gzip._cache["key_set"]
+        assert entry.compressed is True
+        assert entry.compression_type == "pickle"
+
+        result = await cache_manager_gzip.get("key_set")
+        assert result == data_with_set
+
+    @pytest.mark.asyncio
     async def test_pickle_compression_for_complex_data(self, cache_manager_pickle):
         """Test PICKLE compression for complex objects."""
         complex_data = {

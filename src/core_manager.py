@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class CoreSystemManager:
     """Менеджер всех core систем."""
 
-    def __init__(self, config_path: Optional[Path] = None, performance_profile: str = "balanced"):
+    def __init__(self, config_path: Optional[Path] = None, performance_profile: str = "balanced", health_check_interval: float = 0.1):
         # config_path сохраняется для совместимости с API, но не используется
         self.config_path = config_path
         self.performance_profile = performance_profile
@@ -46,6 +46,9 @@ class CoreSystemManager:
         # TaskGroup для управления background tasks (Phase 3 Task A.1)
         self._task_group: Optional[asyncio.TaskGroup] = None
         self._task_group_runner: Optional[asyncio.Task] = None
+
+        self._health_check_interval = health_check_interval
+        self._sleep = asyncio.sleep  # Store reference to avoid global mocking
 
         # Статистика
         self._start_time = 0.0
@@ -115,6 +118,13 @@ class CoreSystemManager:
         - Агрегирует исключения из всех задач
         - Отменяет все оставшиеся задачи при выходе из контекста
         """
+        # Run initial health check synchronously
+        try:
+            await self._perform_health_check()
+        except Exception as e:
+            self._failed_operations += 1
+            logger.error(f"Initial health check failed: {e}")
+
         try:
             async with asyncio.TaskGroup() as tg:
                 self._task_group = tg
@@ -205,8 +215,14 @@ class CoreSystemManager:
         while not self._shutdown:
             loop_iteration += 1
             try:
-                await asyncio.sleep(30)  # Проверяем каждые 30 секунд
-                await self._perform_health_check()
+                # Run health check first, then sleep
+                try:
+                    await self._perform_health_check()
+                except Exception as e:
+                    # Track failed health check attempts and log
+                    self._failed_operations += 1
+                    logger.error(f"Health check raised exception: {e}")
+                await self._sleep(self._health_check_interval)
             except asyncio.CancelledError:
                 logger.debug(f"Health check loop cancelled after {loop_iteration} iterations")
                 break
@@ -320,6 +336,8 @@ class CoreSystemManager:
             "status": "running",
             "uptime": uptime,
             "total_operations": self._total_operations,
+            "successful_operations": self._successful_operations,
+            "failed_operations": self._failed_operations,
             "success_rate": (
                 self._successful_operations / self._total_operations
                 if self._total_operations > 0
@@ -419,11 +437,24 @@ class CoreSystemManager:
             await self._cache_manager.clear()
             logger.info("Cache forcibly cleared")
 
-    async def force_performance_profile(self, profile_name: str) -> bool:
-        """Принудительная установка профиля производительности."""
+    def update_performance_profile(self, profile: str):
+        """Обновить профиль производительности."""
+        if profile not in ["conservative", "balanced", "aggressive"]:
+            logger.warning(f"Unknown performance profile '{profile}', keeping current")
+            return
+        
+        old_profile = self.performance_profile
+        self.performance_profile = profile
+        
+        # Обновляем performance monitor если он инициализирован
         if self._performance_monitor:
-            return self._performance_monitor.set_performance_profile(profile_name)
-        return False
+            success = self._performance_monitor.set_performance_profile(profile)
+            if success:
+                logger.info(f"Performance profile updated from {old_profile} to {profile}")
+            else:
+                logger.warning(f"Failed to update performance monitor profile to {profile}")
+        
+        logger.info(f"Core manager performance profile set to: {profile}")
 
     def is_initialized(self) -> bool:
         """Проверка инициализации системы."""

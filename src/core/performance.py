@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import aiofiles
+import orjson
 import psutil
 
 logger = logging.getLogger(__name__)
@@ -623,8 +624,8 @@ class PerformanceMonitor:
                 },
             }
 
-            async with aiofiles.open(metrics_file, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(data, indent=2, default=str))
+            async with aiofiles.open(metrics_file, "wb") as f:
+                await f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS))
 
             logger.debug(f"Metrics history saved to {metrics_file}")
 
@@ -637,8 +638,8 @@ class PerformanceMonitor:
             summary = self.get_performance_summary()
 
             if format.lower() == "json":
-                async with aiofiles.open(filepath, "w", encoding="utf-8") as f:
-                    await f.write(json.dumps(summary, indent=2, default=str))
+                async with aiofiles.open(filepath, "wb") as f:
+                    await f.write(orjson.dumps(summary, option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS))
             else:
                 logger.error(f"Unsupported export format: {format}")
                 return False

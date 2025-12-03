@@ -58,6 +58,9 @@ uv sync
 
 # Or use pip
 pip install -e .
+
+# Run TOBS
+python tobs.py
 ```
 
 ### Telegram API Setup
@@ -78,36 +81,55 @@ PHONE_NUMBER=your_phone_number
 ### Basic Usage
 
 ```bash
-# Interactive mode (recommended for first-time users)
+# Interactive mode (recommended)
+python tobs.py
+
+# Or directly
 python main.py
-
-# Export specific channel
-python main.py --target @channelname
-
-# Export with custom path
-python main.py --target @channelname --output ./my_exports
-
-# Enable debug logging
-python main.py --target @channelname --verbose
 ```
 
-### Advanced Configuration
+### Configuration
 
-```python
-from src.config import Config
-from src.phase3_integration import initialize_phase3
+TOBS now uses an interactive configuration system. Simply run the application and follow the on-screen prompts to:
 
-# Create optimized configuration
-config = Config(
-    api_id=your_api_id,
-    api_hash="your_api_hash",
-    enable_phase3_optimizations=True,
-    phase3_adaptation_strategy="balanced"
-)
+1. **Configure Media Downloads**: Choose which types of media to download (photos, videos, audio, other)
+2. **Select Export Targets**: Choose channels, groups, or users to export
+3. **Set Export Options**: Configure paths, performance settings, and other options
+4. **Start Export**: Begin the export process with real-time progress tracking
 
-# Initialize advanced optimizations
-phase3_manager = await initialize_phase3(config)
+### Media Download Configuration
+
+TOBS provides granular control over media downloads:
+
+- **Photos**: Images and profile pictures
+- **Videos**: Video files and GIFs
+- **Audio**: Voice messages and audio files
+- **Other**: Stickers, documents, and other attachments
+
+All media types are enabled by default, but you can customize this in the interactive configuration menu.
+
+## 🚀 Telegram Takeout (Turbo Mode)
+
+TOBS now supports **Telegram Takeout**, a feature that allows exporting data at much higher speeds with reduced rate limits.
+
+### Enabling Takeout
+
+1.  Add `USE_TAKEOUT=True` to your `.env` file.
+2.  Run TOBS.
+3.  You will receive a **Service Notification** from Telegram asking to allow the Takeout request.
+4.  **Allow** the request in Telegram.
+5.  TOBS will detect the approval (or you may need to restart if it times out) and begin the high-speed export.
+
+### Configuration
+
+```env
+USE_TAKEOUT=True              # Enable Takeout mode
+TAKEOUT_FALLBACK_DELAY=1.0    # Delay (seconds) if Takeout fails or is disabled
 ```
+
+### Fallback Behavior
+
+If Takeout fails or is not approved, TOBS will automatically fallback to the standard API with a safe rate-limit delay (default: 1.0s) to prevent FloodWait errors.
 
 ## ⚙️ Configuration
 
@@ -134,6 +156,7 @@ config.phase3_dashboard_retention_hours = 24
 ```
 tobs/
 ├── main.py                           # Main application entry point
+├── tobs.py                           # Simple launcher script
 ├── src/
 │   ├── export/                       # Core export functionality
 │   │   ├── exporter.py              # Main export logic
@@ -141,8 +164,6 @@ tobs/
 │   ├── ui/                          # User interface components
 │   │   ├── interactive.py           # Interactive configuration
 │   │   └── progress.py              # Progress tracking
-│   ├── cli/                         # Command-line interface
-│   │   └── parser.py                # Argument parsing
 │   ├── advanced_cache_manager.py    # Phase 3: Advanced caching
 │   ├── adaptive_performance_manager.py  # Phase 3: Performance optimization
 │   ├── monitoring_dashboard.py      # Phase 3: Real-time monitoring
@@ -225,8 +246,8 @@ print(f"Cache Hit Rate: {status['components']['advanced_cache']['hit_rate']:.1f}
 ### Debug Mode
 
 ```bash
-# Enable verbose logging
-python main.py --verbose --target @channelname
+# Enable verbose logging (configure in interactive mode)
+python tobs.py
 
 # Check log files
 tail -f tobs_exporter.log

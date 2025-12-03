@@ -7,6 +7,7 @@ import logging
 import pickle
 import time
 import zlib
+import base64
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from enum import Enum
@@ -69,12 +70,19 @@ class CacheStats:
     deletes: int = 0
     evictions: int = 0
     compression_saves: int = 0
+    compression_fallbacks: int = 0
     total_size_mb: float = 0.0
 
     @property
     def hit_rate(self) -> float:
         total = self.hits + self.misses
         return (self.hits / total) if total > 0 else 0.0
+
+
+def _json_default(obj):
+    if isinstance(obj, set):
+        return list(obj)
+    raise TypeError
 
 
 class CacheManager:
@@ -121,6 +129,8 @@ class CacheManager:
         await self._load_cache()
         # Start background tasks in TaskGroup (Phase 3 Task A.2)
         self._task_group_runner = asyncio.create_task(self._run_background_tasks())
+        # Backward compatibility: alias for older tests or code that expects _auto_save_task
+        self._auto_save_task = self._task_group_runner
         logger.info(f"Cache manager started with {self.strategy.value} strategy")
 
     async def _run_background_tasks(self):
@@ -196,8 +206,28 @@ class CacheManager:
             elif isinstance(data, bytes):
                 raw_data = data
             else:
-                # Для сложных объектов сериализуем в JSON с помощью orjson
-                raw_data = orjson.dumps(data, option=orjson.OPT_NON_STR_KEYS)
+                # For extraction of raw_data we choose pickled bytes if PICKLE compression is configured,
+                # otherwise we prefer JSON (orjson) which helps decide compression threshold.
+                if self.compression == CompressionType.PICKLE:
+                    raw_data = pickle.dumps(data)
+                else:
+                    # Для сложных объектов пытаемся сериализовать в JSON с помощью orjson
+                    try:
+                        raw_data = orjson.dumps(data, option=orjson.OPT_NON_STR_KEYS)
+                    except TypeError as e:
+                        # Not JSON serializable, fallback to pickle for GZIP if configured
+                        logger.debug(f"Data not JSON serializable: {e}. Falling back to pickle compression.")
+                        if self.compression == CompressionType.GZIP:
+                            pickled_raw = pickle.dumps(data)
+                            # Track that we fell back from JSON to pickle serialization
+                            self._stats.compression_fallbacks += 1
+                            if len(pickled_raw) < self.compression_threshold:
+                                return data, False, "none"
+                            compressed = zlib.compress(pickled_raw)
+                            if len(compressed) < len(pickled_raw) * 0.9:
+                                self._stats.compression_saves += 1
+                                return compressed, True, "pickle"
+                        return data, False, "none"
 
             if len(raw_data) < self.compression_threshold:
                 return data, False, "none"
@@ -208,10 +238,11 @@ class CacheManager:
                     self._stats.compression_saves += 1
                     return compressed, True, "gzip"
             elif self.compression == CompressionType.PICKLE:
-                compressed = zlib.compress(pickle.dumps(data))
-                if len(compressed) < len(raw_data) * 0.9:
-                    self._stats.compression_saves += 1
-                    return compressed, True, "pickle"
+                pickled_raw = pickle.dumps(data)
+                compressed = zlib.compress(pickled_raw)
+                # For PICKLE compression we always store pickled bytes to preserve types
+                self._stats.compression_saves += 1
+                return compressed, True, "pickle"
 
         except Exception as e:
             logger.warning(f"Compression failed: {e}")
@@ -376,8 +407,20 @@ class CacheManager:
 
                 for key, entry_data in entries_data.items():
                     try:
+                        raw_data = entry_data["data"]
+                        if (
+                            isinstance(raw_data, str)
+                            and entry_data.get("data_encoding") == "base64"
+                        ):
+                            try:
+                                processed_data = base64.b64decode(raw_data.encode("ascii"))
+                            except Exception:
+                                processed_data = raw_data
+                        else:
+                            processed_data = raw_data
+
                         entry = CacheEntry(
-                            data=entry_data["data"],
+                            data=processed_data,
                             created_at=entry_data.get("created_at", time.time()),
                             last_accessed=entry_data.get("last_accessed", time.time()),
                             access_count=entry_data.get("access_count", 0),
@@ -421,7 +464,34 @@ class CacheManager:
 
                 for key, entry_data in entries_data.items():
                     try:
-                        entry = CacheEntry(**entry_data)
+                        raw_data = entry_data.get("data")
+                        if isinstance(raw_data, str) and entry_data.get("data_encoding") == "base64":
+                            try:
+                                processed_data = base64.b64decode(raw_data.encode("ascii"))
+                            except Exception:
+                                processed_data = raw_data
+                        else:
+                            processed_data = raw_data
+
+                        # Validate timestamps in backup entry
+                        created_at_raw = entry_data.get("created_at", time.time())
+                        last_accessed_raw = entry_data.get("last_accessed", time.time())
+                        try:
+                            created_at_val = float(created_at_raw)
+                            last_accessed_val = float(last_accessed_raw)
+                        except Exception as e:
+                            logger.warning(f"Skipping invalid backup entry {key}: invalid timestamps: {e}")
+                            continue
+
+                        entry = CacheEntry(
+                            data=processed_data,
+                            created_at=created_at_val,
+                            last_accessed=last_accessed_val,
+                            access_count=entry_data.get("access_count", 0),
+                            ttl=entry_data.get("ttl"),
+                            compressed=entry_data.get("compressed", False),
+                            compression_type=entry_data.get("compression_type", "none"),
+                        )
                         if not entry.is_expired():
                             self._cache[key] = entry
                             loaded_count += 1
@@ -460,12 +530,18 @@ class CacheManager:
                     if not entry.is_expired():
                         entries_dict = cache_data["entries"]
                         if isinstance(entries_dict, dict):
-                            entries_dict[key] = asdict(entry)
+                            # use asdict but encode bytes data to base64 to make JSON serialization safe
+                            entry_dict = asdict(entry)
+                            if isinstance(entry_dict.get("data"), (bytes, bytearray)):
+                                entry_dict["data"] = base64.b64encode(entry_dict["data"]).decode("ascii")
+                                entry_dict["data_encoding"] = "base64"
+                            entries_dict[key] = entry_dict
 
             # Сохраняем с orjson (гораздо быстрее)
             json_bytes = orjson.dumps(
                 cache_data,
-                option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS
+                option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS,
+                default=_json_default
             )
 
             async with aiofiles.open(self.cache_path, "wb") as f:

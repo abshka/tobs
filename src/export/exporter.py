@@ -6,7 +6,7 @@ Provides core export orchestration and processing capabilities with visual progr
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 import aiofiles
 import aiohttp
@@ -18,6 +18,7 @@ from rich.progress import (
     TextColumn,
     TimeRemainingColumn,
 )
+from telethon import errors
 from telethon.errors import FloodWaitError
 
 from ..config import EXPORT_OPERATION_TIMEOUT, Config, ExportTarget
@@ -26,6 +27,123 @@ from ..media import MediaProcessor
 from ..note_generator import NoteGenerator
 from ..telegram_client import TelegramManager
 from ..utils import is_voice_message, logger, sanitize_filename
+
+
+from telethon.tl.functions import InvokeWithTakeoutRequest
+from telethon.tl.functions.account import InitTakeoutSessionRequest, FinishTakeoutSessionRequest
+
+class TakeoutSessionWrapper:
+    """
+    Context manager for manual Takeout session management.
+    Bypasses Telethon's client.takeout() to avoid client-side state conflicts.
+    """
+    def __init__(self, client, config):
+        self.client = client
+        self.config = config
+        self.takeout_id = None
+        self.max_file_size = getattr(config, "max_file_size_mb", 2000) * 1024 * 1024
+
+    async def __aenter__(self):
+        # 1. Check for existing session on client (Reuse)
+        existing_id = getattr(self.client, "takeout_id", getattr(self.client, "_takeout_id", None))
+        if existing_id:
+            logger.info(f"♻️ Reusing existing Takeout ID: {existing_id}")
+            self.takeout_id = existing_id
+            return self
+
+        # 2. Init new session manually
+        try:
+            init_req = InitTakeoutSessionRequest(
+                contacts=True,
+                message_users=True,
+                message_chats=True,
+                message_megagroups=True,
+                message_channels=True,
+                files=True,
+                file_max_size=self.max_file_size,
+            )
+            takeout_sess = await self.client(init_req)
+            self.takeout_id = takeout_sess.id
+            logger.info(f"✅ Manual Takeout Init Successful. ID: {self.takeout_id}")
+            return self
+        except Exception as e:
+            if "TakeoutInitDelayError" in str(type(e).__name__):
+                 raise errors.TakeoutInitDelayError()
+            raise e
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.takeout_id:
+            try:
+                # Only finish if we created it? 
+                # For now, let's finish it to be clean, unless we reused it?
+                # If we reused it, we probably shouldn't finish it?
+                # But here we are the top-level manager.
+                await self.client(InvokeWithTakeoutRequest(
+                    takeout_id=self.takeout_id,
+                    query=FinishTakeoutSessionRequest(success=True)
+                ))
+                logger.info("✅ Takeout session finished manually.")
+            except Exception as e:
+                logger.warning(f"⚠️ Error finishing takeout: {e}")
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+    async def __call__(self, request, ordered=False):
+        if self.takeout_id:
+            return await self.client(
+                InvokeWithTakeoutRequest(takeout_id=self.takeout_id, query=request),
+                ordered=ordered
+            )
+        return await self.client(request, ordered=ordered)
+
+
+class AsyncBufferedSaver:
+    """
+    Buffered file writer that accumulates writes to reduce I/O syscalls and thread context switches.
+    Wraps aiofiles to provide a similar interface but with internal buffering.
+    """
+
+    def __init__(
+        self, path, mode="w", encoding="utf-8", buffer_size=131072
+    ):  # 128KB buffer
+        self.path = path
+        self.mode = mode
+        self.encoding = encoding
+        self.buffer_size = buffer_size
+        self._buffer = []
+        self._current_size = 0
+        self._file = None
+
+    async def __aenter__(self):
+        self._file = await aiofiles.open(self.path, self.mode, encoding=self.encoding)
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.flush()
+        if self._file:
+            await self._file.close()
+
+    async def write(self, data: str):
+        self._buffer.append(data)
+        self._current_size += len(data)
+        if self._current_size >= self.buffer_size:
+            await self.flush()
+
+    async def flush(self):
+        if not self._buffer:
+            # Even if buffer is empty, we might want to flush the underlying file
+            if self._file:
+                await self._file.flush()
+            return
+
+        content = "".join(self._buffer)
+        self._buffer = []
+        self._current_size = 0
+
+        if self._file:
+            await self._file.write(content)
+            await self._file.flush()
 
 
 class ForumTopic:
@@ -66,6 +184,8 @@ class ExportStatistics:
         self.errors_encountered = 0
         self.cache_hits = 0
         self.cache_misses = 0
+        self.avg_cpu_percent = 0.0
+        self.peak_memory_mb = 0.0
 
     @property
     def duration(self) -> float:
@@ -108,6 +228,14 @@ class Exporter:
         self._shutdown_requested = False
         self.progress = None  # Progress bar instance
 
+        # 🚀 Medium Win 3: Sender name cache
+        self._sender_name_cache: Dict[int, str] = {}
+
+        # 🚀 Medium Win 2: Prefetch pipeline
+        self._prefetch_task = None
+        self._prefetch_result = None
+        self._prefetch_stats = {"hits": 0, "misses": 0}
+
         # Initialize the reporter manager
         self.reporter_manager = ExportReporterManager(
             base_monitoring_path=self.config.export_path,
@@ -118,7 +246,6 @@ class Exporter:
         """Initialize exporter and all components."""
         try:
             # Telegram connection should already be established in main.py
-            # We just verify it's connected
             if not self.telegram_manager.client_connected:
                 logger.info("Telegram not connected, connecting...")
                 await self.telegram_manager.connect()
@@ -127,7 +254,7 @@ class Exporter:
             # Initialize media processor
             logger.info("✅ Media processor ready")
 
-            # Initialize cache (only if it's SimpleCacheManager)
+            # Initialize cache
             if hasattr(self.cache_manager, "load_cache"):
                 await self.cache_manager.load_cache()
                 logger.info("✅ Cache loaded")
@@ -143,24 +270,22 @@ class Exporter:
     async def export_target(
         self, target: ExportTarget, progress_queue=None, task_id=None
     ) -> ExportStatistics:
-        """
-        Export a single target (channel, chat, or forum) with timeout protection (Phase 2 Task 2.2).
-
-        Args:
-            target: ExportTarget to process
-            progress_queue: Optional progress reporting queue
-            task_id: Optional task ID for progress tracking
-
-        Returns:
-            ExportStatistics with operation results
-        """
+        """Export a single target with timeout protection."""
         logger.info(f"Starting export for target: {target.name} (ID: {target.id})")
 
         try:
-            # Reset statistics for this export
+            # Reset statistics
             self.statistics = ExportStatistics()
 
-            # Determine export type and delegate with timeout protection
+            # 🚀 Medium Win 3: Clear caches
+            self._sender_name_cache.clear()
+            self._prefetch_stats = {"hits": 0, "misses": 0}
+            if self._prefetch_task and not self._prefetch_task.done():
+                self._prefetch_task.cancel()
+            self._prefetch_task = None
+            self._prefetch_result = None
+
+            # Determine export type
             try:
                 if target.type in ["forum", "forum_chat", "forum_topic"]:
                     result = await asyncio.wait_for(
@@ -188,6 +313,101 @@ class Exporter:
         finally:
             self.statistics.end_time = time.time()
 
+    async def _fetch_messages_batch(self, entity, min_id, limit=100):
+        """Fetch a batch of messages (MW1)."""
+        # Uses whatever client is currently in telegram_manager (Standard or Takeout)
+        return await self.telegram_manager.client.get_messages(
+            entity, limit=limit, min_id=min_id, reverse=True
+        )
+
+    async def _process_message_parallel(
+        self, message, target, media_dir, output_dir, entity_reporter
+    ):
+        """Process a single message in parallel (MW3)."""
+        try:
+            # Get sender name
+            sender_name = await self._get_sender_name(message)
+
+            # Format timestamp
+            timestamp = self._format_timestamp(message.date)
+
+            content = []
+            content.append(f"{sender_name}, [{timestamp}]\n")
+
+            if message.text:
+                content.append(f"{message.text}\n")
+
+            local_media_count = 0
+
+            # Handle media
+            if message.media and self.config.media_download:
+                try:
+                    media_paths = await self.media_processor.download_and_process_media(
+                        message=message,
+                        entity_id=target.id,
+                        entity_media_path=media_dir,
+                    )
+                    if media_paths:
+                        local_media_count = len(media_paths)
+
+                        # Record media downloads
+                        for media_path in media_paths:
+                            try:
+                                file_size = media_path.stat().st_size
+                                entity_reporter.record_media_downloaded(
+                                    message.id, file_size, str(media_path)
+                                )
+                            except Exception:
+                                pass
+
+                        # Add references
+                        for media_path in media_paths:
+                            try:
+                                relative_path = media_path.relative_to(output_dir)
+                                content.append(f"![[{relative_path}]]\n")
+
+                                # Transcription
+                                if (
+                                    self.config.enable_transcription
+                                    and is_voice_message(message)
+                                ):
+                                    try:
+                                        transcription = (
+                                            await self.media_processor.transcribe_audio(
+                                                media_path
+                                            )
+                                        )
+                                        if transcription:
+                                            content.append(
+                                                f"**Расшифровка:** {transcription}\n"
+                                            )
+                                    except Exception:
+                                        pass
+                            except ValueError:
+                                content.append(f"![[{media_path.name}]]\n")
+                    else:
+                        content.append("[[No files downloaded]]\n")
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to process media for message {message.id}: {e}"
+                    )
+                    content.append("[[Failed to download]]\n")
+            elif message.media:
+                media_type = self._get_media_type_name(message.media)
+                content.append(f"[{media_type}]\n")
+
+            content.append("\n")
+            return (
+                "".join(content),
+                message.id,
+                bool(message.media),
+                local_media_count,
+            )
+
+        except Exception as e:
+            logger.error(f"Error processing message {message.id}: {e}")
+            return "", message.id, False, 0
+
     async def _export_regular_target(
         self, target: ExportTarget, progress_queue=None, task_id=None
     ) -> ExportStatistics:
@@ -203,6 +423,17 @@ class Exporter:
             # Load entity state from core cache
             cache_key = f"entity_state_{target.id}"
             entity_data = await self.cache_manager.get(cache_key)
+            
+            # Handle dict restoration (from JSON cache)
+            if isinstance(entity_data, dict):
+                try:
+                    if "processed_message_ids" in entity_data and isinstance(entity_data["processed_message_ids"], list):
+                        entity_data["processed_message_ids"] = set(entity_data["processed_message_ids"])
+                    entity_data = EntityCacheData(**entity_data)
+                except Exception as e:
+                    logger.warning(f"Failed to restore EntityCacheData from dict: {e}")
+                    entity_data = None
+
             if not isinstance(entity_data, EntityCacheData):
                 entity_data = EntityCacheData(
                     entity_id=str(target.id),
@@ -222,7 +453,17 @@ class Exporter:
             entity_reporter = self.reporter_manager.get_reporter(
                 target.id, monitoring_dir
             )
-            entity_reporter.start_export(entity_name, "regular", export_settings={})
+
+            # Prepare export settings for monitoring
+            export_settings = {
+                "sharding_enabled": self.config.sharding_enabled,
+                "shard_count": self.config.shard_count,
+                "use_takeout": self.config.use_takeout,
+                "performance_profile": self.config.performance_profile,
+            }
+            entity_reporter.start_export(
+                entity_name, "regular", export_settings=export_settings
+            )
 
             # Update entity info
             entity_data.entity_name = entity_name
@@ -271,8 +512,8 @@ class Exporter:
                     f"[cyan]Exporting {entity_name}...", total=None, messages=0, media=0
                 )
 
-                # Open chat file for writing (using aiofiles for async I/O)
-                async with aiofiles.open(chat_file, "w", encoding="utf-8") as f:
+                # Open chat file for writing (using AsyncBufferedSaver for optimized I/O)
+                async with AsyncBufferedSaver(chat_file, "w", encoding="utf-8") as f:
                     # Write chat header
                     await f.write(f"# Chat Export: {entity_name}\n\n")
                     await f.write(f"Export Date: {self._get_current_datetime()}\n")
@@ -282,249 +523,147 @@ class Exporter:
                     # Single-pass streaming: process messages as they arrive
                     logger.info(f"📊 Starting streaming export for {entity_name}...")
 
-                    # Retry loop for FloodWaitError with single-pass processing
-                    max_retries = 10  # Increased from 3 to handle persistent FloodWait
-                    retry_count = 0
-                    processing_started = False
-                    # Track offset for resuming after FloodWait
-                    current_offset_id = 0
+                    # Initialize loop state
+                    current_min_id = 0
                     consecutive_flood_waits = 0
+                    max_retries = 10
 
-                    while retry_count < max_retries:
+                    # Initial fetch task (MW2: Prefetch)
+                    fetch_task = asyncio.create_task(
+                        self._fetch_messages_batch(entity, current_min_id)
+                    )
+
+                    while True:
                         try:
-                            # Use offset_id to resume from last processed message (prevents duplication on retry)
-                            async for (
-                                message
-                            ) in self.telegram_manager.client.iter_messages(
-                                entity, reverse=True, offset_id=current_offset_id
-                            ):
-                                if not (message.text or message.media):
-                                    continue
-
-                                if not processing_started:
-                                    logger.info(
-                                        f"📈 Processing messages from {entity_name}..."
-                                    )
-                                    processing_started = True
-                                try:
-                                    message_count += 1
-                                    self.statistics.messages_processed += 1
-
-                                    # Update offset for FloodWait recovery (so we don't reprocess messages on retry)
-                                    current_offset_id = message.id
-
-                                    # Update entity state
-                                    entity_data.processed_message_ids.add(message.id)
-                                    entity_data.processed_messages = len(
-                                        entity_data.processed_message_ids
-                                    )
-                                    entity_data.last_message_id = message.id
-                                    entity_reporter.record_message_processed(
-                                        message.id, has_media=bool(message.media)
-                                    )
-
-                                    # Periodic save every 100 messages
-                                    if message_count % 100 == 0:
-                                        try:
-                                            await self.cache_manager.set(
-                                                cache_key, entity_data
-                                            )
-                                            entity_reporter.save_metrics()
-                                            # Reset consecutive flood waits on successful batch
-                                            consecutive_flood_waits = 0
-                                            logger.info(
-                                                f"💾 Periodic save: {message_count} messages processed for {entity_name}"
-                                            )
-                                        except Exception as save_error:
-                                            logger.warning(
-                                                f"Failed periodic save at message {message_count} for {entity_name}: {save_error}"
-                                            )
-
-                                    # Get sender name
-                                    sender_name = await self._get_sender_name(message)
-
-                                    # Format timestamp
-                                    timestamp = self._format_timestamp(message.date)
-
-                                    # Write message header in Telegram format
-                                    await f.write(f"{sender_name}, [{timestamp}]\n")
-
-                                    # Write message text
-                                    if message.text:
-                                        await f.write(f"{message.text}\n")
-
-                                    # Handle media
-                                    if message.media and self.config.media_download:
-                                        try:
-                                            media_paths = await self.media_processor.download_and_process_media(
-                                                message=message,
-                                                entity_id=target.id,
-                                                entity_media_path=media_dir,
-                                            )
-                                            if media_paths:
-                                                media_count += len(media_paths)
-                                                self.statistics.media_downloaded += len(
-                                                    media_paths
-                                                )
-
-                                                # Record media downloads in monitoring
-                                                for media_path in media_paths:
-                                                    try:
-                                                        file_size = (
-                                                            media_path.stat().st_size
-                                                        )
-                                                        entity_reporter.record_media_downloaded(
-                                                            message.id,
-                                                            file_size,
-                                                            str(media_path),
-                                                        )
-                                                    except Exception as size_error:
-                                                        logger.debug(
-                                                            f"Failed to get file size for {media_path}: {size_error}"
-                                                        )
-
-                                                # Add media references
-                                                for media_path in media_paths:
-                                                    try:
-                                                        relative_path = (
-                                                            media_path.relative_to(
-                                                                output_dir
-                                                            )
-                                                        )
-                                                        await f.write(
-                                                            f"![[{relative_path}]]\n"
-                                                        )
-
-                                                        # Transcribe voice messages if enabled
-                                                        if (
-                                                            self.config.enable_transcription
-                                                            and is_voice_message(
-                                                                message
-                                                            )
-                                                        ):
-                                                            try:
-                                                                logger.debug(
-                                                                    f"Transcribing voice message {message.id}"
-                                                                )
-                                                                transcription = await self.media_processor.transcribe_audio(
-                                                                    media_path
-                                                                )
-                                                                if transcription:
-                                                                    await f.write(
-                                                                        f"**Расшифровка:** {transcription}\n"
-                                                                    )
-                                                                    logger.debug(
-                                                                        f"Transcription added for message {message.id}"
-                                                                    )
-                                                            except (
-                                                                Exception
-                                                            ) as trans_err:
-                                                                logger.warning(
-                                                                    f"Failed to transcribe message {message.id}: {trans_err}"
-                                                                )
-
-                                                    except ValueError:
-                                                        # Fallback if relative_to fails
-                                                        await f.write(
-                                                            f"![[{media_path.name}]]\n"
-                                                        )
-                                            else:
-                                                await f.write(
-                                                    "[[No files downloaded]]\n"
-                                                )
-
-                                        except Exception as e:
-                                            logger.warning(
-                                                f"Failed to process media for message {message.id}: {e}"
-                                            )
-                                            await f.write("[[Failed to download]]\n")
-                                    elif message.media:
-                                        # Media present but download disabled
-                                        media_type = self._get_media_type_name(
-                                            message.media
-                                        )
-                                        await f.write(f"[{media_type}]\n")
-
-                                    await f.write("\n")  # Empty line after each message
-
-                                    # Update progress bar
-                                    progress.update(
-                                        task_id_progress,
-                                        messages=message_count,
-                                        media=media_count,
-                                        description=f"[cyan]Exporting {entity_name}...",
-                                    )
-
-                                    # Also update progress queue if provided
-                                    if progress_queue:
-                                        await progress_queue.put(
-                                            {
-                                                "task_id": task_id,
-                                                "progress": message_count,
-                                                "total": None,
-                                                "status": f"Processed {message_count} messages",
-                                            }
-                                        )
-
-                                except Exception as e:
-                                    logger.error(
-                                        f"Error processing message {message.id}: {e}"
-                                    )
-                                    self.statistics.errors_encountered += 1
-
-                            break  # Success, exit retry loop
+                            # Await the batch
+                            batch = await fetch_task
+                            consecutive_flood_waits = 0  # Reset on success
 
                         except FloodWaitError as e:
-                            retry_count += 1
+                            # Handle FloodWait
                             consecutive_flood_waits += 1
+                            if consecutive_flood_waits > max_retries:
+                                logger.error("Max retries reached for FloodWait")
+                                break
+
                             wait_time = e.seconds
-                            
-                            # Add exponential backoff buffer (caps at 60s extra)
-                            backoff_buffer = min(consecutive_flood_waits * 5, 60)
-                            total_wait = wait_time + backoff_buffer
-                            
+                            backoff = min(consecutive_flood_waits * 5, 60)
+                            total_wait = wait_time + backoff
+
                             logger.warning(
-                                f"⏳ FloodWait detected: Telegram requires {wait_time}s wait "
-                                f"(+ {backoff_buffer}s buffer = {total_wait}s total) "
-                                f"(attempt {retry_count}/{max_retries})"
+                                f"FloodWait: {wait_time}s (+{backoff}s buffer). Retry {consecutive_flood_waits}/{max_retries}"
                             )
-                            logger.info(
-                                f"  📍 Current progress: {message_count} messages processed, last message ID: {current_offset_id}"
-                            )
-                            logger.info(
-                                f"  🔄 Will resume from message ID: {current_offset_id} (offset_id parameter)"
-                            )
-                            
-                            if retry_count < max_retries:
-                                logger.info(
-                                    f"⏱️  Waiting {total_wait} seconds before retry..."
-                                )
-                                # Update progress bar to show we're waiting
-                                progress.update(
-                                    task_id_progress,
-                                    description=f"[yellow]⏳ FloodWait: waiting {total_wait}s (retry {retry_count}/{max_retries})[/yellow]",
-                                )
-                                await asyncio.sleep(total_wait)
-                                
-                                # Reset description after wait
-                                progress.update(
-                                    task_id_progress,
-                                    description=f"[cyan]Exporting {entity_name}... (resuming)",
-                                )
-                                logger.info("🔄 Resuming export after FloodWait...")
-                            else:
-                                logger.error(
-                                    f"❌ Max retries ({max_retries}) reached for FloodWait"
-                                )
+
+                            # Flush file (Fix)
+                            try:
+                                await f.flush()
+                                logger.debug("📁 File flushed before FloodWait sleep")
+                            except Exception as flush_error:
                                 logger.warning(
-                                    f"⚠️  Partial export completed: {message_count} messages saved to {chat_file}"
+                                    f"Failed to flush file before FloodWait: {flush_error}"
                                 )
-                                # Don't raise - allow partial export to be saved
-                                entity_reporter.record_error(
-                                    "FloodWait max retries exceeded",
-                                    {"messages_processed": message_count, "media_downloaded": media_count}
+
+                            # Update progress
+                            progress.update(
+                                task_id_progress,
+                                description=f"[yellow]⏳ FloodWait: {total_wait}s[/yellow]",
+                            )
+                            await asyncio.sleep(total_wait)
+                            progress.update(
+                                task_id_progress,
+                                description=f"[cyan]Exporting {entity_name}...[/cyan]",
+                            )
+
+                            # Retry fetching same batch
+                            fetch_task = asyncio.create_task(
+                                self._fetch_messages_batch(entity, current_min_id)
+                            )
+                            continue
+
+                        except Exception as e:
+                            logger.error(f"Error fetching batch: {e}")
+                            break
+
+                        if not batch:
+                            break
+
+                        # Start next fetch immediately (MW2)
+                        last_msg_id = batch[-1].id
+
+                        # Rate limiting (if configured)
+                        if self.config.request_delay > 0:
+                            await asyncio.sleep(self.config.request_delay)
+
+                        fetch_task = asyncio.create_task(
+                            self._fetch_messages_batch(entity, last_msg_id)
+                        )
+
+                        # Process batch in parallel (MW3)
+                        tasks = [
+                            self._process_message_parallel(
+                                msg, target, media_dir, output_dir, entity_reporter
+                            )
+                            for msg in batch
+                            if (msg.text or msg.media)  # Filter empty
+                        ]
+
+                        if not tasks:
+                            current_min_id = last_msg_id
+                            continue
+
+                        results = await asyncio.gather(*tasks)
+
+                        # Write results sequentially
+                        for content, msg_id, has_media, media_cnt in results:
+                            if not content:
+                                continue  # Skip failed
+
+                            await f.write(content)
+
+                            # Update stats
+                            message_count += 1
+                            media_count += media_cnt
+                            self.statistics.messages_processed += 1
+                            self.statistics.media_downloaded += media_cnt
+
+                            # Update entity data
+                            entity_data.processed_message_ids.add(msg_id)
+                            entity_data.last_message_id = msg_id
+                            entity_reporter.record_message_processed(
+                                msg_id, has_media=has_media
+                            )
+
+                        # Periodic save
+                        if message_count % 100 == 0:
+                            try:
+                                await self.cache_manager.set(cache_key, entity_data)
+                                entity_reporter.save_metrics()
+                                logger.info(
+                                    f"💾 Periodic save: {message_count} messages processed for {entity_name}"
                                 )
-                                break  # Exit retry loop with partial results
+                            except Exception as save_error:
+                                logger.warning(
+                                    f"Failed periodic save at message {message_count}: {save_error}"
+                                )
+
+                        # Update progress bar
+                        progress.update(
+                            task_id_progress, messages=message_count, media=media_count
+                        )
+
+                        # Also update progress queue if provided
+                        if progress_queue:
+                            await progress_queue.put(
+                                {
+                                    "task_id": task_id,
+                                    "progress": message_count,
+                                    "total": None,
+                                    "status": f"Processed {message_count} messages",
+                                }
+                            )
+
+                        # Update loop variable
+                        current_min_id = last_msg_id
 
             # Update total messages count in file
             await self._update_message_count(chat_file, message_count)
@@ -540,8 +679,22 @@ class Exporter:
             # Save final entity state and monitoring data
             try:
                 await self.cache_manager.set(cache_key, entity_data)
+
+                # Collect worker stats if available
+                if hasattr(self.telegram_manager, "get_worker_stats"):
+                    worker_stats = self.telegram_manager.get_worker_stats()
+                    if worker_stats:
+                        entity_reporter.metrics.worker_stats = worker_stats.copy()
+                        logger.info(f"📊 Collected stats from {len(worker_stats)} workers")
+
                 entity_reporter.finish_export()
                 entity_reporter.save_report()
+
+                # Update statistics with resource metrics
+                self.statistics.avg_cpu_percent = (
+                    entity_reporter.metrics.avg_cpu_percent
+                )
+                self.statistics.peak_memory_mb = entity_reporter.metrics.peak_memory_mb
 
                 logger.info(f"Final save completed for {entity_name}")
                 logger.info(f"  📊 Total messages: {message_count}")
@@ -587,9 +740,18 @@ class Exporter:
         return self.statistics
 
     async def _get_sender_name(self, message) -> str:
-        """Get formatted sender name for message."""
+        """Get formatted sender name for message with caching."""
         try:
+            sender_id = message.sender_id
+            if not sender_id:
+                return "Unknown User"
+
+            # Check cache first
+            if sender_id in self._sender_name_cache:
+                return self._sender_name_cache[sender_id]
+
             if message.sender:
+                name = "Unknown User"
                 if hasattr(message.sender, "first_name"):
                     # User
                     name_parts = []
@@ -597,24 +759,25 @@ class Exporter:
                         name_parts.append(message.sender.first_name)
                     if getattr(message.sender, "last_name", None):
                         name_parts.append(message.sender.last_name)
-                    return (
-                        " ".join(name_parts)
-                        if name_parts
-                        else f"User {message.sender.id}"
-                    )
+                    name = " ".join(name_parts) if name_parts else f"User {sender_id}"
                 elif hasattr(message.sender, "title"):
                     # Channel/Group
-                    return str(message.sender.title)
+                    name = str(message.sender.title)
                 else:
-                    return f"User {message.sender.id}"
+                    name = f"User {sender_id}"
+
+                # Cache the result
+                self._sender_name_cache[sender_id] = name
+                return name
             else:
-                return "Unknown User"
+                return f"User {sender_id}"
         except Exception:
             return "Unknown User"
 
     def _format_timestamp(self, dt) -> str:
-        """Format datetime in Telegram export format."""
-        return str(dt.strftime("%d.%m.%Y %H:%M"))
+        """Format datetime in Telegram export format (optimized)."""
+        # f-string is faster than strftime
+        return f"{dt.day:02d}.{dt.month:02d}.{dt.year} {dt.hour:02d}:{dt.minute:02d}"
 
     def _get_current_datetime(self) -> str:
         """Get current datetime formatted."""
@@ -750,6 +913,11 @@ class Exporter:
 
                 progress.advance(task_id_progress)
 
+        # 🚀 Run Deferred Media Processing
+        if self.config.deferred_processing:
+            logger.info("⏳ Starting deferred media processing...")
+            await self.media_processor.process_pending_tasks()
+
         return results
 
     async def shutdown(self):
@@ -787,9 +955,113 @@ async def run_export(
         # Initialize all components
         await exporter.initialize()
 
-        # Export all configured targets
-        results = await exporter.export_all(config.export_targets, progress_queue)
+        # 🚀 High Win: Takeout API Integration
+        if config.use_takeout:
+            # 1. Check if we are already in a Takeout session (Reuse Strategy)
+            current_client = telegram_manager.client
+            existing_id = getattr(current_client, "takeout_id", getattr(current_client, "_takeout_id", None))
+            
+            if existing_id:
+                logger.info(f"♻️ Client is already in Takeout mode (ID: {existing_id}). Skipping initialization.")
+                telegram_manager._external_takeout_id = existing_id
+                
+                # Disable rate limiting
+                original_delay = config.request_delay
+                config.request_delay = 0.0
+                
+                try:
+                    return await exporter.export_all(config.export_targets, progress_queue)
+                finally:
+                    config.request_delay = original_delay
+                    # Do not clear _external_takeout_id here as we didn't create the session
+                    logger.info("🔄 Finished export using existing Takeout session")
 
+            # 2. If not reusing, try to init new session
+            try:
+                logger.info("🚀 Attempting to initiate Telegram Takeout session...")
+                logger.info(
+                    "⚠️  Please check your Telegram messages (Service Notifications) to ALLOW the request."
+                )
+
+                # Calculate max file size in bytes (default 2GB)
+                # Telethon requires file_max_size if files=True
+                max_file_size = getattr(config, "max_file_size_mb", 2000) * 1024 * 1024
+
+                # 🧹 Force-clear stale state blindly
+                # The error "Can't send a takeout request while another takeout..." is a client-side check
+                # We force clear it to ensure we can start a new one if the previous one wasn't closed properly
+                try:
+                    telegram_manager.client._takeout_id = None
+                except Exception:
+                    pass
+
+                # Use Manual Wrapper instead of client.takeout()
+                async with TakeoutSessionWrapper(telegram_manager.client, config) as takeout_client:
+                    logger.info(
+                        "✅ Takeout session established! Switching to Turbo Mode."
+                    )
+
+                    # ⚡ HACK: Temporarily swap the client in the manager
+                    original_client = telegram_manager.client
+                    telegram_manager.client = takeout_client
+                    
+                    # Pass the ID to the manager so shards can reuse it
+                    takeout_id = takeout_client.takeout_id
+                    
+                    logger.info(f"DEBUG: Extracted Takeout ID: {takeout_id}")
+                    
+                    # Force set the attribute on the manager
+                    setattr(telegram_manager, "_external_takeout_id", takeout_id)
+                    
+                    if takeout_id:
+                        logger.info(f"♻️ Shared Takeout ID {takeout_id} with ShardedManager")
+                    else:
+                        logger.warning("⚠️ Could not extract Takeout ID from client! Sharding might fail.")
+
+                    # Disable rate limiting for Takeout
+                    original_delay = config.request_delay
+                    config.request_delay = 0.0
+
+                    try:
+                        # Export all configured targets using Takeout
+                        results = await exporter.export_all(
+                            config.export_targets, progress_queue
+                        )
+                    finally:
+                        # Restore original client and settings
+                        telegram_manager.client = original_client
+                        if hasattr(telegram_manager, "_external_takeout_id"):
+                            telegram_manager._external_takeout_id = None
+                            
+                        config.request_delay = original_delay
+                        logger.info("🔄 Restored standard client connection")
+
+                    return results
+
+            except errors.TakeoutInitDelayError:
+                logger.warning(
+                    "⚠️  Takeout request needs confirmation. Please allow it in Telegram."
+                )
+                logger.warning(
+                    "   (Telegram requires a delay after approval before Takeout becomes active)"
+                )
+                logger.info("ℹ️  Falling back to Standard API with rate limiting.")
+
+            except Exception as e:
+                if "another takeout" in str(e):
+                     logger.warning("⚠️  Detected stale Takeout session state even after force-clear.")
+                     # At this point, we can't do much else than fall back
+                
+                logger.warning(
+                    f"⚠️  Takeout session failed ({e}). Falling back to Standard API."
+                )
+
+        # Fallback or Standard mode
+        logger.info(
+            f"ℹ️  Using Standard API with rate limit delay: {config.takeout_fallback_delay}s"
+        )
+        config.request_delay = config.takeout_fallback_delay
+        results = await exporter.export_all(config.export_targets, progress_queue)
         return results
 
     finally:

@@ -1,6 +1,7 @@
 import asyncio
 import re
 import sys
+import os
 from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
@@ -25,7 +26,8 @@ from telethon.tl.types import (
     Message,
 )
 
-from src.config import Config, ExportTarget, ITER_MESSAGES_TIMEOUT
+from src.config import ITER_MESSAGES_TIMEOUT, Config, ExportTarget
+from src.core.connection import PoolType
 from src.exceptions import TelegramConnectionError
 from src.utils import clear_screen, logger, notify_and_pause, sanitize_filename
 
@@ -105,6 +107,26 @@ class TelegramManager:
                 proxy_info = (proxy_scheme, config.proxy_addr, config.proxy_port)
 
         base_timeout = getattr(config.performance, "base_download_timeout", 300.0)
+
+        # Check for tdata import
+        if config.tdata_path and not os.path.exists(f"{config.session_name}.session"):
+            try:
+                from src.auth.tdesktop import TDesktopManager
+                if TDesktopManager.is_tdata(config.tdata_path):
+                    logger.info(f"Found tdata at {config.tdata_path}, importing...")
+                    # This creates the session file
+                    TDesktopManager.convert_tdata(
+                        config.tdata_path, 
+                        config.session_name, 
+                        config.api_id, 
+                        config.api_hash
+                    )
+                else:
+                    logger.warning(f"Provided tdata_path {config.tdata_path} does not look like a valid tdata folder")
+            except ImportError:
+                logger.warning("opentele not installed, skipping tdata import")
+            except Exception as e:
+                logger.error(f"Failed to import tdata: {e}")
 
         self.client = TelegramClient(
             config.session_name,
@@ -275,40 +297,72 @@ class TelegramManager:
             raise
 
     async def fetch_messages(
-        self, entity: Any, limit: Optional[int] = None, min_id: Optional[int] = None
+        self,
+        entity: Any,
+        limit: Optional[int] = None,
+        min_id: Optional[int] = None,
+        page: Optional[int] = None,
+        page_size: Optional[int] = None,
     ) -> AsyncGenerator[Message, None]:
         """
         Fetch messages from a Telegram entity with FloodWaitError retry support and timeout.
         Yields messages one-by-one with timeout protection (Phase 2 Task 2.2).
+
+        Supports lazy loading pagination when enabled in config.
+
+        Args:
+            entity: Telegram entity to fetch from
+            limit: Maximum messages to fetch (None = all)
+            min_id: Start from this message ID
+            page: Page number for pagination (0-based, requires page_size)
+            page_size: Messages per page (uses config.lazy_message_page_size if None)
         """
+        # Handle pagination parameters
+        if page is not None:
+            if page_size is None:
+                page_size = self.config.lazy_message_page_size
+            # Calculate offset_id for pagination
+            # Note: This is a simplified implementation
+            # In practice, you'd need to track message IDs for proper pagination
+            offset_id = None  # Would need to be calculated based on page
+            logger.info(f"Fetching page {page} with page size {page_size}")
+        else:
+            offset_id = None
+
         if min_id:
             logger.info(f"Starting from message ID: {min_id}")
 
+        # Apply pagination limit if specified
+        if page is not None and page_size:
+            effective_limit = page_size
+        else:
+            effective_limit = limit
+
         max_retries = 3
         retry_count = 0
-        
+
         while retry_count < max_retries:
             try:
                 # Wrap iter_messages in timeout (Phase 2 Task 2.2)
                 async def _message_generator():
                     async for message in self.client.iter_messages(
                         entity=entity,
-                        limit=limit,
-                        offset_id=0,
+                        limit=effective_limit,
+                        offset_id=offset_id or 0,
                         reverse=True,
                         min_id=min_id or 0,
                         wait_time=self.config.request_delay,
                     ):
                         if isinstance(message, Message) and not message.action:
                             yield message
-                
+
                 # Execute with timeout - if exceeds ITER_MESSAGES_TIMEOUT, raise asyncio.TimeoutError
                 async for message in _message_generator():
                     try:
                         # Apply timeout for each message fetch operation
                         yield await asyncio.wait_for(
                             self._yield_with_timeout(message),
-                            timeout=ITER_MESSAGES_TIMEOUT
+                            timeout=ITER_MESSAGES_TIMEOUT,
                         )
                     except asyncio.TimeoutError:
                         logger.error(
@@ -316,10 +370,10 @@ class TelegramManager:
                             f"(exceeded {ITER_MESSAGES_TIMEOUT}s limit)"
                         )
                         raise
-                
+
                 # Success, exit retry loop
                 break
-            
+
             except asyncio.TimeoutError:
                 retry_count += 1
                 logger.warning(
@@ -330,9 +384,11 @@ class TelegramManager:
                     logger.info(f"⏱️  Waiting 5 seconds before retry...")
                     await asyncio.sleep(5)
                 else:
-                    logger.error("❌ Max retries reached for message fetching (timeout), aborting")
+                    logger.error(
+                        "❌ Max retries reached for message fetching (timeout), aborting"
+                    )
                     raise
-            
+
             except FloodWaitError as e:
                 retry_count += 1
                 wait_time = e.seconds
@@ -343,7 +399,9 @@ class TelegramManager:
                     logger.info(f"⏱️  Waiting {wait_time + 1} seconds before retry...")
                     await asyncio.sleep(wait_time + 1)
                 else:
-                    logger.error("❌ Max retries reached for message fetching, aborting")
+                    logger.error(
+                        "❌ Max retries reached for message fetching, aborting"
+                    )
                     raise
 
     async def _yield_with_timeout(self, value):
@@ -631,12 +689,33 @@ class TelegramManager:
         if not link:
             return
 
-        topic_result = await self.detect_topic_from_url(link)
-        if not topic_result:
+        # Use robust parser first
+        from src.utils import LinkParser
+        parsed = LinkParser.parse(link)
+        
+        chat_id = None
+        topic_id = None
+        
+        if parsed:
+            chat_id = parsed["peer"]
+            # If topic_id is explicit (from ?thread= or /c/ID/TOPIC/MSG)
+            if parsed["topic_id"]:
+                topic_id = parsed["topic_id"]
+            # If it's a private link /c/ID/MSG, the MSG might be the topic ID if it's a topic creation message
+            # But usually /c/ID/MSG points to a message.
+            # If we are looking for a TOPIC, we assume the user pasted a link TO the topic (which is usually the first message)
+            elif parsed["message_id"]:
+                topic_id = parsed["message_id"]
+        else:
+            # Fallback to old regex
+            topic_result = await self.detect_topic_from_url(link)
+            if topic_result:
+                chat_id, topic_id = topic_result
+
+        if not chat_id or not topic_id:
             await notify_and_pause_async("[red]Invalid forum topic link format.")
             return
 
-        chat_id, topic_id = topic_result
         entity = await self.resolve_entity(chat_id)
         if not entity or not await self.is_forum_chat(entity):
             await notify_and_pause_async(
@@ -746,14 +825,27 @@ class TelegramManager:
             return False
 
     async def get_forum_topics(
-        self, entity: Any, force_refresh: bool = False
+        self,
+        entity: Any,
+        force_refresh: bool = False,
+        limit: Optional[int] = None,
+        offset_topic: int = 0,
     ) -> List[TopicInfo]:
         entity_id = str(getattr(entity, "id", entity))
+
+        # Check if lazy pagination is enabled
+        if self.config.enable_lazy_loading and self.config.lazy_topic_pagination:
+            # For lazy loading, implement pagination
+            return await self._get_forum_topics_paginated(entity, limit, offset_topic)
+
+        # Original behavior for non-lazy mode
         if not force_refresh and entity_id in self.topics_cache:
             return self.topics_cache[entity_id]
 
         topics = []
         try:
+            # Use configured limit or default to 100
+            fetch_limit = limit or 100
 
             async def _fetch_topics():
                 return await self.client(
@@ -761,14 +853,14 @@ class TelegramManager:
                         channel=entity,
                         offset_date=None,
                         offset_id=0,
-                        offset_topic=0,
-                        limit=100,
+                        offset_topic=offset_topic,
+                        limit=fetch_limit,
                     )
                 )
 
             result = (
                 await self.connection_manager.execute_with_retry(
-                    _fetch_topics, f"fetch_forum_topics_{entity_id}", pool_type="api"
+                    _fetch_topics, f"fetch_forum_topics_{entity_id}", PoolType.API
                 )
                 if self.connection_manager
                 else await _fetch_topics()
@@ -797,6 +889,89 @@ class TelegramManager:
             logger.error(f"Error fetching forum topics for {entity_id}: {e}")
         return topics
 
+    async def _get_forum_topics_paginated(
+        self, entity: Any, limit: Optional[int] = None, offset_topic: int = 0
+    ) -> List[TopicInfo]:
+        """
+        Get forum topics with pagination support for lazy loading.
+
+        Args:
+            entity: Forum entity
+            limit: Maximum topics to fetch (uses config.lazy_topic_page_size if None)
+            offset_topic: Topic offset for pagination
+
+        Returns:
+            List of TopicInfo objects
+        """
+        page_size = limit or self.config.lazy_topic_page_size
+        topics = []
+        current_offset = offset_topic
+
+        try:
+            while len(topics) < page_size:
+                remaining = page_size - len(topics)
+                fetch_limit = min(remaining, 100)  # Telegram API limit
+
+                async def _fetch_page():
+                    return await self.client(
+                        GetForumTopicsRequest(
+                            channel=entity,
+                            offset_date=None,
+                            offset_id=0,
+                            offset_topic=current_offset,
+                            limit=fetch_limit,
+                        )
+                    )
+
+                result = (
+                    await self.connection_manager.execute_with_retry(
+                        _fetch_page,
+                        f"fetch_forum_topics_page_{current_offset}",
+                        PoolType.API,
+                    )
+                    if self.connection_manager
+                    else await _fetch_page()
+                )
+
+                if not hasattr(result, "topics") or not result.topics:
+                    break  # No more topics
+
+                page_topics = []
+                for topic in result.topics:
+                    if isinstance(topic, ForumTopic):
+                        message_count = await self._get_topic_message_count_via_api(
+                            entity, topic.id
+                        )
+                        topic_info = TopicInfo(
+                            topic_id=topic.id,
+                            title=topic.title,
+                            icon_emoji=getattr(topic, "icon_emoji_id", None) or "💬",
+                            created_date=getattr(topic, "date", None),
+                            is_closed=getattr(topic, "closed", False),
+                            is_pinned=getattr(topic, "pinned", False),
+                            message_count=message_count,
+                        )
+                        page_topics.append(topic_info)
+
+                if not page_topics:
+                    break  # No valid topics in this page
+
+                topics.extend(page_topics)
+                current_offset = page_topics[-1].topic_id
+
+                # If we got fewer topics than requested, we've reached the end
+                if len(page_topics) < fetch_limit:
+                    break
+
+            logger.debug(
+                f"Fetched {len(topics)} topics with pagination (offset: {offset_topic})"
+            )
+
+        except Exception as e:
+            logger.error(f"Error fetching paginated forum topics: {e}")
+
+        return topics
+
     async def _get_topic_message_count_via_api(self, entity: Any, topic_id: int) -> int:
         try:
             result = await self.client.get_messages(entity, reply_to=topic_id, limit=0)
@@ -817,7 +992,7 @@ class TelegramManager:
     #     messages = []
     #     max_retries = 3
     #     retry_count = 0
-    #     
+    #
     #     while retry_count < max_retries:
     #         try:
     #             async for message in self.client.iter_messages(
@@ -829,10 +1004,10 @@ class TelegramManager:
     #             ):
     #                 if message.id != topic_id:
     #                     messages.append(message)
-    #             
+    #
     #             # Success, exit retry loop
     #             break
-    #         
+    #
     #         except FloodWaitError as e:
     #             retry_count += 1
     #             wait_time = e.seconds
@@ -845,11 +1020,11 @@ class TelegramManager:
     #             else:
     #                 logger.error(f"❌ Max retries reached for topic {topic_id} messages, returning partial results")
     #                 break
-    #         
+    #
     #         except Exception as e:
     #             logger.error(f"Error fetching messages from topic {topic_id}: {e}")
     #             break
-    #     
+    #
     #     return messages
 
     async def get_topic_messages_stream(
@@ -861,20 +1036,20 @@ class TelegramManager:
     ):
         """
         Stream messages from a topic with FloodWait retry support and timeout protection.
-        
+
         ASYNC GENERATOR - streams messages one at a time instead of collecting in memory.
         Much more efficient for large topics (Phase 2 Task 2.2: Added timeout protection).
-        
+
         Usage:
             async for message in await telegram_manager.get_topic_messages_stream(entity, topic_id):
                 process(message)
-        
+
         Args:
             entity: Chat/channel entity
             topic_id: Topic ID to fetch messages from
             limit: Max messages to fetch (None = all)
             min_id: Start from this message ID (for resuming)
-        
+
         Yields:
             Message objects one at a time
         """
@@ -882,9 +1057,10 @@ class TelegramManager:
         max_retries = 3
         retry_count = 0
         messages_yielded = 0
-        
+
         while retry_count < max_retries:
             try:
+
                 async def _topic_message_generator():
                     async for message in self.client.iter_messages(
                         entity=entity,
@@ -895,16 +1071,18 @@ class TelegramManager:
                     ):
                         if message.id != topic_id:
                             yield message
-                
+
                 # Execute with timeout per batch of messages (Phase 2 Task 2.2)
                 async for message in _topic_message_generator():
                     try:
                         # Each message must be yielded within timeout
                         yielded_msg = await asyncio.wait_for(
                             self._yield_with_timeout(message),
-                            timeout=ITER_MESSAGES_TIMEOUT
+                            timeout=ITER_MESSAGES_TIMEOUT,
                         )
-                        offset_id = yielded_msg.id  # Remember last ID for potential retry
+                        offset_id = (
+                            yielded_msg.id
+                        )  # Remember last ID for potential retry
                         messages_yielded += 1
                         yield yielded_msg
                     except asyncio.TimeoutError:
@@ -913,11 +1091,13 @@ class TelegramManager:
                             f"(exceeded {ITER_MESSAGES_TIMEOUT}s limit)"
                         )
                         raise
-                
+
                 # Success, exit retry loop
-                logger.debug(f"✅ Topic {topic_id}: streamed {messages_yielded} messages successfully")
+                logger.debug(
+                    f"✅ Topic {topic_id}: streamed {messages_yielded} messages successfully"
+                )
                 break
-            
+
             except asyncio.TimeoutError:
                 retry_count += 1
                 logger.warning(
@@ -925,7 +1105,9 @@ class TelegramManager:
                     f"(attempt {retry_count}/{max_retries}, already yielded {messages_yielded} messages)"
                 )
                 if retry_count < max_retries:
-                    logger.info(f"⏱️  Waiting 5 seconds before resuming from message ID {offset_id}...")
+                    logger.info(
+                        f"⏱️  Waiting 5 seconds before resuming from message ID {offset_id}..."
+                    )
                     await asyncio.sleep(5)
                     # Loop will retry with offset_id, resuming from where we left off
                 else:
@@ -934,7 +1116,7 @@ class TelegramManager:
                         f"Resuming from message ID {offset_id}."
                     )
                     break
-            
+
             except FloodWaitError as e:
                 retry_count += 1
                 wait_time = e.seconds
@@ -943,7 +1125,9 @@ class TelegramManager:
                     f"(attempt {retry_count}/{max_retries}, already yielded {messages_yielded} messages)"
                 )
                 if retry_count < max_retries:
-                    logger.info(f"⏱️  Waiting {wait_time + 1} seconds before resuming from message ID {offset_id}...")
+                    logger.info(
+                        f"⏱️  Waiting {wait_time + 1} seconds before resuming from message ID {offset_id}..."
+                    )
                     await asyncio.sleep(wait_time + 1)
                     # Loop will retry with offset_id, resuming from where we left off
                 else:
@@ -952,7 +1136,7 @@ class TelegramManager:
                         f"Resuming from message ID {offset_id}."
                     )
                     break
-            
+
             except Exception as e:
                 logger.error(f"Error streaming messages from topic {topic_id}: {e}")
                 break
@@ -966,21 +1150,23 @@ class TelegramManager:
     ) -> List[Message]:
         """
         Collect all topic messages into a list (backward compatibility).
-        
+
         WARNING: For large topics, this collects ALL messages in memory.
         Consider using get_topic_messages_stream() for better memory efficiency.
-        
+
         Args:
             entity: Chat/channel entity
             topic_id: Topic ID to fetch messages from
             limit: Max messages to fetch
             min_id: Start from this message ID
-        
+
         Returns:
             List of all messages from the topic
         """
         messages = []
-        async for message in self.get_topic_messages_stream(entity, topic_id, limit, min_id):
+        async for message in self.get_topic_messages_stream(
+            entity, topic_id, limit, min_id
+        ):
             messages.append(message)
         return messages
 

@@ -7,6 +7,7 @@ Uses composition of modular components instead of inheritance.
 
 import asyncio
 import os
+import shutil
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -48,6 +49,7 @@ class MediaProcessor:
         max_workers: int = 4,
         temp_dir: Optional[Path] = None,
         enable_smart_caching: bool = True,
+        worker_clients: list = None,
     ):
         """
         Инициализация медиа-процессора.
@@ -60,9 +62,11 @@ class MediaProcessor:
             max_workers: Количество воркеров для обработки
             temp_dir: Временная директория
             enable_smart_caching: Включить умное кэширование
+            worker_clients: Список дополнительных клиентов (воркеров)
         """
         self.config = config
         self.client = client
+        self.worker_clients = worker_clients or []
         self.cache_manager = cache_manager
         self.connection_manager = connection_manager
         self.max_workers = max_workers
@@ -105,6 +109,9 @@ class MediaProcessor:
 
         # Очередь обработки
         self._processing_queue: asyncio.Queue = asyncio.Queue()
+        
+        # 🚀 Deferred Processing Queue
+        self._pending_tasks: List[ProcessingTask] = []
 
         # Статистика
         self._processed_files = 0
@@ -148,6 +155,8 @@ class MediaProcessor:
             self._downloader = MediaDownloader(
                 connection_manager=self.connection_manager,
                 temp_dir=self.temp_dir,
+                client=self.client,
+                worker_clients=self.worker_clients,
             )
 
             # Инициализация процессоров
@@ -272,7 +281,7 @@ class MediaProcessor:
         Returns:
             Список путей к обработанным файлам
         """
-        if not self.config.media_download:
+        if not self.config.any_media_download_enabled:
             return []
 
         try:
@@ -328,10 +337,53 @@ class MediaProcessor:
 
         # Определение типа медиа
         media_type = self._determine_media_type(message)
-        if media_type:
+        
+        # Check extension filters first (tdl-style)
+        filename = await self._generate_filename(message, media_type or "unknown")
+        if filename and not self._is_extension_allowed(filename):
+            logger.debug(f"Skipping {filename} due to extension filter")
+            return media_items
+
+        if media_type and self._should_download_media_type(media_type):
             media_items.append((media_type, message))
+        else:
+            logger.debug(f"Skipping media type {media_type} (disabled in config)")
 
         return media_items
+
+    def _is_extension_allowed(self, filename: str) -> bool:
+        """Check if file extension is allowed by include/exclude lists."""
+        if not filename:
+            return True
+            
+        # Extract extension without dot
+        parts = filename.rsplit('.', 1)
+        if len(parts) < 2:
+            return True # No extension, allow by default (or maybe filter?)
+            
+        ext = parts[1].lower()
+        
+        # Exclude takes precedence
+        if self.config.exclude_extensions and ext in self.config.exclude_extensions:
+            return False
+            
+        # Include acts as a whitelist if present
+        if self.config.include_extensions and ext not in self.config.include_extensions:
+            return False
+            
+        return True
+
+    def _should_download_media_type(self, media_type: str) -> bool:
+        """Check if the given media type should be downloaded based on config."""
+        if media_type in ["photo", "image"]:
+            return self.config.download_photos
+        elif media_type == "video":
+            return self.config.download_videos
+        elif media_type == "audio":
+            return self.config.download_audio
+        else:
+            # "document", "webpage", "unknown", stickers, etc.
+            return self.config.download_other
 
     def _determine_media_type(self, message: Message) -> Optional[str]:
         """Определение типа медиа."""
@@ -371,6 +423,13 @@ class MediaProcessor:
     ) -> Optional[Path]:
         """Обработка одного медиа файла."""
         try:
+            # Check if message has file attribute
+            if not hasattr(message, "file") or not message.file:
+                logger.warning(
+                    f"Message {message.id} has no file attribute or file is None"
+                )
+                return None
+
             # Генерация имени файла
             filename = await self._generate_filename(message, media_type)
             if not filename:
@@ -383,8 +442,38 @@ class MediaProcessor:
 
             # Проверка существования файла
             if output_path.exists():
-                logger.debug(f"Media file already exists: {output_path}")
-                return output_path
+                # Check if we should have processed this file
+                should_process = False
+                if media_type == "video" and getattr(self.config, "process_video", False):
+                    should_process = True
+                elif media_type == "audio" and getattr(self.config, "process_audio", True):
+                    should_process = True
+                elif media_type in ["photo", "image"] and getattr(self.config, "process_images", True):
+                    should_process = True
+
+                # If not processing, verify size
+                if not should_process:
+                    expected_size = (
+                        getattr(message.file, "size", 0) if hasattr(message, "file") else 0
+                    )
+                    stat = output_path.stat()
+                    if expected_size > 0 and stat.st_size != expected_size:
+                        logger.warning(
+                            f"File exists but size mismatch: {stat.st_size} != {expected_size}. Re-downloading."
+                        )
+                        # Fall through to download
+                    else:
+                        logger.debug(
+                            f"Media file already exists and size matches: {output_path}"
+                        )
+                        return output_path
+                else:
+                    # If processing is enabled, we assume existing file is correct if non-zero
+                    if output_path.stat().st_size > 0:
+                        logger.debug(
+                            f"Processed media file already exists: {output_path}"
+                        )
+                        return output_path
 
             # Проверка кэша
             if self.enable_smart_caching:
@@ -426,9 +515,13 @@ class MediaProcessor:
             )
 
             # Получение метаданных через MetadataExtractor
-            metadata = await self._metadata_extractor.get_metadata(
-                temp_path, media_type
-            )
+            # Only try to extract metadata if file is not empty
+            if downloaded_size > 0:
+                metadata = await self._metadata_extractor.get_metadata(
+                    temp_path, media_type
+                )
+            else:
+                metadata = None
 
             # Создание задачи обработки
             processing_task = ProcessingTask(
@@ -438,6 +531,29 @@ class MediaProcessor:
                 processing_settings=processing_settings,
                 metadata=metadata,
             )
+
+            # 🚀 Deferred Processing Logic
+            if self.config.deferred_processing:
+                # Move temp file to final location immediately (raw)
+                # We will process it in-place later
+                try:
+                    # Ensure parent dir exists
+                    await aiofiles.os.makedirs(output_path.parent, exist_ok=True)
+                    
+                    # Move file
+                    shutil.move(str(temp_path), str(output_path))
+                    
+                    # Update task to point to the new location as input
+                    processing_task.input_path = output_path
+                    
+                    # Add to pending list
+                    self._pending_tasks.append(processing_task)
+                    
+                    logger.info(f"Deferred processing for {filename}. Saved raw file.")
+                    return output_path
+                except Exception as e:
+                    logger.error(f"Failed to move deferred file: {e}")
+                    return None
 
             # Добавление в очередь обработки
             await self._processing_queue.put(processing_task)
@@ -502,6 +618,13 @@ class MediaProcessor:
             }
 
             extension = extension_map.get(media_type, "")
+
+            # Try to get extension from mime_type
+            if hasattr(message, "file") and hasattr(message.file, "mime_type"):
+                import mimetypes
+                ext = mimetypes.guess_extension(message.file.mime_type)
+                if ext:
+                    extension = ext
 
             # Попытка получить оригинальное имя файла
             if hasattr(message, "media") and hasattr(message.media, "document"):
@@ -866,6 +989,41 @@ class MediaProcessor:
             await asyncio.sleep(10.0)
 
         return False
+
+    async def process_pending_tasks(self):
+        """
+        Process all deferred media tasks.
+        Should be called after the main export loop.
+        """
+        if not self._pending_tasks:
+            logger.info("No pending media tasks to process.")
+            return
+
+        total = len(self._pending_tasks)
+        logger.info(f"🚀 Starting deferred processing for {total} files...")
+        
+        for i, task in enumerate(self._pending_tasks):
+            try:
+                final_path = task.output_path
+                if final_path.exists():
+                    # Create a temp file for processing input
+                    temp_input = final_path.with_suffix(final_path.suffix + ".tmp_proc")
+                    shutil.move(str(final_path), str(temp_input))
+                    task.input_path = temp_input
+                    
+                    # Add to queue
+                    await self._processing_queue.put(task)
+                else:
+                    logger.warning(f"Pending file missing: {final_path}")
+            except Exception as e:
+                logger.error(f"Failed to prepare deferred task: {e}")
+
+        # Clear pending list
+        self._pending_tasks.clear()
+        
+        # Wait for all to finish
+        await self.wait_until_idle()
+        logger.info("✅ Deferred processing complete.")
 
     async def transcribe_audio(self, file_path: Path) -> Optional[str]:
         """

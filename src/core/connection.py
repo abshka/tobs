@@ -318,7 +318,7 @@ class ConnectionManager:
             PoolType.IO: AdaptiveTaskPool(PoolType.IO, 10),
             PoolType.PROCESSING: AdaptiveTaskPool(PoolType.PROCESSING, 4),
             PoolType.FFMPEG: AdaptiveTaskPool(PoolType.FFMPEG, 2),
-            PoolType.API: AdaptiveTaskPool(PoolType.API, 3),
+            PoolType.API: AdaptiveTaskPool(PoolType.API, 10),  # ⚡ Quick Win: увеличено с 3 до 10
         }
 
         # Состояние

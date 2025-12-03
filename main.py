@@ -9,17 +9,25 @@ import signal
 import sys
 from pathlib import Path
 
+# Try to use uvloop for better performance
+try:
+    import uvloop
+
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+except ImportError:
+    pass
+
 import aiohttp
 from rich import print as rprint
 
-from src.cli.parser import TOBSArgumentParser
 from src.config import Config, ExportTarget
 from src.core_manager import CoreSystemManager
 from src.exceptions import ConfigError, TelegramConnectionError
-from src.export.exporter import Exporter
+from src.export.exporter import Exporter, run_export
 from src.media.manager import MediaProcessor
 from src.note_generator import NoteGenerator
 from src.telegram_client import TelegramManager
+from src.telegram_sharded_client import ShardedTelegramManager
 from src.ui.interactive import run_interactive_configuration
 from src.utils import logger, setup_logging
 
@@ -47,10 +55,18 @@ def print_comprehensive_summary(stats, performance_monitor, core_manager):
     rprint(f"Export completed in {duration_minutes:.1f} minutes")
 
     # Resource usage
-    if performance_monitor:
+    if hasattr(stats, "peak_memory_mb") and stats.peak_memory_mb > 0:
+        rprint(f"Peak memory usage: {stats.peak_memory_mb:.1f}MB")
+    elif performance_monitor:
         metrics = performance_monitor.get_current_metrics()
         if metrics:
             rprint(f"Peak memory usage: {metrics.process_memory_mb:.1f}MB")
+
+    if hasattr(stats, "avg_cpu_percent") and stats.avg_cpu_percent > 0:
+        rprint(f"Average CPU usage: {stats.avg_cpu_percent:.1f}%")
+    elif performance_monitor:
+        metrics = performance_monitor.get_current_metrics()
+        if metrics:
             rprint(f"Average CPU usage: {metrics.process_cpu_percent:.1f}%")
 
     # Core System Report
@@ -148,124 +164,6 @@ def print_comprehensive_summary(stats, performance_monitor, core_manager):
     rprint("\n[bold green]TOBS export completed successfully![/bold green]\n")
 
 
-async def run_export(args, config: Config) -> None:
-    """Execute the export process."""
-    core_manager = None
-    telegram_manager = None
-    media_processor = None
-    http_session = None
-    note_generator = None
-
-    try:
-        # Initialize core systems
-        rprint("[bold cyan]Initializing core systems...[/bold cyan]")
-        core_manager = CoreSystemManager(
-            config_path=config.export_path,
-            performance_profile=config.performance_profile,
-        )
-        await core_manager.initialize()
-
-        # Get managers from core_manager using getter methods
-        cache_manager = core_manager.get_cache_manager()
-        connection_manager = core_manager.get_connection_manager()
-        performance_monitor = core_manager.get_performance_monitor()
-
-        # Initialize Telegram client
-        rprint("[bold cyan]Connecting to Telegram...[/bold cyan]")
-        telegram_manager = TelegramManager(
-            config=config, connection_manager=connection_manager
-        )
-        await telegram_manager.connect()
-
-        # Initialize HTTP session with optimized connection pooling
-        connector = aiohttp.TCPConnector(
-            limit=100,              # Total connection pool size
-            limit_per_host=30,      # Connections per host
-            ttl_dns_cache=300,      # DNS cache TTL (5 min)
-        )
-        http_session = aiohttp.ClientSession(connector=connector)
-
-        # Initialize Media Processor (Phase 3 integration)
-        rprint("[bold cyan]Initializing media processor...[/bold cyan]")
-        media_processor = MediaProcessor(
-            config=config,
-            client=telegram_manager.client,
-            cache_manager=cache_manager,
-            connection_manager=connection_manager,
-            max_workers=config.performance.workers,
-        )
-        await media_processor.start()
-
-        # Initialize Note Generator
-        note_generator = NoteGenerator(config=config)
-
-        # Initialize exporter
-        rprint("[bold cyan]Initializing exporter...[/bold cyan]")
-        exporter = Exporter(
-            config=config,
-            telegram_manager=telegram_manager,
-            cache_manager=cache_manager,
-            media_processor=media_processor,
-            note_generator=note_generator,
-            http_session=http_session,
-            performance_monitor=performance_monitor,
-        )
-
-        # Initialize exporter
-        await exporter.initialize()
-
-        # Determine export targets
-        targets = []
-        if args.target_id:
-            target = ExportTarget(
-                id=args.target_id,
-                export_path=args.export_path or config.export_path,
-            )
-            targets.append(target)
-        elif config.export_targets:
-            targets = config.export_targets
-        else:
-            rprint("[bold red]No export targets found in configuration![/bold red]")
-            rprint(
-                "Run without arguments for interactive mode, or specify targets via CLI"
-            )
-            return
-
-        # Export each target
-        for target in targets:
-            rprint(f"\n[bold cyan]Exporting target: {target.id}[/bold cyan]")
-            stats = await exporter.export_target(target)
-
-            # Display comprehensive summary
-            print_comprehensive_summary(stats, performance_monitor, core_manager)
-
-    except TelegramConnectionError as e:
-        rprint(f"[bold red]Telegram connection error: {e}[/bold red]")
-        logger.error(f"Telegram connection error: {e}")
-        sys.exit(1)
-    except ConfigError as e:
-        rprint(f"[bold red]Configuration error: {e}[/bold red]")
-        logger.error(f"Configuration error: {e}")
-        sys.exit(1)
-    except Exception as e:
-        rprint(f"[bold red]Unexpected error: {e}[/bold red]")
-        logger.exception("Unexpected error during export")
-        sys.exit(1)
-    finally:
-        # Cleanup
-        rprint("[bold cyan]Cleaning up...[/bold cyan]")
-        if note_generator:
-            await note_generator.shutdown()
-        if http_session:
-            await http_session.close()
-        if media_processor:
-            await media_processor.shutdown()
-        if telegram_manager:
-            await telegram_manager.disconnect()
-        if core_manager:
-            await core_manager.shutdown()
-
-
 async def async_main():
     """Async main entry point."""
     # Initialize variables for cleanup
@@ -274,17 +172,12 @@ async def async_main():
     http_session = None
     media_processor = None
     note_generator = None
-    
+
     # Setup signal handlers
     signal.signal(signal.SIGINT, handle_sigint)
 
-    # Parse CLI arguments
-    parser = TOBSArgumentParser()
-    args = parser.parse_args()
-
-    # Setup logging
-    log_level = args.log_level if hasattr(args, "log_level") else "INFO"
-    setup_logging(log_level)
+    # Setup logging (default to INFO)
+    setup_logging("INFO")
 
     # Load configuration from .env
     try:
@@ -294,115 +187,87 @@ async def async_main():
         rprint("Make sure .env file exists with API_ID and API_HASH")
         sys.exit(1)
 
-    # Check if any targets are specified
-    has_targets = any(
-        [
-            args.target_id,
-            args.channel,
-            args.chat_id,
-            args.forum_id,
-            args.user_id,
-            args.batch,
-        ]
+    # Initialize systems for interactive mode
+    core_manager = CoreSystemManager(
+        config_path=config.export_path,
+        performance_profile=config.performance_profile,
     )
+    await core_manager.initialize()
 
-    # Run in appropriate mode
-    # If no targets specified and not explicitly in batch mode, use interactive mode
-    if args.interactive or not has_targets:
-        if not args.interactive:
-            rprint(
-                "[bold cyan]Запуск в интерактивном режиме (по умолчанию)...[/bold cyan]"
+    connection_manager = core_manager.get_connection_manager()
+
+    telegram_manager = ShardedTelegramManager(
+        config=config, connection_manager=connection_manager
+    )
+    await telegram_manager.connect()
+
+    try:
+        success = await run_interactive_configuration(config, telegram_manager)
+        if success:
+            # User selected "Start Export" - update core manager with new config
+            core_manager.update_performance_profile(config.performance_profile)
+
+            # User selected "Start Export" - proceed with export
+            rprint("\n[bold green]✓ Starting export...[/bold green]\n")
+
+            # Reuse existing connections for export
+            cache_manager = core_manager.get_cache_manager()
+            connection_manager = core_manager.get_connection_manager()
+            performance_monitor = core_manager.get_performance_monitor()
+
+            # Initialize HTTP session with optimized connection pooling
+            connector = aiohttp.TCPConnector(
+                limit=100,  # Total connection pool size
+                limit_per_host=30,  # Connections per host
+                ttl_dns_cache=300,  # DNS cache TTL (5 min)
             )
-            rprint(
-                "[italic]Подсказка: используйте --help для просмотра параметров командной строки[/italic]\n"
-            )
+            http_session = aiohttp.ClientSession(connector=connector)
 
-        # Initialize systems for interactive mode
-        core_manager = CoreSystemManager(
-            config_path=config.export_path,
-            performance_profile=config.performance_profile,
-        )
-        await core_manager.initialize()
-
-        connection_manager = core_manager.get_connection_manager()
-
-        telegram_manager = TelegramManager(
-            config=config, connection_manager=connection_manager
-        )
-        await telegram_manager.connect()
-
-        try:
-            success = await run_interactive_configuration(config, telegram_manager)
-            if success:
-                # User selected "Start Export" - proceed with export
-                rprint("\n[bold green]✓ Starting export...[/bold green]\n")
-
-                # Reuse existing connections for export
-                cache_manager = core_manager.get_cache_manager()
-                connection_manager = core_manager.get_connection_manager()
-                performance_monitor = core_manager.get_performance_monitor()
-
-                # Initialize HTTP session with optimized connection pooling
-                connector = aiohttp.TCPConnector(
-                    limit=100,              # Total connection pool size
-                    limit_per_host=30,      # Connections per host
-                    ttl_dns_cache=300,      # DNS cache TTL (5 min)
+            try:
+                # Initialize Media Processor
+                rprint("[bold cyan]Initializing media processor...[/bold cyan]")
+                media_processor = MediaProcessor(
+                    config=config,
+                    client=telegram_manager.client,
+                    cache_manager=cache_manager,
+                    connection_manager=connection_manager,
+                    max_workers=config.performance.workers,
+                    worker_clients=getattr(telegram_manager, "worker_clients", []),
                 )
-                http_session = aiohttp.ClientSession(connector=connector)
+                await media_processor.start()
 
-                try:
-                    # Initialize Media Processor
-                    rprint("[bold cyan]Initializing media processor...[/bold cyan]")
-                    media_processor = MediaProcessor(
-                        config=config,
-                        client=telegram_manager.client,
-                        cache_manager=cache_manager,
-                        connection_manager=connection_manager,
-                        max_workers=config.performance.workers,
-                    )
-                    await media_processor.start()
+                # Initialize Note Generator
+                note_generator = NoteGenerator(config=config)
 
-                    # Initialize Note Generator
-                    note_generator = NoteGenerator(config=config)
+                # Run export using the high-level orchestrator (supports Takeout)
+                rprint("[bold cyan]Starting export process...[/bold cyan]")
 
-                    # Initialize exporter
-                    rprint("[bold cyan]Initializing exporter...[/bold cyan]")
-                    exporter = Exporter(
-                        config=config,
-                        telegram_manager=telegram_manager,
-                        cache_manager=cache_manager,
-                        media_processor=media_processor,
-                        note_generator=note_generator,
-                        http_session=http_session,
-                        performance_monitor=performance_monitor,
+                results = await run_export(
+                    config=config,
+                    telegram_manager=telegram_manager,
+                    cache_manager=cache_manager,
+                    media_processor=media_processor,
+                    note_generator=note_generator,
+                    http_session=http_session,
+                    performance_monitor=performance_monitor,
+                )
+
+                # Display comprehensive summary for each target
+                for stats in results:
+                    print_comprehensive_summary(
+                        stats, performance_monitor, core_manager
                     )
 
-                    await exporter.initialize()
-
-                    # Export each configured target
-                    for target in config.export_targets:
-                        rprint(
-                            f"\n[bold cyan]Exporting target: {target.id}[/bold cyan]"
-                        )
-                        stats = await exporter.export_target(target)
-
-                        # Display comprehensive summary
-                        print_comprehensive_summary(
-                            stats, performance_monitor, core_manager
-                        )
-
-                finally:
-                    if note_generator:
-                        await note_generator.shutdown()
-                    if http_session:
-                        await http_session.close()
-            else:
-                rprint("[bold yellow]Configuration not changed[/bold yellow]")
-        finally:
-            await telegram_manager.disconnect()
-            await core_manager.shutdown()
-    else:
-        await run_export(args, config)
+            finally:
+                if note_generator:
+                    await note_generator.shutdown()
+                if http_session:
+                    await http_session.close()
+        else:
+            rprint("[bold yellow]Configuration not changed[/bold yellow]")
+    finally:
+        await telegram_manager.disconnect()
+        await core_manager.shutdown()
 
 
 def main():

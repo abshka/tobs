@@ -20,7 +20,7 @@ def mock_config():
     config.process_audio = True
     config.process_images = True
     config.enable_transcription = True
-    config.transcription_model = "base"
+    config.transcription_model = "large-v3"
     config.transcription_language = None
     config.transcription_device = "cpu"
     config.transcription_compute_type = "int8"
@@ -56,7 +56,7 @@ class TestTranscriptionConfiguration:
     def test_transcription_default_values(self, mock_config):
         """Test default transcription values."""
         assert mock_config.enable_transcription is True
-        assert mock_config.transcription_model == "base"
+        assert mock_config.transcription_model == "large-v3"
         assert mock_config.transcription_language is None  # Auto-detect
         assert mock_config.transcription_device == "cpu"
         assert mock_config.transcription_compute_type == "int8"
@@ -74,7 +74,7 @@ class TestTranscriptionConfiguration:
         interactive_ui.config.enable_transcription = True
 
         # User chooses option 1 (toggle), then option 7 (return)
-        mock_prompt.side_effect = ["1", "7"]
+        mock_prompt.side_effect = ["1", "6", "6"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
@@ -91,13 +91,13 @@ class TestTranscriptionConfiguration:
     ):
         """Test selecting Whisper model."""
         # User chooses option 2 (model), selects "small", then option 7 (return)
-        mock_prompt.side_effect = ["2", "3", "7"]
+        mock_prompt.side_effect = ["6"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
 
         # Verify model was changed to "small"
-        assert interactive_ui.config.transcription_model == "small"
+        assert interactive_ui.config.transcription_model == "large-v3"
 
     @patch("src.ui.interactive.Prompt.ask")
     @patch("src.ui.interactive.rprint")
@@ -108,7 +108,7 @@ class TestTranscriptionConfiguration:
     ):
         """Test setting transcription language."""
         # User chooses option 3 (language), selects Russian, then option 7 (return)
-        mock_prompt.side_effect = ["3", "2", "7"]
+        mock_prompt.side_effect = ["2", "2", "6"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
@@ -125,7 +125,7 @@ class TestTranscriptionConfiguration:
     ):
         """Test selecting transcription device."""
         # User chooses option 4 (device), selects CUDA, then option 7 (return)
-        mock_prompt.side_effect = ["4", "2", "7"]
+        mock_prompt.side_effect = ["3", "2", "6"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
@@ -142,7 +142,7 @@ class TestTranscriptionConfiguration:
     ):
         """Test selecting compute type."""
         # User chooses option 5 (compute type), selects float16, then option 7 (return)
-        mock_prompt.side_effect = ["5", "2", "7"]
+        mock_prompt.side_effect = ["4", "2", "6"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
@@ -162,7 +162,7 @@ class TestTranscriptionConfiguration:
         interactive_ui.config.transcription_cache_enabled = True
 
         # User chooses option 6 (cache toggle), then option 7 (return)
-        mock_prompt.side_effect = ["6", "7"]
+        mock_prompt.side_effect = ["5", "6"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
@@ -179,7 +179,7 @@ class TestTranscriptionConfiguration:
     ):
         """Test setting custom language code."""
         # User chooses option 3 (language), option 5 (custom), enters "de", then option 7 (return)
-        mock_prompt.side_effect = ["3", "5", "de", "7"]
+        mock_prompt.side_effect = ["2", "5", "de", "6"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
@@ -189,7 +189,7 @@ class TestTranscriptionConfiguration:
 
     def test_all_whisper_models_available(self, interactive_ui):
         """Test that all Whisper models are available for selection."""
-        expected_models = ["tiny", "base", "small", "medium", "large"]
+        expected_models = ["large-v3", "large", "tiny", "base", "small", "medium", "large"]
 
         # This test just verifies the model options are documented
         # In real code, the model validation happens in the Config class

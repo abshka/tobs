@@ -95,7 +95,6 @@ class TestTaskGroupErrorHandling:
     async def test_multiple_errors_dont_stop_taskgroup(self):
         """Verify TaskGroup continues despite multiple errors."""
         manager = CoreSystemManager()
-        await manager.initialize()
 
         error_count = 0
 
@@ -110,6 +109,7 @@ class TestTaskGroupErrorHandling:
             with patch.object(
                 manager, "_perform_health_check", side_effect=always_fails
             ):
+                await manager.initialize()
                 await asyncio.sleep(0.2)
 
         # Multiple errors should have occurred
