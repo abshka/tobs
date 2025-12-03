@@ -297,6 +297,28 @@ class MediaDownloadQueue:
 
             await asyncio.sleep(0.5)
 
+    def get_progress_info(self) -> dict:
+        """
+        Get current progress information for display.
+        
+        Returns:
+            Dict with completed, failed, pending, in_progress, total counts
+        """
+        completed = self.stats.total_completed
+        failed = self.stats.total_failed
+        pending = self.get_pending_count()
+        in_progress = self.get_in_progress_count()
+        total = self.stats.total_queued
+        
+        return {
+            "completed": completed,
+            "failed": failed,
+            "pending": pending,
+            "in_progress": in_progress,
+            "total": total,
+            "bytes_downloaded": self.stats.total_bytes_downloaded,
+        }
+
     async def _worker_loop(self, worker_name: str) -> None:
         """Main loop for a download worker."""
         logger.debug(f"{worker_name} started")

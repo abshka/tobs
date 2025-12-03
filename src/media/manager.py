@@ -1052,21 +1052,34 @@ class MediaProcessor:
         except asyncio.TimeoutError:
             return False
 
-    async def wait_for_downloads(self, timeout: Optional[float] = None) -> bool:
+    async def wait_for_downloads(
+        self, timeout: Optional[float] = None, show_progress: bool = True
+    ) -> bool:
         """
-        Wait for all background downloads to complete.
+        Wait for all background downloads to complete with optional progress bar.
         
         Args:
             timeout: Maximum time to wait (None = wait forever)
+            show_progress: Whether to display a progress bar
             
         Returns:
             True if all downloads completed, False if timeout
         """
         if not self._download_queue:
             return True
+        
+        # Get initial stats to check if there's anything to wait for
+        initial_info = self._download_queue.get_progress_info()
+        if initial_info["pending"] == 0 and initial_info["in_progress"] == 0:
+            logger.info("✅ No pending downloads")
+            return True
             
         logger.info("⏳ Waiting for background downloads to complete...")
-        result = await self._download_queue.wait_all(timeout=timeout)
+        
+        if show_progress:
+            result = await self._wait_for_downloads_with_progress(timeout)
+        else:
+            result = await self._download_queue.wait_all(timeout=timeout)
         
         if result:
             self._download_queue.log_stats()
@@ -1076,6 +1089,77 @@ class MediaProcessor:
             logger.warning("⚠️ Download wait timed out")
             
         return result
+
+    async def _wait_for_downloads_with_progress(
+        self, timeout: Optional[float] = None
+    ) -> bool:
+        """
+        Wait for downloads with a Rich progress bar.
+        
+        Args:
+            timeout: Maximum time to wait
+            
+        Returns:
+            True if all completed, False if timeout
+        """
+        from rich.progress import (
+            Progress,
+            BarColumn,
+            TextColumn,
+            TimeElapsedColumn,
+            SpinnerColumn,
+            TaskProgressColumn,
+        )
+        
+        start_time = time.time()
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]Downloading media..."),
+            BarColumn(bar_width=40),
+            TaskProgressColumn(),
+            TextColumn("[cyan]{task.fields[status]}"),
+            TimeElapsedColumn(),
+            transient=False,
+        ) as progress:
+            # Get total from queue stats
+            info = self._download_queue.get_progress_info()
+            total = info["total"]
+            
+            if total == 0:
+                return True
+            
+            task_id = progress.add_task(
+                "Downloading",
+                total=total,
+                status=f"0/{total} files",
+            )
+            
+            while True:
+                info = self._download_queue.get_progress_info()
+                completed = info["completed"]
+                failed = info["failed"]
+                pending = info["pending"]
+                in_progress = info["in_progress"]
+                done = completed + failed
+                
+                # Update progress bar
+                progress.update(
+                    task_id,
+                    completed=done,
+                    status=f"{completed}✓ {failed}✗ | {in_progress} active, {pending} queued",
+                )
+                
+                # Check if finished
+                if pending == 0 and in_progress == 0:
+                    progress.update(task_id, completed=total)
+                    return True
+                
+                # Check timeout
+                if timeout and (time.time() - start_time) > timeout:
+                    return False
+                
+                await asyncio.sleep(0.3)
 
     async def wait_until_idle(
         self, timeout: float = 300.0, progress_callback=None
