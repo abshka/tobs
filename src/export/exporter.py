@@ -20,6 +20,11 @@ from rich.progress import (
 )
 from telethon import errors
 from telethon.errors import FloodWaitError
+from telethon.tl.functions import InvokeWithTakeoutRequest
+from telethon.tl.functions.account import (
+    FinishTakeoutSessionRequest,
+    InitTakeoutSessionRequest,
+)
 
 from ..config import EXPORT_OPERATION_TIMEOUT, Config, ExportTarget
 from ..export_reporter import ExportReporterManager
@@ -29,14 +34,12 @@ from ..telegram_client import TelegramManager
 from ..utils import is_voice_message, logger, sanitize_filename
 
 
-from telethon.tl.functions import InvokeWithTakeoutRequest
-from telethon.tl.functions.account import InitTakeoutSessionRequest, FinishTakeoutSessionRequest
-
 class TakeoutSessionWrapper:
     """
     Context manager for manual Takeout session management.
     Bypasses Telethon's client.takeout() to avoid client-side state conflicts.
     """
+
     def __init__(self, client, config):
         self.client = client
         self.config = config
@@ -45,7 +48,9 @@ class TakeoutSessionWrapper:
 
     async def __aenter__(self):
         # 1. Check for existing session on client (Reuse)
-        existing_id = getattr(self.client, "takeout_id", getattr(self.client, "_takeout_id", None))
+        existing_id = getattr(
+            self.client, "takeout_id", getattr(self.client, "_takeout_id", None)
+        )
         if existing_id:
             logger.info(f"♻️ Reusing existing Takeout ID: {existing_id}")
             self.takeout_id = existing_id
@@ -68,20 +73,22 @@ class TakeoutSessionWrapper:
             return self
         except Exception as e:
             if "TakeoutInitDelayError" in str(type(e).__name__):
-                 raise errors.TakeoutInitDelayError()
+                raise errors.TakeoutInitDelayError()
             raise e
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.takeout_id:
             try:
-                # Only finish if we created it? 
+                # Only finish if we created it?
                 # For now, let's finish it to be clean, unless we reused it?
                 # If we reused it, we probably shouldn't finish it?
                 # But here we are the top-level manager.
-                await self.client(InvokeWithTakeoutRequest(
-                    takeout_id=self.takeout_id,
-                    query=FinishTakeoutSessionRequest(success=True)
-                ))
+                await self.client(
+                    InvokeWithTakeoutRequest(
+                        takeout_id=self.takeout_id,
+                        query=FinishTakeoutSessionRequest(success=True),
+                    )
+                )
                 logger.info("✅ Takeout session finished manually.")
             except Exception as e:
                 logger.warning(f"⚠️ Error finishing takeout: {e}")
@@ -93,7 +100,7 @@ class TakeoutSessionWrapper:
         if self.takeout_id:
             return await self.client(
                 InvokeWithTakeoutRequest(takeout_id=self.takeout_id, query=request),
-                ordered=ordered
+                ordered=ordered,
             )
         return await self.client(request, ordered=ordered)
 
@@ -423,12 +430,16 @@ class Exporter:
             # Load entity state from core cache
             cache_key = f"entity_state_{target.id}"
             entity_data = await self.cache_manager.get(cache_key)
-            
+
             # Handle dict restoration (from JSON cache)
             if isinstance(entity_data, dict):
                 try:
-                    if "processed_message_ids" in entity_data and isinstance(entity_data["processed_message_ids"], list):
-                        entity_data["processed_message_ids"] = set(entity_data["processed_message_ids"])
+                    if "processed_message_ids" in entity_data and isinstance(
+                        entity_data["processed_message_ids"], list
+                    ):
+                        entity_data["processed_message_ids"] = set(
+                            entity_data["processed_message_ids"]
+                        )
                     entity_data = EntityCacheData(**entity_data)
                 except Exception as e:
                     logger.warning(f"Failed to restore EntityCacheData from dict: {e}")
@@ -527,6 +538,7 @@ class Exporter:
                     current_min_id = 0
                     consecutive_flood_waits = 0
                     max_retries = 10
+                    adaptive_delay = self.config.request_delay  # 🚀 Start with configured delay
 
                     # Initial fetch task (MW2: Prefetch)
                     fetch_task = asyncio.create_task(
@@ -538,6 +550,10 @@ class Exporter:
                             # Await the batch
                             batch = await fetch_task
                             consecutive_flood_waits = 0  # Reset on success
+                            
+                            # 🚀 Adaptive delay: decrease delay on success (minimum 0)
+                            if adaptive_delay > 0:
+                                adaptive_delay = max(0.0, adaptive_delay - 0.1)
 
                         except FloodWaitError as e:
                             # Handle FloodWait
@@ -549,6 +565,10 @@ class Exporter:
                             wait_time = e.seconds
                             backoff = min(consecutive_flood_waits * 5, 60)
                             total_wait = wait_time + backoff
+                            
+                            # 🚀 Adaptive delay: increase delay after FloodWait
+                            adaptive_delay = min(adaptive_delay + 0.5, 3.0)
+                            logger.info(f"📈 Adaptive delay increased to {adaptive_delay:.1f}s")
 
                             logger.warning(
                                 f"FloodWait: {wait_time}s (+{backoff}s buffer). Retry {consecutive_flood_waits}/{max_retries}"
@@ -590,9 +610,9 @@ class Exporter:
                         # Start next fetch immediately (MW2)
                         last_msg_id = batch[-1].id
 
-                        # Rate limiting (if configured)
-                        if self.config.request_delay > 0:
-                            await asyncio.sleep(self.config.request_delay)
+                        # 🚀 Adaptive rate limiting
+                        if adaptive_delay > 0:
+                            await asyncio.sleep(adaptive_delay)
 
                         fetch_task = asyncio.create_task(
                             self._fetch_messages_batch(entity, last_msg_id)
@@ -685,7 +705,9 @@ class Exporter:
                     worker_stats = self.telegram_manager.get_worker_stats()
                     if worker_stats:
                         entity_reporter.metrics.worker_stats = worker_stats.copy()
-                        logger.info(f"📊 Collected stats from {len(worker_stats)} workers")
+                        logger.info(
+                            f"📊 Collected stats from {len(worker_stats)} workers"
+                        )
 
                 entity_reporter.finish_export()
                 entity_reporter.save_report()
@@ -913,6 +935,11 @@ class Exporter:
 
                 progress.advance(task_id_progress)
 
+        # 🚀 Wait for background downloads to complete
+        if getattr(self.config, "async_media_download", True):
+            logger.info("⏳ Waiting for background media downloads...")
+            await self.media_processor.wait_for_downloads(timeout=3600)  # 1 hour max
+
         # 🚀 Run Deferred Media Processing
         if self.config.deferred_processing:
             logger.info("⏳ Starting deferred media processing...")
@@ -959,18 +986,26 @@ async def run_export(
         if config.use_takeout:
             # 1. Check if we are already in a Takeout session (Reuse Strategy)
             current_client = telegram_manager.client
-            existing_id = getattr(current_client, "takeout_id", getattr(current_client, "_takeout_id", None))
-            
+            existing_id = getattr(
+                current_client,
+                "takeout_id",
+                getattr(current_client, "_takeout_id", None),
+            )
+
             if existing_id:
-                logger.info(f"♻️ Client is already in Takeout mode (ID: {existing_id}). Skipping initialization.")
+                logger.info(
+                    f"♻️ Client is already in Takeout mode (ID: {existing_id}). Skipping initialization."
+                )
                 telegram_manager._external_takeout_id = existing_id
-                
+
                 # Disable rate limiting
                 original_delay = config.request_delay
                 config.request_delay = 0.0
-                
+
                 try:
-                    return await exporter.export_all(config.export_targets, progress_queue)
+                    return await exporter.export_all(
+                        config.export_targets, progress_queue
+                    )
                 finally:
                     config.request_delay = original_delay
                     # Do not clear _external_takeout_id here as we didn't create the session
@@ -996,7 +1031,9 @@ async def run_export(
                     pass
 
                 # Use Manual Wrapper instead of client.takeout()
-                async with TakeoutSessionWrapper(telegram_manager.client, config) as takeout_client:
+                async with TakeoutSessionWrapper(
+                    telegram_manager.client, config
+                ) as takeout_client:
                     logger.info(
                         "✅ Takeout session established! Switching to Turbo Mode."
                     )
@@ -1004,19 +1041,23 @@ async def run_export(
                     # ⚡ HACK: Temporarily swap the client in the manager
                     original_client = telegram_manager.client
                     telegram_manager.client = takeout_client
-                    
+
                     # Pass the ID to the manager so shards can reuse it
                     takeout_id = takeout_client.takeout_id
-                    
+
                     logger.info(f"DEBUG: Extracted Takeout ID: {takeout_id}")
-                    
+
                     # Force set the attribute on the manager
                     setattr(telegram_manager, "_external_takeout_id", takeout_id)
-                    
+
                     if takeout_id:
-                        logger.info(f"♻️ Shared Takeout ID {takeout_id} with ShardedManager")
+                        logger.info(
+                            f"♻️ Shared Takeout ID {takeout_id} with ShardedManager"
+                        )
                     else:
-                        logger.warning("⚠️ Could not extract Takeout ID from client! Sharding might fail.")
+                        logger.warning(
+                            "⚠️ Could not extract Takeout ID from client! Sharding might fail."
+                        )
 
                     # Disable rate limiting for Takeout
                     original_delay = config.request_delay
@@ -1032,7 +1073,7 @@ async def run_export(
                         telegram_manager.client = original_client
                         if hasattr(telegram_manager, "_external_takeout_id"):
                             telegram_manager._external_takeout_id = None
-                            
+
                         config.request_delay = original_delay
                         logger.info("🔄 Restored standard client connection")
 
@@ -1049,9 +1090,11 @@ async def run_export(
 
             except Exception as e:
                 if "another takeout" in str(e):
-                     logger.warning("⚠️  Detected stale Takeout session state even after force-clear.")
-                     # At this point, we can't do much else than fall back
-                
+                    logger.warning(
+                        "⚠️  Detected stale Takeout session state even after force-clear."
+                    )
+                    # At this point, we can't do much else than fall back
+
                 logger.warning(
                     f"⚠️  Takeout session failed ({e}). Falling back to Standard API."
                 )
