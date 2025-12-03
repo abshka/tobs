@@ -4,6 +4,8 @@ Provides core export orchestration and processing capabilities with visual progr
 """
 
 import asyncio
+import functools
+import inspect
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
@@ -38,22 +40,43 @@ class TakeoutSessionWrapper:
     """
     Context manager for manual Takeout session management.
     Bypasses Telethon's client.takeout() to avoid client-side state conflicts.
+    
+    This is a proper proxy that rebinds methods so that internal self() calls
+    go through our __call__ which wraps requests in InvokeWithTakeoutRequest.
+    Based on Telethon's _TakeoutClient implementation.
     """
+    
+    # Methods that should NOT be proxied to avoid infinite recursion
+    __PROXY_INTERFACE = ('__enter__', '__exit__', '__aenter__', '__aexit__')
 
     def __init__(self, client, config):
-        self.client = client
-        self.config = config
-        self.takeout_id = None
-        self.max_file_size = getattr(config, "max_file_size_mb", 2000) * 1024 * 1024
+        # Use name mangling to avoid conflicts with proxied attributes
+        self.__client = client
+        self.__config = config
+        self.__takeout_id = None
+        self.__max_file_size = getattr(config, "max_file_size_mb", 2000) * 1024 * 1024
+
+    @property
+    def takeout_id(self):
+        return self.__takeout_id
+    
+    @takeout_id.setter
+    def takeout_id(self, value):
+        self.__takeout_id = value
+
+    @property
+    def client(self):
+        """Access to underlying client for compatibility."""
+        return self.__client
 
     async def __aenter__(self):
         # 1. Check for existing session on client (Reuse)
         existing_id = getattr(
-            self.client, "takeout_id", getattr(self.client, "_takeout_id", None)
+            self.__client, "takeout_id", getattr(self.__client, "_takeout_id", None)
         )
         if existing_id:
             logger.info(f"♻️ Reusing existing Takeout ID: {existing_id}")
-            self.takeout_id = existing_id
+            self.__takeout_id = existing_id
             return self
 
         # 2. Init new session manually
@@ -65,11 +88,11 @@ class TakeoutSessionWrapper:
                 message_megagroups=True,
                 message_channels=True,
                 files=True,
-                file_max_size=self.max_file_size,
+                file_max_size=self.__max_file_size,
             )
-            takeout_sess = await self.client(init_req)
-            self.takeout_id = takeout_sess.id
-            logger.info(f"✅ Manual Takeout Init Successful. ID: {self.takeout_id}")
+            takeout_sess = await self.__client(init_req)
+            self.__takeout_id = takeout_sess.id
+            logger.info(f"✅ Manual Takeout Init Successful. ID: {self.__takeout_id}")
             return self
         except Exception as e:
             if "TakeoutInitDelayError" in str(type(e).__name__):
@@ -77,15 +100,11 @@ class TakeoutSessionWrapper:
             raise e
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.takeout_id:
+        if self.__takeout_id:
             try:
-                # Only finish if we created it?
-                # For now, let's finish it to be clean, unless we reused it?
-                # If we reused it, we probably shouldn't finish it?
-                # But here we are the top-level manager.
-                await self.client(
+                await self.__client(
                     InvokeWithTakeoutRequest(
-                        takeout_id=self.takeout_id,
+                        takeout_id=self.__takeout_id,
                         query=FinishTakeoutSessionRequest(success=True),
                     )
                 )
@@ -93,16 +112,56 @@ class TakeoutSessionWrapper:
             except Exception as e:
                 logger.warning(f"⚠️ Error finishing takeout: {e}")
 
-    def __getattr__(self, name):
-        return getattr(self.client, name)
-
     async def __call__(self, request, ordered=False):
-        if self.takeout_id:
-            return await self.client(
-                InvokeWithTakeoutRequest(takeout_id=self.takeout_id, query=request),
-                ordered=ordered,
+        """
+        Wrap all requests in InvokeWithTakeoutRequest.
+        This is called by Telethon methods internally when they do self(request).
+        """
+        if self.__takeout_id is None:
+            raise ValueError('Takeout mode has not been initialized '
+                '(are you calling outside of "with"?)')
+        
+        wrapped = InvokeWithTakeoutRequest(
+            takeout_id=self.__takeout_id,
+            query=request
+        )
+        return await self.__client(wrapped, ordered=ordered)
+
+    def __getattribute__(self, name):
+        """
+        Handle attribute access with proper name mangling detection.
+        Based on Telethon's _TakeoutClient implementation.
+        """
+        # Access class via type() to avoid infinite recursion
+        if name.startswith('__') and name not in type(self).__PROXY_INTERFACE:
+            raise AttributeError  # Force call of __getattr__
+        
+        # Try to access attribute in the proxy object first
+        return super().__getattribute__(name)
+
+    def __getattr__(self, name):
+        """
+        Proxy attribute access to the underlying client.
+        For methods, rebind them so that 'self' inside the method points to
+        this proxy, not the original client. This ensures self() calls go
+        through our __call__ method.
+        """
+        value = getattr(self.__client, name)
+        if inspect.ismethod(value):
+            # Rebind the method: get the unbound function from the class,
+            # then partially apply our proxy as 'self'
+            return functools.partial(
+                getattr(self.__client.__class__, name), self
             )
-        return await self.client(request, ordered=ordered)
+        return value
+
+    def __setattr__(self, name, value):
+        """Handle attribute setting with proper name mangling."""
+        # Check if this is our own name-mangled attribute
+        if name.startswith('_{}__'.format(type(self).__name__.lstrip('_'))):
+            return super().__setattr__(name, value)
+        # Otherwise, set on the underlying client
+        return setattr(self.__client, name, value)
 
 
 class AsyncBufferedSaver:
