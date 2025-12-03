@@ -5,13 +5,13 @@ Tests the main orchestrator that coordinates all media processing operations.
 This requires integration of multiple components.
 """
 
-import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock
 
+import pytest
+
 from src.media.manager import MediaProcessor
 from src.media.models import ProcessingSettings
-
 
 pytestmark = pytest.mark.unit  # Can be changed to integration later
 
@@ -61,9 +61,7 @@ class TestMediaProcessor:
         # - Verify workers started
         pass
 
-    async def test_start_with_hw_acceleration(
-        self, media_processor, mock_config
-    ):
+    async def test_start_with_hw_acceleration(self, media_processor, mock_config):
         """Test start() when hardware acceleration available."""
         # TODO: Implement test
         # - Mock HW detector to return VAAPI available
@@ -293,15 +291,15 @@ class TestMediaProcessor:
 # @pytest.mark.slow
 # class TestMediaProcessorIntegration:
 #     """Full integration tests with real components."""
-#     
+#
 #     async def test_full_workflow_video(self):
 #         """Test complete workflow with real video."""
 #         pass
-#     
+#
 #     async def test_full_workflow_multiple_files(self):
 #         """Test processing multiple files concurrently."""
 #         pass
-#     
+#
 #     async def test_full_workflow_with_errors(self):
 #         """Test workflow handles errors gracefully."""
 #         pass

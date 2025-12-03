@@ -883,18 +883,18 @@ class LinkParser:
     Robust parser for Telegram links (public, private, topics, comments).
     Inspired by tdl's tutil.
     """
-    
+
     @staticmethod
     def parse(url: str) -> Optional[Dict[str, Any]]:
         """
         Parse a Telegram URL into its components.
-        
+
         Supported formats:
         - t.me/username/123
         - t.me/c/1234567890/123 (Private)
         - t.me/username/123?comment=456
         - t.me/c/1234567890/123?thread=456
-        
+
         Returns:
             Dict with keys:
             - peer: str (username or -100ID)
@@ -903,8 +903,8 @@ class LinkParser:
             - is_private: bool
         """
         import re
-        from urllib.parse import urlparse, parse_qs
-        
+        from urllib.parse import parse_qs, urlparse
+
         # Clean URL
         url = url.strip()
         if not url.startswith("http"):
@@ -912,31 +912,31 @@ class LinkParser:
                 url = "https://" + url
             else:
                 return None
-                
+
         parsed = urlparse(url)
         if "t.me" not in parsed.netloc and "telegram.me" not in parsed.netloc:
             return None
-            
+
         path_parts = [p for p in parsed.path.split("/") if p]
         query = parse_qs(parsed.query)
-        
+
         result = {
             "peer": None,
             "message_id": None,
             "topic_id": None,
-            "is_private": False
+            "is_private": False,
         }
-        
+
         # Case 1: Private link /c/ID/MSG_ID
         if len(path_parts) >= 3 and path_parts[0] == "c":
             # t.me/c/1234567890/123
             # t.me/c/1234567890/TOPIC_ID/MSG_ID (sometimes)
-            
+
             chat_id = path_parts[1]
             # Ensure -100 prefix for private supergroups
             result["peer"] = f"-100{chat_id}"
             result["is_private"] = True
-            
+
             if len(path_parts) == 3:
                 # /c/ID/MSG_ID
                 try:
@@ -950,7 +950,7 @@ class LinkParser:
                     result["message_id"] = int(path_parts[3])
                 except ValueError:
                     return None
-                    
+
         # Case 2: Public link /username/MSG_ID
         elif len(path_parts) >= 2:
             result["peer"] = path_parts[0]
@@ -959,13 +959,13 @@ class LinkParser:
             except ValueError:
                 # Maybe /username/TOPIC_ID/MSG_ID ? Not common for public, usually ?thread=
                 return None
-                
+
         else:
             return None
-            
+
         # Handle Query Params (comments, threads)
         if "comment" in query:
-            # ?comment=ID usually implies the main link is the channel post, 
+            # ?comment=ID usually implies the main link is the channel post,
             # and comment=ID is the message in the discussion group.
             # This is tricky because the peer might change (channel -> group).
             # For now, we just note it.
@@ -973,11 +973,11 @@ class LinkParser:
                 result["comment_id"] = int(query["comment"][0])
             except ValueError:
                 pass
-                
+
         if "thread" in query:
             try:
                 result["topic_id"] = int(query["thread"][0])
             except ValueError:
                 pass
-                
+
         return result

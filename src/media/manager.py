@@ -22,6 +22,7 @@ from telethon.tl.types import Message
 from src.utils import sanitize_filename
 
 from .cache import MediaCache
+from .download_queue import MediaDownloadQueue
 from .downloader import MediaDownloader
 from .hardware import HardwareAccelerationDetector
 from .metadata import MetadataExtractor
@@ -109,9 +110,12 @@ class MediaProcessor:
 
         # Очередь обработки
         self._processing_queue: asyncio.Queue = asyncio.Queue()
-        
+
         # 🚀 Deferred Processing Queue
         self._pending_tasks: List[ProcessingTask] = []
+
+        # 🚀 Background Download Queue (async media downloads)
+        self._download_queue: Optional[MediaDownloadQueue] = None
 
         # Статистика
         self._processed_files = 0
@@ -158,6 +162,17 @@ class MediaProcessor:
                 client=self.client,
                 worker_clients=self.worker_clients,
             )
+
+            # 🚀 Инициализация Background Download Queue (если включено)
+            if getattr(self.config, "async_media_download", True):
+                workers = getattr(self.config, "async_download_workers", 3)
+                self._download_queue = MediaDownloadQueue(
+                    downloader=self._downloader,
+                    max_workers=workers,
+                    max_queue_size=1000,
+                )
+                await self._download_queue.start()
+                logger.info(f"🚀 Background download queue started with {workers} workers")
 
             # Инициализация процессоров
             self._video_processor = VideoProcessor(
@@ -279,7 +294,7 @@ class MediaProcessor:
             processing_settings: Настройки обработки
 
         Returns:
-            Список путей к обработанным файлам
+            Список путей к обработанным файлам (или placeholder-путей при async mode)
         """
         if not self.config.any_media_download_enabled:
             return []
@@ -293,7 +308,13 @@ class MediaProcessor:
             # Настройки обработки
             proc_settings = processing_settings or self.default_processing
 
-            # Обработка каждого медиа файла
+            # 🚀 Async Download Mode: queue downloads instead of waiting
+            if self._download_queue:
+                return await self._queue_media_downloads(
+                    media_items, entity_id, entity_media_path
+                )
+
+            # Synchronous mode (fallback): process each media file
             tasks = []
             for media_type, msg in media_items:
                 task = self._process_single_media(
@@ -326,6 +347,72 @@ class MediaProcessor:
             )
             return []
 
+    async def _queue_media_downloads(
+        self,
+        media_items: List[Tuple[str, Message]],
+        entity_id: Union[str, int],
+        entity_media_path: Path,
+    ) -> List[Path]:
+        """
+        Queue media downloads to background workers.
+        
+        Returns placeholder paths immediately - actual files will be downloaded
+        by background workers.
+        """
+        result_paths = []
+        
+        for media_type, msg in media_items:
+            try:
+                # Check if file already exists
+                if not hasattr(msg, "file") or not msg.file:
+                    continue
+                    
+                # Generate filename
+                filename = await self._generate_filename(msg, media_type)
+                if not filename:
+                    continue
+                
+                # Output path
+                type_subdir = entity_media_path / media_type
+                await aiofiles.os.makedirs(type_subdir, exist_ok=True)
+                output_path = type_subdir / filename
+                
+                # Skip if file already exists with correct size
+                if output_path.exists():
+                    expected_size = getattr(msg.file, "size", 0)
+                    try:
+                        actual_size = output_path.stat().st_size
+                        if expected_size > 0 and actual_size >= expected_size * 0.95:
+                            logger.debug(f"File already exists: {output_path}")
+                            result_paths.append(output_path)
+                            continue
+                    except Exception:
+                        pass
+                
+                # Check cache
+                if self.enable_smart_caching:
+                    cached_path = await self._cache.check_cache(msg.id, output_path)
+                    if cached_path:
+                        self._cache_hits += 1
+                        result_paths.append(cached_path)
+                        continue
+                
+                # Queue for background download
+                await self._download_queue.enqueue(
+                    message=msg,
+                    entity_id=entity_id,
+                    output_path=output_path,
+                    media_type=media_type,
+                )
+                
+                # Return the expected output path (file will appear later)
+                result_paths.append(output_path)
+                
+            except Exception as e:
+                logger.warning(f"Failed to queue media download: {e}")
+        
+        return result_paths
+
     async def _extract_media_from_message(
         self, message: Message
     ) -> List[Tuple[str, Message]]:
@@ -337,7 +424,7 @@ class MediaProcessor:
 
         # Определение типа медиа
         media_type = self._determine_media_type(message)
-        
+
         # Check extension filters first (tdl-style)
         filename = await self._generate_filename(message, media_type or "unknown")
         if filename and not self._is_extension_allowed(filename):
@@ -355,22 +442,22 @@ class MediaProcessor:
         """Check if file extension is allowed by include/exclude lists."""
         if not filename:
             return True
-            
+
         # Extract extension without dot
-        parts = filename.rsplit('.', 1)
+        parts = filename.rsplit(".", 1)
         if len(parts) < 2:
-            return True # No extension, allow by default (or maybe filter?)
-            
+            return True  # No extension, allow by default (or maybe filter?)
+
         ext = parts[1].lower()
-        
+
         # Exclude takes precedence
         if self.config.exclude_extensions and ext in self.config.exclude_extensions:
             return False
-            
+
         # Include acts as a whitelist if present
         if self.config.include_extensions and ext not in self.config.include_extensions:
             return False
-            
+
         return True
 
     def _should_download_media_type(self, media_type: str) -> bool:
@@ -444,17 +531,25 @@ class MediaProcessor:
             if output_path.exists():
                 # Check if we should have processed this file
                 should_process = False
-                if media_type == "video" and getattr(self.config, "process_video", False):
+                if media_type == "video" and getattr(
+                    self.config, "process_video", False
+                ):
                     should_process = True
-                elif media_type == "audio" and getattr(self.config, "process_audio", True):
+                elif media_type == "audio" and getattr(
+                    self.config, "process_audio", True
+                ):
                     should_process = True
-                elif media_type in ["photo", "image"] and getattr(self.config, "process_images", True):
+                elif media_type in ["photo", "image"] and getattr(
+                    self.config, "process_images", True
+                ):
                     should_process = True
 
                 # If not processing, verify size
                 if not should_process:
                     expected_size = (
-                        getattr(message.file, "size", 0) if hasattr(message, "file") else 0
+                        getattr(message.file, "size", 0)
+                        if hasattr(message, "file")
+                        else 0
                     )
                     stat = output_path.stat()
                     if expected_size > 0 and stat.st_size != expected_size:
@@ -539,16 +634,16 @@ class MediaProcessor:
                 try:
                     # Ensure parent dir exists
                     await aiofiles.os.makedirs(output_path.parent, exist_ok=True)
-                    
+
                     # Move file
                     shutil.move(str(temp_path), str(output_path))
-                    
+
                     # Update task to point to the new location as input
                     processing_task.input_path = output_path
-                    
+
                     # Add to pending list
                     self._pending_tasks.append(processing_task)
-                    
+
                     logger.info(f"Deferred processing for {filename}. Saved raw file.")
                     return output_path
                 except Exception as e:
@@ -622,6 +717,7 @@ class MediaProcessor:
             # Try to get extension from mime_type
             if hasattr(message, "file") and hasattr(message.file, "mime_type"):
                 import mimetypes
+
                 ext = mimetypes.guess_extension(message.file.mime_type)
                 if ext:
                     extension = ext
@@ -939,14 +1035,47 @@ class MediaProcessor:
         Returns:
             True если очередь пуста и нет активных задач обработки
         """
+        # Check processing queue
         if self._processing_queue.qsize() > 0:
             return False
+
+        # 🚀 Check download queue
+        if self._download_queue:
+            pending = self._download_queue.get_pending_count()
+            in_progress = self._download_queue.get_in_progress_count()
+            if pending > 0 or in_progress > 0:
+                return False
 
         try:
             await asyncio.wait_for(self._processing_queue.join(), timeout=0.1)
             return True
         except asyncio.TimeoutError:
             return False
+
+    async def wait_for_downloads(self, timeout: Optional[float] = None) -> bool:
+        """
+        Wait for all background downloads to complete.
+        
+        Args:
+            timeout: Maximum time to wait (None = wait forever)
+            
+        Returns:
+            True if all downloads completed, False if timeout
+        """
+        if not self._download_queue:
+            return True
+            
+        logger.info("⏳ Waiting for background downloads to complete...")
+        result = await self._download_queue.wait_all(timeout=timeout)
+        
+        if result:
+            self._download_queue.log_stats()
+            logger.info("✅ All downloads completed")
+        else:
+            self._download_queue.log_stats()
+            logger.warning("⚠️ Download wait timed out")
+            
+        return result
 
     async def wait_until_idle(
         self, timeout: float = 300.0, progress_callback=None
@@ -1001,7 +1130,7 @@ class MediaProcessor:
 
         total = len(self._pending_tasks)
         logger.info(f"🚀 Starting deferred processing for {total} files...")
-        
+
         for i, task in enumerate(self._pending_tasks):
             try:
                 final_path = task.output_path
@@ -1010,7 +1139,7 @@ class MediaProcessor:
                     temp_input = final_path.with_suffix(final_path.suffix + ".tmp_proc")
                     shutil.move(str(final_path), str(temp_input))
                     task.input_path = temp_input
-                    
+
                     # Add to queue
                     await self._processing_queue.put(task)
                 else:
@@ -1020,7 +1149,7 @@ class MediaProcessor:
 
         # Clear pending list
         self._pending_tasks.clear()
-        
+
         # Wait for all to finish
         await self.wait_until_idle()
         logger.info("✅ Deferred processing complete.")
@@ -1073,6 +1202,13 @@ class MediaProcessor:
         Корректное завершение работы (Phase 2 Task 2.3: Enhanced shutdown with error logging).
         """
         logger.info("Shutting down media processor...")
+
+        # 🚀 Остановка Background Download Queue
+        if self._download_queue:
+            logger.info("Waiting for background downloads to complete...")
+            self._download_queue.log_stats()
+            await self._download_queue.stop(wait_for_completion=True)
+            logger.info("Background download queue stopped")
 
         # Логирование статистики ошибок перед завершением
         if self._failed_tasks > 0 or self._worker_errors:
@@ -1151,6 +1287,10 @@ class MediaProcessor:
 
         if self._downloader:
             self._downloader.log_statistics()
+
+        # 🚀 Download Queue Statistics
+        if self._download_queue:
+            self._download_queue.log_stats()
 
         if self._video_processor:
             self._video_processor.log_statistics()

@@ -82,8 +82,18 @@ class TestIsThrottled:
         stats = connection_manager.get_stats("test_op")
 
         # 10 items total, last 5 should be evaluated
-        stats.speed_history = [200, 180, 190, 210, 195,  # old data (ignored)
-                                50, 60, 55, 65, 70]        # recent 5 (avg=60 < 100)
+        stats.speed_history = [
+            200,
+            180,
+            190,
+            210,
+            195,  # old data (ignored)
+            50,
+            60,
+            55,
+            65,
+            70,
+        ]  # recent 5 (avg=60 < 100)
 
         result = connection_manager.is_throttled("test_op", config)
         assert result is True
@@ -114,28 +124,32 @@ class TestCalculateThrottleDelay:
         assert delay == 0.0
 
     @pytest.mark.asyncio
-    async def test_calculate_throttle_delay_throttled_no_failures(self, connection_manager):
+    async def test_calculate_throttle_delay_throttled_no_failures(
+        self, connection_manager
+    ):
         """Should return small delay when throttled but no consecutive failures."""
         config = ConnectionConfig(detection_window=5, speed_threshold_kbps=100)
         stats = connection_manager.get_stats("test_op")
         stats.speed_history = [50, 60, 55, 65, 70]  # avg < threshold
         stats.consecutive_failures = 0
 
-        with patch('src.core.connection.random.uniform', return_value=1.0):
+        with patch("src.core.connection.random.uniform", return_value=1.0):
             delay = await connection_manager.calculate_throttle_delay("test_op", config)
 
         # base_delay = min(30, 0 * 2) = 0 → jittered to 0
         assert delay == 0.0
 
     @pytest.mark.asyncio
-    async def test_calculate_throttle_delay_throttled_with_failures(self, connection_manager):
+    async def test_calculate_throttle_delay_throttled_with_failures(
+        self, connection_manager
+    ):
         """Should increase delay based on consecutive_failures."""
         config = ConnectionConfig(detection_window=5, speed_threshold_kbps=100)
         stats = connection_manager.get_stats("test_op")
         stats.speed_history = [50, 60, 55, 65, 70]  # avg < threshold
         stats.consecutive_failures = 5
 
-        with patch('src.core.connection.random.uniform', return_value=1.0):
+        with patch("src.core.connection.random.uniform", return_value=1.0):
             delay = await connection_manager.calculate_throttle_delay("test_op", config)
 
         # base_delay = min(30, 5 * 2) = 10 → jittered with 1.0 → 10.0
@@ -149,7 +163,7 @@ class TestCalculateThrottleDelay:
         stats.speed_history = [50, 60, 55, 65, 70]  # avg < threshold
         stats.consecutive_failures = 20  # would give 40 without cap
 
-        with patch('src.core.connection.random.uniform', return_value=1.0):
+        with patch("src.core.connection.random.uniform", return_value=1.0):
             delay = await connection_manager.calculate_throttle_delay("test_op", config)
 
         # base_delay = min(30, 20 * 2) = 30 → jittered with 1.0 → 30.0
@@ -163,7 +177,7 @@ class TestCalculateThrottleDelay:
         stats.speed_history = [50, 60, 55, 65, 70]  # avg < threshold
         stats.consecutive_failures = 5
 
-        with patch('src.core.connection.random.uniform', return_value=0.8):
+        with patch("src.core.connection.random.uniform", return_value=0.8):
             delay = await connection_manager.calculate_throttle_delay("test_op", config)
 
         # base_delay = 10.0, jitter = 0.8 → 8.0
@@ -177,14 +191,16 @@ class TestCalculateThrottleDelay:
         stats.speed_history = [50, 60, 55, 65, 70]  # avg < threshold
         stats.consecutive_failures = 5
 
-        with patch('src.core.connection.random.uniform', return_value=1.2):
+        with patch("src.core.connection.random.uniform", return_value=1.2):
             delay = await connection_manager.calculate_throttle_delay("test_op", config)
 
         # base_delay = 10.0, jitter = 1.2 → 12.0
         assert delay == 12.0
 
     @pytest.mark.asyncio
-    async def test_calculate_throttle_delay_logs_when_throttled(self, connection_manager):
+    async def test_calculate_throttle_delay_logs_when_throttled(
+        self, connection_manager
+    ):
         """Should log info message when applying throttle delay."""
         config = ConnectionConfig(detection_window=5, speed_threshold_kbps=100)
         stats = connection_manager.get_stats("test_op")
@@ -192,10 +208,12 @@ class TestCalculateThrottleDelay:
         stats.consecutive_failures = 5
 
         # Use mock to verify logger was called
-        with patch('src.core.connection.random.uniform', return_value=1.0):
-            with patch('src.core.connection.logger') as mock_logger:
-                delay = await connection_manager.calculate_throttle_delay("test_op", config)
-                
+        with patch("src.core.connection.random.uniform", return_value=1.0):
+            with patch("src.core.connection.logger") as mock_logger:
+                delay = await connection_manager.calculate_throttle_delay(
+                    "test_op", config
+                )
+
                 assert delay == 10.0
                 # Verify logger.info was called with correct message
                 mock_logger.info.assert_called_once()
@@ -204,16 +222,18 @@ class TestCalculateThrottleDelay:
                 assert "10.0s" in call_args
 
     @pytest.mark.asyncio
-    async def test_calculate_throttle_delay_no_log_when_not_throttled(self, connection_manager):
+    async def test_calculate_throttle_delay_no_log_when_not_throttled(
+        self, connection_manager
+    ):
         """Should not log when delay is 0 (not throttled)."""
         config = ConnectionConfig(detection_window=5, speed_threshold_kbps=100)
         stats = connection_manager.get_stats("test_op")
         stats.speed_history = [150, 140, 160, 155, 145]  # avg > threshold
 
         # Use mock to verify logger was NOT called
-        with patch('src.core.connection.logger') as mock_logger:
+        with patch("src.core.connection.logger") as mock_logger:
             delay = await connection_manager.calculate_throttle_delay("test_op", config)
-            
+
             assert delay == 0.0
             # Verify logger.info was not called
             mock_logger.info.assert_not_called()

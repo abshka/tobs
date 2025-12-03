@@ -6,12 +6,12 @@ This is a CRITICAL component - high test coverage required.
 """
 
 import asyncio
-import pytest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, Mock, patch, call
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
+
+import pytest
 
 from src.media.downloader import MediaDownloader
-
 
 pytestmark = pytest.mark.unit
 
@@ -27,7 +27,9 @@ class TestMediaDownloader:
             temp_dir=tmp_path,
         )
 
-    async def test_initialization(self, media_downloader, tmp_path, mock_connection_manager):
+    async def test_initialization(
+        self, media_downloader, tmp_path, mock_connection_manager
+    ):
         """Test MediaDownloader initialization."""
         assert media_downloader.connection_manager == mock_connection_manager
         assert media_downloader.temp_dir == tmp_path
@@ -44,16 +46,16 @@ class TestMediaDownloader:
         """Test download_media routes to persistent mode."""
         media_downloader._persistent_enabled = True
         expected_path = tmp_path / "result.tmp"
-        
+
         # Mock the internal method
         with patch.object(
             media_downloader,
-            '_persistent_download',
+            "_persistent_download",
             new_callable=AsyncMock,
-            return_value=expected_path
+            return_value=expected_path,
         ) as mock_persistent:
             result = await media_downloader.download_media(sample_message)
-            
+
             mock_persistent.assert_called_once()
             assert result == expected_path
 
@@ -63,15 +65,15 @@ class TestMediaDownloader:
         """Test download_media routes to standard mode."""
         media_downloader._persistent_enabled = False
         expected_path = tmp_path / "result.tmp"
-        
+
         with patch.object(
             media_downloader,
-            '_standard_download',
+            "_standard_download",
             new_callable=AsyncMock,
-            return_value=expected_path
+            return_value=expected_path,
         ) as mock_standard:
             result = await media_downloader.download_media(sample_message)
-            
+
             mock_standard.assert_called_once()
             assert result == expected_path
 
@@ -80,7 +82,7 @@ class TestMediaDownloader:
         message_no_file = MagicMock()
         message_no_file.id = 99999
         message_no_file.file = None
-        
+
         result = await media_downloader.download_media(message_no_file)
         assert result is None
 
@@ -96,14 +98,14 @@ class TestMediaDownloader:
         """Test persistent download when complete file already exists."""
         expected_size = 5 * 1024 * 1024  # 5 MB
         temp_path = tmp_path / f"persistent_{sample_message.id}.tmp"
-        
+
         # Pre-create complete file
         temp_path.write_bytes(b"x" * expected_size)
-        
+
         result = await media_downloader._persistent_download(
             sample_message, expected_size
         )
-        
+
         assert result == temp_path
         assert media_downloader._persistent_download_successes == 1
 
@@ -112,24 +114,24 @@ class TestMediaDownloader:
     ):
         """Test successful standard download."""
         expected_size = 2 * 1024 * 1024  # 2 MB
-        
+
         # Mock download_media on the message
         async def mock_download(file, progress_callback=None):
             file.write_bytes(b"x" * expected_size)
             return file
-        
+
         sample_message.download_media = mock_download
-        
+
         # Mock semaphore
         mock_sem = AsyncMock()
         mock_sem.__aenter__ = AsyncMock()
         mock_sem.__aexit__ = AsyncMock()
         media_downloader.connection_manager.download_semaphore = mock_sem
-        
+
         result = await media_downloader._standard_download(
             sample_message, expected_size
         )
-        
+
         # Should return a path (actual filename is generated with timestamp)
         assert result is not None
         assert result.exists()
@@ -142,9 +144,9 @@ class TestMediaDownloader:
         media_downloader._persistent_download_successes = 8
         media_downloader._standard_download_attempts = 5
         media_downloader._standard_download_successes = 5
-        
+
         stats = media_downloader.get_statistics()
-        
+
         # Check structure (actual keys are nested)
         assert "persistent_downloads" in stats
         assert stats["persistent_downloads"]["attempts"] == 10

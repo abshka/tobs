@@ -185,8 +185,18 @@ class PerformanceMonitor:
         self._last_disk_stats = None
 
         # Коллбеки (поддерживаем как sync, так и async)
-        self.metric_callbacks: List[Union[Callable[[SystemMetrics], None], Callable[[SystemMetrics], Awaitable[None]]]] = []
-        self.alert_callbacks: List[Union[Callable[[PerformanceAlert], None], Callable[[PerformanceAlert], Awaitable[None]]]] = []
+        self.metric_callbacks: List[
+            Union[
+                Callable[[SystemMetrics], None],
+                Callable[[SystemMetrics], Awaitable[None]],
+            ]
+        ] = []
+        self.alert_callbacks: List[
+            Union[
+                Callable[[PerformanceAlert], None],
+                Callable[[PerformanceAlert], Awaitable[None]],
+            ]
+        ] = []
 
         # Профили производительности
         self.profiles = {
@@ -230,7 +240,9 @@ class PerformanceMonitor:
             self.current_profile = self.profiles["balanced"]
         else:
             self.current_profile = self.profiles[performance_profile]
-            logger.debug(f"Performance monitor initialized with profile: {performance_profile}")
+            logger.debug(
+                f"Performance monitor initialized with profile: {performance_profile}"
+            )
 
     async def start(self):
         """Запуск мониторинга."""
@@ -397,11 +409,22 @@ class PerformanceMonitor:
                     self.alerts[alert_id].resolved_at = current_time
                     logger.info(f"Performance alert resolved: {metric_name}")
 
-    def add_metric_callback(self, callback: Union[Callable[[SystemMetrics], None], Callable[[SystemMetrics], Awaitable[None]]]):
+    def add_metric_callback(
+        self,
+        callback: Union[
+            Callable[[SystemMetrics], None], Callable[[SystemMetrics], Awaitable[None]]
+        ],
+    ):
         """Добавление коллбека для метрик (поддерживает sync и async функции)."""
         self.metric_callbacks.append(callback)
 
-    def add_alert_callback(self, callback: Union[Callable[[PerformanceAlert], None], Callable[[PerformanceAlert], Awaitable[None]]]):
+    def add_alert_callback(
+        self,
+        callback: Union[
+            Callable[[PerformanceAlert], None],
+            Callable[[PerformanceAlert], Awaitable[None]],
+        ],
+    ):
         """Добавление коллбека для алертов (поддерживает sync и async функции)."""
         self.alert_callbacks.append(callback)
 
@@ -625,7 +648,11 @@ class PerformanceMonitor:
             }
 
             async with aiofiles.open(metrics_file, "wb") as f:
-                await f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS))
+                await f.write(
+                    orjson.dumps(
+                        data, option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS
+                    )
+                )
 
             logger.debug(f"Metrics history saved to {metrics_file}")
 
@@ -639,7 +666,12 @@ class PerformanceMonitor:
 
             if format.lower() == "json":
                 async with aiofiles.open(filepath, "wb") as f:
-                    await f.write(orjson.dumps(summary, option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS))
+                    await f.write(
+                        orjson.dumps(
+                            summary,
+                            option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS,
+                        )
+                    )
             else:
                 logger.error(f"Unsupported export format: {format}")
                 return False
@@ -693,15 +725,19 @@ class PerformanceMonitor:
 _performance_monitor: Optional[PerformanceMonitor] = None
 
 
-async def get_performance_monitor(performance_profile: str = "balanced") -> PerformanceMonitor:
+async def get_performance_monitor(
+    performance_profile: str = "balanced",
+) -> PerformanceMonitor:
     """Получение глобального монитора производительности.
-    
+
     Args:
         performance_profile: Профиль производительности (conservative, balanced, aggressive)
     """
     global _performance_monitor
     if _performance_monitor is None:
-        _performance_monitor = PerformanceMonitor(performance_profile=performance_profile)
+        _performance_monitor = PerformanceMonitor(
+            performance_profile=performance_profile
+        )
         await _performance_monitor.start()
     return _performance_monitor
 

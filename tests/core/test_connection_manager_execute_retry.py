@@ -26,7 +26,6 @@ from src.core.connection import (
     PoolType,
 )
 
-
 # ============================================================================
 # Batch 11: execute_with_retry Integration Tests
 # ============================================================================
@@ -80,12 +79,13 @@ class TestExecuteWithRetrySuccess:
 
         config = ConnectionConfig(max_attempts=5)
 
-        with patch.object(
-            connection_manager.pools[PoolType.API],
-            "submit",
-            new_callable=AsyncMock,
-        ) as mock_submit, patch(
-            "src.core.connection.asyncio.sleep", new_callable=AsyncMock
+        with (
+            patch.object(
+                connection_manager.pools[PoolType.API],
+                "submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+            patch("src.core.connection.asyncio.sleep", new_callable=AsyncMock),
         ):
             mock_submit.side_effect = side_effect_func
 
@@ -116,12 +116,13 @@ class TestExecuteWithRetryFailure:
 
         config = ConnectionConfig(max_attempts=3)
 
-        with patch.object(
-            connection_manager.pools[PoolType.API],
-            "submit",
-            new_callable=AsyncMock,
-        ) as mock_submit, patch(
-            "src.core.connection.asyncio.sleep", new_callable=AsyncMock
+        with (
+            patch.object(
+                connection_manager.pools[PoolType.API],
+                "submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+            patch("src.core.connection.asyncio.sleep", new_callable=AsyncMock),
         ):
             mock_submit.side_effect = error
 
@@ -146,12 +147,13 @@ class TestExecuteWithRetryFailure:
 
         config = ConnectionConfig(max_attempts=2, base_timeout=1.0)
 
-        with patch.object(
-            connection_manager.pools[PoolType.API],
-            "submit",
-            new_callable=AsyncMock,
-        ) as mock_submit, patch(
-            "src.core.connection.asyncio.sleep", new_callable=AsyncMock
+        with (
+            patch.object(
+                connection_manager.pools[PoolType.API],
+                "submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+            patch("src.core.connection.asyncio.sleep", new_callable=AsyncMock),
         ):
             mock_submit.side_effect = asyncio.TimeoutError("Operation timed out")
 
@@ -177,13 +179,14 @@ class TestExecuteWithRetryTimeout:
         op_name = "test_file_download"
         file_size = 500 * 1024 * 1024  # 500 MB
 
-        with patch.object(
-            connection_manager.pools[PoolType.DOWNLOAD],
-            "submit",
-            new_callable=AsyncMock,
-        ) as mock_submit, patch(
-            "src.core.connection.asyncio.wait_for"
-        ) as mock_wait_for:
+        with (
+            patch.object(
+                connection_manager.pools[PoolType.DOWNLOAD],
+                "submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+            patch("src.core.connection.asyncio.wait_for") as mock_wait_for,
+        ):
             mock_submit.return_value = "downloaded"
             mock_wait_for.return_value = "downloaded"
 
@@ -211,13 +214,14 @@ class TestExecuteWithRetryTimeout:
         op_name = "test_custom_timeout"
         custom_timeout = 42.0
 
-        with patch.object(
-            connection_manager.pools[PoolType.API],
-            "submit",
-            new_callable=AsyncMock,
-        ) as mock_submit, patch(
-            "src.core.connection.asyncio.wait_for"
-        ) as mock_wait_for:
+        with (
+            patch.object(
+                connection_manager.pools[PoolType.API],
+                "submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+            patch("src.core.connection.asyncio.wait_for") as mock_wait_for,
+        ):
             mock_submit.return_value = "result"
             mock_wait_for.return_value = "result"
 
@@ -242,15 +246,19 @@ class TestExecuteWithRetryThrottling:
         op_name = "test_throttled_operation"
 
         # Симулируем throttled состояние
-        with patch.object(
-            connection_manager, "calculate_throttle_delay", new_callable=AsyncMock
-        ) as mock_throttle_delay, patch.object(
-            connection_manager.pools[PoolType.API],
-            "submit",
-            new_callable=AsyncMock,
-        ) as mock_submit, patch(
-            "src.core.connection.asyncio.sleep", new_callable=AsyncMock
-        ) as mock_sleep:
+        with (
+            patch.object(
+                connection_manager, "calculate_throttle_delay", new_callable=AsyncMock
+            ) as mock_throttle_delay,
+            patch.object(
+                connection_manager.pools[PoolType.API],
+                "submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+            patch(
+                "src.core.connection.asyncio.sleep", new_callable=AsyncMock
+            ) as mock_sleep,
+        ):
             mock_throttle_delay.return_value = 5.0
             mock_submit.return_value = "success"
 
@@ -270,15 +278,19 @@ class TestExecuteWithRetryThrottling:
         operation = MagicMock()
         op_name = "test_not_throttled"
 
-        with patch.object(
-            connection_manager, "calculate_throttle_delay", new_callable=AsyncMock
-        ) as mock_throttle_delay, patch.object(
-            connection_manager.pools[PoolType.API],
-            "submit",
-            new_callable=AsyncMock,
-        ) as mock_submit, patch(
-            "src.core.connection.asyncio.sleep", new_callable=AsyncMock
-        ) as mock_sleep:
+        with (
+            patch.object(
+                connection_manager, "calculate_throttle_delay", new_callable=AsyncMock
+            ) as mock_throttle_delay,
+            patch.object(
+                connection_manager.pools[PoolType.API],
+                "submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+            patch(
+                "src.core.connection.asyncio.sleep", new_callable=AsyncMock
+            ) as mock_sleep,
+        ):
             mock_throttle_delay.return_value = 0.0
             mock_submit.return_value = "success"
 
@@ -318,15 +330,19 @@ class TestExecuteWithRetryTelegramErrors:
 
         config = ConnectionConfig(max_attempts=3)
 
-        with patch.object(
-            connection_manager.pools[PoolType.API],
-            "submit",
-            new_callable=AsyncMock,
-        ) as mock_submit, patch(
-            "src.core.connection.asyncio.sleep", new_callable=AsyncMock
-        ) as mock_sleep, patch.object(
-            connection_manager, "handle_telegram_error", new_callable=AsyncMock
-        ) as mock_handle_tg:
+        with (
+            patch.object(
+                connection_manager.pools[PoolType.API],
+                "submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+            patch(
+                "src.core.connection.asyncio.sleep", new_callable=AsyncMock
+            ) as mock_sleep,
+            patch.object(
+                connection_manager, "handle_telegram_error", new_callable=AsyncMock
+            ) as mock_handle_tg,
+        ):
             mock_submit.side_effect = side_effect_func
             mock_handle_tg.return_value = 30.0
 
@@ -353,12 +369,13 @@ class TestExecuteWithRetryTelegramErrors:
 
         config = ConnectionConfig(max_attempts=2)
 
-        with patch.object(
-            connection_manager.pools[PoolType.API],
-            "submit",
-            new_callable=AsyncMock,
-        ) as mock_submit, patch(
-            "src.core.connection.asyncio.sleep", new_callable=AsyncMock
+        with (
+            patch.object(
+                connection_manager.pools[PoolType.API],
+                "submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+            patch("src.core.connection.asyncio.sleep", new_callable=AsyncMock),
         ):
             mock_submit.side_effect = [timeout_error, timeout_error]
 
@@ -459,14 +476,21 @@ class TestExecuteWithRetryStats:
         operation = MagicMock()
         op_name = "success_stats_operation"
 
-        with patch.object(
-            connection_manager.pools[PoolType.API],
-            "submit",
-            new_callable=AsyncMock,
-        ) as mock_submit, patch("src.core.connection.time.time") as mock_time:
+        with (
+            patch.object(
+                connection_manager.pools[PoolType.API],
+                "submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+            patch("src.core.connection.time.time") as mock_time,
+        ):
             mock_submit.return_value = "success"
             # Добавляем дополнительное значение для update_success()
-            mock_time.side_effect = [100.0, 100.5, 100.5]  # start, end, last_success_time
+            mock_time.side_effect = [
+                100.0,
+                100.5,
+                100.5,
+            ]  # start, end, last_success_time
 
             # Act
             await connection_manager.execute_with_retry(operation, op_name)
@@ -489,11 +513,14 @@ class TestExecuteWithRetryStats:
 
         config = ConnectionConfig(max_attempts=2)
 
-        with patch.object(
-            connection_manager.pools[PoolType.API],
-            "submit",
-            new_callable=AsyncMock,
-        ) as mock_submit, patch("src.core.connection.asyncio.sleep", new_callable=AsyncMock):
+        with (
+            patch.object(
+                connection_manager.pools[PoolType.API],
+                "submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+            patch("src.core.connection.asyncio.sleep", new_callable=AsyncMock),
+        ):
             mock_submit.side_effect = RuntimeError("Failure")
 
             # Act & Assert
@@ -527,7 +554,7 @@ class TestExecuteWithRetryOperationArgs:
             mock_submit.return_value = "result"
 
             # Act
-            # Сигнатура: execute_with_retry(operation, operation_name, pool_type=..., config=..., 
+            # Сигнатура: execute_with_retry(operation, operation_name, pool_type=..., config=...,
             #                               timeout_override=..., file_size=..., *args, **kwargs)
             # Поэтому positional args идут ПОСЛЕ всех named parameters
             await connection_manager.execute_with_retry(
@@ -590,13 +617,16 @@ class TestExecuteWithRetryBackoffStrategies:
             max_attempts=4, strategy=BackoffStrategy.EXPONENTIAL, base_delay=2.0
         )
 
-        with patch.object(
-            connection_manager.pools[PoolType.API],
-            "submit",
-            new_callable=AsyncMock,
-        ) as mock_submit, patch(
-            "src.core.connection.asyncio.sleep", new_callable=AsyncMock
-        ) as mock_sleep:
+        with (
+            patch.object(
+                connection_manager.pools[PoolType.API],
+                "submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+            patch(
+                "src.core.connection.asyncio.sleep", new_callable=AsyncMock
+            ) as mock_sleep,
+        ):
             mock_submit.side_effect = [
                 ValueError("Fail 1"),
                 ValueError("Fail 2"),
@@ -630,14 +660,21 @@ class TestExecuteWithRetryBackoffStrategies:
             max_attempts=3, strategy=BackoffStrategy.FIXED, base_delay=5.0
         )
 
-        with patch.object(
-            connection_manager.pools[PoolType.API],
-            "submit",
-            new_callable=AsyncMock,
-        ) as mock_submit, patch(
-            "src.core.connection.asyncio.sleep", new_callable=AsyncMock
-        ) as mock_sleep:
-            mock_submit.side_effect = [ValueError("Fail 1"), ValueError("Fail 2"), ValueError("Fail 3")]
+        with (
+            patch.object(
+                connection_manager.pools[PoolType.API],
+                "submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
+            patch(
+                "src.core.connection.asyncio.sleep", new_callable=AsyncMock
+            ) as mock_sleep,
+        ):
+            mock_submit.side_effect = [
+                ValueError("Fail 1"),
+                ValueError("Fail 2"),
+                ValueError("Fail 3"),
+            ]
 
             # Act & Assert
             with pytest.raises(ValueError):

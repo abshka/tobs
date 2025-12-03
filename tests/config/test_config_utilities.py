@@ -111,7 +111,9 @@ class TestGetOptimalWorkers:
         expected_base = 4
 
         assert result["workers"] == max(2, expected_base)  # 4
-        assert result["download_workers"] == max(4, int(expected_base * 1.5))  # max(4, 6) = 6
+        assert result["download_workers"] == max(
+            4, int(expected_base * 1.5)
+        )  # max(4, 6) = 6
         assert result["io_workers"] == max(4, int(expected_base * 2))  # max(4, 8) = 8
         assert result["ffmpeg_workers"] == max(1, expected_base // 2)  # max(1, 2) = 2
 
@@ -124,7 +126,9 @@ class TestGetOptimalWorkers:
         expected_base = 2
 
         assert result["workers"] == max(2, expected_base)  # 2
-        assert result["download_workers"] == max(4, int(expected_base * 1.5))  # max(4, 3) = 4
+        assert result["download_workers"] == max(
+            4, int(expected_base * 1.5)
+        )  # max(4, 3) = 4
         assert result["io_workers"] == max(4, int(expected_base * 2))  # max(4, 4) = 4
         assert result["ffmpeg_workers"] == max(1, expected_base // 2)  # max(1, 1) = 1
 
@@ -137,7 +141,9 @@ class TestGetOptimalWorkers:
         expected_base = 8
 
         assert result["workers"] == max(2, expected_base)  # 8
-        assert result["download_workers"] == max(4, int(expected_base * 1.5))  # max(4, 12) = 12
+        assert result["download_workers"] == max(
+            4, int(expected_base * 1.5)
+        )  # max(4, 12) = 12
         assert result["io_workers"] == max(4, int(expected_base * 2))  # max(4, 16) = 16
         assert result["ffmpeg_workers"] == max(1, expected_base // 2)  # max(1, 4) = 4
 
@@ -176,7 +182,9 @@ class TestGetOptimalWorkers:
         expected_base = 2
 
         assert result["workers"] == max(2, expected_base)  # 2
-        assert result["download_workers"] == max(4, int(expected_base * 1.5))  # max(4, 3) = 4
+        assert result["download_workers"] == max(
+            4, int(expected_base * 1.5)
+        )  # max(4, 3) = 4
         assert result["io_workers"] == max(4, int(expected_base * 2))  # max(4, 4) = 4
         assert result["ffmpeg_workers"] == max(1, expected_base // 2)  # max(1, 1) = 1
 
@@ -195,7 +203,9 @@ class TestGetOptimalWorkers:
 
     def test_get_optimal_workers_conservative_high_resources(self):
         """Conservative profile with high resources."""
-        result = get_optimal_workers(memory_gb=32.0, cpu_count=16, profile="conservative")
+        result = get_optimal_workers(
+            memory_gb=32.0, cpu_count=16, profile="conservative"
+        )
 
         # multiplier = 0.5 for conservative
         # base_workers = min(16 * 0.5, 32.0 * 2) = min(8, 64) = 8

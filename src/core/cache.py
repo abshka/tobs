@@ -3,11 +3,11 @@
 """
 
 import asyncio
+import base64
 import logging
 import pickle
 import time
 import zlib
-import base64
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from enum import Enum
@@ -118,7 +118,7 @@ class CacheManager:
         self._lock = asyncio.Lock()
         self._stats = CacheStats()
         self._dirty = False
-        
+
         # TaskGroup для управления background tasks (Phase 3 Task A.2)
         self._task_group: Optional[asyncio.TaskGroup] = None
         self._task_group_runner: Optional[asyncio.Task] = None
@@ -136,7 +136,7 @@ class CacheManager:
     async def _run_background_tasks(self):
         """
         Запуск и управление background tasks в TaskGroup (Phase 3 Task A.2).
-        
+
         TaskGroup автоматически:
         - Управляет жизненным циклом всех задач
         - Агрегирует исключения из всех задач
@@ -146,17 +146,17 @@ class CacheManager:
             async with asyncio.TaskGroup() as tg:
                 self._task_group = tg
                 logger.debug("CacheManager TaskGroup context entered")
-                
+
                 # Создаём background task в TaskGroup
                 tg.create_task(self._auto_save_loop())
                 logger.debug("Auto-save task created in TaskGroup")
-                
+
         except* Exception as exc_group:
             # except* ловит все исключения из TaskGroup
             for exc in exc_group.exceptions:
                 logger.error(
                     f"Cache manager background task failed: {type(exc).__name__}: {exc}",
-                    exc_info=exc
+                    exc_info=exc,
                 )
         finally:
             self._task_group = None
@@ -216,7 +216,9 @@ class CacheManager:
                         raw_data = orjson.dumps(data, option=orjson.OPT_NON_STR_KEYS)
                     except TypeError as e:
                         # Not JSON serializable, fallback to pickle for GZIP if configured
-                        logger.debug(f"Data not JSON serializable: {e}. Falling back to pickle compression.")
+                        logger.debug(
+                            f"Data not JSON serializable: {e}. Falling back to pickle compression."
+                        )
                         if self.compression == CompressionType.GZIP:
                             pickled_raw = pickle.dumps(data)
                             # Track that we fell back from JSON to pickle serialization
@@ -413,7 +415,9 @@ class CacheManager:
                             and entry_data.get("data_encoding") == "base64"
                         ):
                             try:
-                                processed_data = base64.b64decode(raw_data.encode("ascii"))
+                                processed_data = base64.b64decode(
+                                    raw_data.encode("ascii")
+                                )
                             except Exception:
                                 processed_data = raw_data
                         else:
@@ -465,9 +469,14 @@ class CacheManager:
                 for key, entry_data in entries_data.items():
                     try:
                         raw_data = entry_data.get("data")
-                        if isinstance(raw_data, str) and entry_data.get("data_encoding") == "base64":
+                        if (
+                            isinstance(raw_data, str)
+                            and entry_data.get("data_encoding") == "base64"
+                        ):
                             try:
-                                processed_data = base64.b64decode(raw_data.encode("ascii"))
+                                processed_data = base64.b64decode(
+                                    raw_data.encode("ascii")
+                                )
                             except Exception:
                                 processed_data = raw_data
                         else:
@@ -480,7 +489,9 @@ class CacheManager:
                             created_at_val = float(created_at_raw)
                             last_accessed_val = float(last_accessed_raw)
                         except Exception as e:
-                            logger.warning(f"Skipping invalid backup entry {key}: invalid timestamps: {e}")
+                            logger.warning(
+                                f"Skipping invalid backup entry {key}: invalid timestamps: {e}"
+                            )
                             continue
 
                         entry = CacheEntry(
@@ -533,7 +544,9 @@ class CacheManager:
                             # use asdict but encode bytes data to base64 to make JSON serialization safe
                             entry_dict = asdict(entry)
                             if isinstance(entry_dict.get("data"), (bytes, bytearray)):
-                                entry_dict["data"] = base64.b64encode(entry_dict["data"]).decode("ascii")
+                                entry_dict["data"] = base64.b64encode(
+                                    entry_dict["data"]
+                                ).decode("ascii")
                                 entry_dict["data_encoding"] = "base64"
                             entries_dict[key] = entry_dict
 
@@ -541,7 +554,7 @@ class CacheManager:
             json_bytes = orjson.dumps(
                 cache_data,
                 option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS,
-                default=_json_default
+                default=_json_default,
             )
 
             async with aiofiles.open(self.cache_path, "wb") as f:
@@ -567,7 +580,9 @@ class CacheManager:
                 try:
                     await self._task_group_runner
                 except asyncio.CancelledError:
-                    logger.debug("Cache manager background task group runner cancelled successfully")
+                    logger.debug(
+                        "Cache manager background task group runner cancelled successfully"
+                    )
             else:
                 logger.debug("Cache manager background task group runner already done")
 

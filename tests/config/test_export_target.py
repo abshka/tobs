@@ -8,7 +8,6 @@ Tests cover:
 - Edge cases and malformed inputs
 """
 
-
 from src.config import ExportTarget
 
 
@@ -85,7 +84,10 @@ class TestExportTargetForumTopics:
         """Test malformed forum topic URL logs warning."""
         target = ExportTarget(id="/c/invalid", name="Bad Topic")
         # Should log warning but not crash
-        assert "Could not parse forum topic URL" in caplog.text or target.id == "/c/invalid"
+        assert (
+            "Could not parse forum topic URL" in caplog.text
+            or target.id == "/c/invalid"
+        )
 
 
 class TestExportTargetTypePreservation:

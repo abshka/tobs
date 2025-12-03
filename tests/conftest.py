@@ -28,14 +28,14 @@ def mock_config() -> MagicMock:
     config.temp_dir = None
     config.enable_smart_caching = True
     config.vaapi_device = "/dev/dri/renderD128"
-    
+
     # Performance settings
     config.performance = MagicMock()
     config.performance.enable_persistent_download = True
     config.performance.persistent_download_min_size_mb = 0.5
     config.performance.persistent_max_failures = 10
     config.performance.persistent_chunk_timeout = 600
-    
+
     return config
 
 
@@ -112,10 +112,10 @@ def sample_audio_message() -> MagicMock:
     return message
 
 
-
 # Mock Telegram error classes for testing
 class FloodWaitError(Exception):
     """Mock FloodWaitError."""
+
     def __init__(self, seconds: int):
         self.seconds = seconds
         super().__init__(f"Flood wait: {seconds}s")
@@ -123,6 +123,7 @@ class FloodWaitError(Exception):
 
 class SlowModeWaitError(Exception):
     """Mock SlowModeWaitError."""
+
     def __init__(self, seconds: int):
         self.seconds = seconds
         super().__init__(f"Slow mode wait: {seconds}s")
@@ -130,37 +131,42 @@ class SlowModeWaitError(Exception):
 
 class TelegramTimeoutError(Exception):
     """Mock TelegramTimeoutError."""
+
     pass
 
 
 class RPCError(Exception):
     """Mock RPCError."""
-    pass
 
+    pass
 
 
 @pytest.fixture
 async def connection_manager():
     """Create a real ConnectionManager instance for testing.
-    
+
     Provides a fully functional ConnectionManager with monitoring disabled.
     Properly cleans up resources after test completion.
     """
     from src.core.connection import ConnectionManager
-    
+
     # Create manager (monitoring will start automatically)
     manager = ConnectionManager()
-    
+
     # Yield to test
     yield manager
-    
+
     # Cleanup: cancel monitoring task and close pools
-    if hasattr(manager, '_monitor_task') and manager._monitor_task and not manager._monitor_task.done():
+    if (
+        hasattr(manager, "_monitor_task")
+        and manager._monitor_task
+        and not manager._monitor_task.done()
+    ):
         manager._monitor_task.cancel()
         try:
             await manager._monitor_task
         except asyncio.CancelledError:
             pass
-    
+
     # Note: AdaptiveTaskPool doesn't have a close() method
     # Pools will be cleaned up automatically when manager is destroyed

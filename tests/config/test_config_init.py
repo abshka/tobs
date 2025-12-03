@@ -33,12 +33,16 @@ class TestConfigRequiredFieldValidation:
 
     def test_invalid_api_id_negative_raises_error(self):
         """Test negative API_ID raises ConfigError."""
-        with pytest.raises(ConfigError, match="Invalid API_ID.*Must be positive integer"):
+        with pytest.raises(
+            ConfigError, match="Invalid API_ID.*Must be positive integer"
+        ):
             Config(api_id=-1, api_hash="a" * 32)
 
     def test_short_api_hash_raises_error(self):
         """Test API_HASH shorter than 32 chars raises ConfigError."""
-        with pytest.raises(ConfigError, match="Invalid API_HASH length.*Must be at least 32"):
+        with pytest.raises(
+            ConfigError, match="Invalid API_HASH length.*Must be at least 32"
+        ):
             Config(api_id=12345, api_hash="tooshort")
 
 
@@ -57,7 +61,7 @@ class TestConfigPathSetup:
             api_id=12345,
             api_hash="a" * 32,
             export_path=Path("./exports"),
-            cache_file=Path("./cache.json")
+            cache_file=Path("./cache.json"),
         )
 
         assert config.export_path.is_absolute()
@@ -80,7 +84,9 @@ class TestConfigPathSetup:
             assert call[1].get("parents") is True
             assert call[1].get("exist_ok") is True
 
-    def test_mkdir_oserror_raises_config_error(self, mock_mkdir, mock_memory, mock_disk):
+    def test_mkdir_oserror_raises_config_error(
+        self, mock_mkdir, mock_memory, mock_disk
+    ):
         """Test OSError during mkdir raises ConfigError."""
         mock_memory.return_value = MagicMock(total=8 * 1024**3, available=6 * 1024**3)
         mock_disk.return_value = MagicMock(free=50 * 1024**3)
@@ -97,11 +103,13 @@ class TestConfigPathSetup:
 class TestConfigSystemRequirements:
     """Test _validate_system_requirements method."""
 
-    def test_low_total_memory_logs_warning(self, mock_mkdir, mock_memory, mock_disk, mock_logger):
+    def test_low_total_memory_logs_warning(
+        self, mock_mkdir, mock_memory, mock_disk, mock_logger
+    ):
         """Test low total memory logs warning."""
         mock_memory.return_value = MagicMock(
             total=1.5 * 1024**3,  # 1.5 GB (below MIN_MEMORY_GB = 2)
-            available=1 * 1024**3
+            available=1 * 1024**3,
         )
         mock_disk.return_value = MagicMock(free=50 * 1024**3)
 
@@ -112,7 +120,9 @@ class TestConfigSystemRequirements:
         warning_text = str(mock_logger.warning.call_args)
         assert "1.5GB RAM" in warning_text or "minimum" in warning_text.lower()
 
-    def test_insufficient_disk_space_logs_error(self, mock_mkdir, mock_memory, mock_disk, mock_logger):
+    def test_insufficient_disk_space_logs_error(
+        self, mock_mkdir, mock_memory, mock_disk, mock_logger
+    ):
         """Test insufficient disk space logs error (caught by try-except)."""
         mock_memory.return_value = MagicMock(total=8 * 1024**3, available=6 * 1024**3)
         # Need to make disk_usage return object with .free attribute
@@ -123,29 +133,27 @@ class TestConfigSystemRequirements:
         # The ConfigError is raised but caught by the except block in _validate_system_requirements
         # So config initializes but logs a warning
         _ = Config(api_id=12345, api_hash="a" * 32)
-        
+
         # Should have logged warning about the exception
         mock_logger.warning.assert_called()
         warning_text = str(mock_logger.warning.call_args_list)
-        assert "Could not validate system requirements" in warning_text or "Insufficient disk space" in warning_text
-
-    def test_system_validation_runs_without_errors(self, mock_mkdir, mock_memory, mock_disk, mock_logger):
-        """Test system validation completes without raising exceptions."""
-        mock_memory.return_value = MagicMock(
-            total=8 * 1024**3,
-            available=6 * 1024**3
+        assert (
+            "Could not validate system requirements" in warning_text
+            or "Insufficient disk space" in warning_text
         )
+
+    def test_system_validation_runs_without_errors(
+        self, mock_mkdir, mock_memory, mock_disk, mock_logger
+    ):
+        """Test system validation completes without raising exceptions."""
+        mock_memory.return_value = MagicMock(total=8 * 1024**3, available=6 * 1024**3)
         disk_mock = MagicMock()
         disk_mock.free = 50 * 1024**3
         mock_disk.return_value = disk_mock
 
         # Should initialize successfully
-        config = Config(
-            api_id=12345,
-            api_hash="a" * 32,
-            performance_profile="balanced"
-        )
-        
+        config = Config(api_id=12345, api_hash="a" * 32, performance_profile="balanced")
+
         # Verify config was created
         assert config.api_id == 12345
         assert config.performance.memory_limit_mb > 0
@@ -157,15 +165,15 @@ class TestConfigSystemRequirements:
 class TestConfigPerformanceProfileAssignment:
     """Test performance profile assignment in __post_init__."""
 
-    def test_performance_profile_auto_configured(self, mock_mkdir, mock_memory, mock_disk):
+    def test_performance_profile_auto_configured(
+        self, mock_mkdir, mock_memory, mock_disk
+    ):
         """Test performance settings are auto-configured from profile."""
         mock_memory.return_value = MagicMock(total=8 * 1024**3, available=6 * 1024**3)
         mock_disk.return_value = MagicMock(free=50 * 1024**3)
 
         config = Config(
-            api_id=12345,
-            api_hash="a" * 32,
-            performance_profile="conservative"
+            api_id=12345, api_hash="a" * 32, performance_profile="conservative"
         )
 
         # Performance should be configured for conservative profile
@@ -190,7 +198,9 @@ class TestConfigPerformanceProfileAssignment:
 class TestConfigSuccessfulInitialization:
     """Test successful Config initialization with valid inputs."""
 
-    def test_minimal_config_initialization(self, mock_mkdir, mock_memory, mock_disk, mock_logger):
+    def test_minimal_config_initialization(
+        self, mock_mkdir, mock_memory, mock_disk, mock_logger
+    ):
         """Test Config initializes with minimal required fields."""
         mock_memory.return_value = MagicMock(total=8 * 1024**3, available=6 * 1024**3)
         mock_disk.return_value = MagicMock(free=50 * 1024**3)
@@ -203,21 +213,19 @@ class TestConfigSuccessfulInitialization:
         assert config.performance_profile == "balanced"
         mock_logger.info.assert_called()  # Should log configuration
 
-    def test_config_with_export_targets(self, mock_mkdir, mock_memory, mock_disk, mock_logger):
+    def test_config_with_export_targets(
+        self, mock_mkdir, mock_memory, mock_disk, mock_logger
+    ):
         """Test Config with export targets initializes correctly."""
         mock_memory.return_value = MagicMock(total=8 * 1024**3, available=6 * 1024**3)
         mock_disk.return_value = MagicMock(free=50 * 1024**3)
 
         targets = [
             ExportTarget(id="@channel1", name="Channel 1"),
-            ExportTarget(id="-100123456", name="Channel 2")
+            ExportTarget(id="-100123456", name="Channel 2"),
         ]
 
-        config = Config(
-            api_id=12345,
-            api_hash="a" * 32,
-            export_targets=targets
-        )
+        config = Config(api_id=12345, api_hash="a" * 32, export_targets=targets)
 
         assert len(config.export_targets) == 2
         assert config.export_targets[0].id == "@channel1"

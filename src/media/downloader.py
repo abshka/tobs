@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from loguru import logger
-from telethon.tl.types import Message
-from telethon.tl.functions import InvokeWithTakeoutRequest
 from telethon import utils
+from telethon.tl.functions import InvokeWithTakeoutRequest
+from telethon.tl.types import Message
 
 # Environment variables for download control
 ENABLE_PARALLEL_DOWNLOAD = (
@@ -38,6 +38,7 @@ class TakeoutClientWrapper:
     Wraps a TelegramClient to automatically inject InvokeWithTakeoutRequest
     into all calls. Used for accelerating media downloads.
     """
+
     def __init__(self, client, takeout_id):
         self._client = client
         self._takeout_id = takeout_id
@@ -49,12 +50,14 @@ class TakeoutClientWrapper:
         # Hack to support download_file with Takeout wrapping
         # We temporarily patch the client's __call__ to wrap requests
         original_call = self._client.__call__
-        
+
         async def wrapped_call(request, ordered=False):
             if not isinstance(request, InvokeWithTakeoutRequest):
-                request = InvokeWithTakeoutRequest(takeout_id=self._takeout_id, query=request)
+                request = InvokeWithTakeoutRequest(
+                    takeout_id=self._takeout_id, query=request
+                )
             return await original_call(request, ordered=ordered)
-            
+
         try:
             # Patch
             self._client.__call__ = wrapped_call
@@ -66,12 +69,14 @@ class TakeoutClientWrapper:
     async def download_media(self, *args, **kwargs):
         # Same hack for download_media
         original_call = self._client.__call__
-        
+
         async def wrapped_call(request, ordered=False):
             if not isinstance(request, InvokeWithTakeoutRequest):
-                request = InvokeWithTakeoutRequest(takeout_id=self._takeout_id, query=request)
+                request = InvokeWithTakeoutRequest(
+                    takeout_id=self._takeout_id, query=request
+                )
             return await original_call(request, ordered=ordered)
-            
+
         try:
             self._client.__call__ = wrapped_call
             return await self._client.download_media(*args, **kwargs)
@@ -80,7 +85,9 @@ class TakeoutClientWrapper:
 
     async def __call__(self, request, ordered=False):
         if not isinstance(request, InvokeWithTakeoutRequest):
-            request = InvokeWithTakeoutRequest(takeout_id=self._takeout_id, query=request)
+            request = InvokeWithTakeoutRequest(
+                takeout_id=self._takeout_id, query=request
+            )
         return await self._client(request, ordered=ordered)
 
     # We need to support download_media / download_file being called on this wrapper
@@ -96,100 +103,101 @@ class TakeoutClientWrapper:
     # Inside `client.download_media`, `self` is `client`.
     # So `client(GetFileRequest)` is called. `client.__call__` is used.
     # Our wrapper is bypassed.
-    
+
     # SOLUTION: We must bind the method to our wrapper or use a different approach.
     # Telethon's `download_media` allows passing a `client`? No, it's a method on client.
     # However, `Message.download_media` takes a `client` argument? No, it uses `self._client`.
-    
+
     # We can use `telethon.client.downloads.download_media(wrapper, ...)`?
     # No, it's a mixin.
-    
-    # We have to implement `download_media` on the wrapper and forward it to `client.download_media` 
+
+    # We have to implement `download_media` on the wrapper and forward it to `client.download_media`
     # BUT we need `client` to use `wrapper` for the actual request.
     # This is tricky because `client` is hardcoded to use `self` for requests.
-    
+
     # Alternative: Monkey-patch `__call__` on the client instance temporarily?
     # Risky if concurrent usage.
-    
+
     # Alternative 2: `download_file` in Telethon is the low-level one.
     # It iterates chunks.
     # We can copy `download_media` logic? No, too complex.
-    
+
     # Let's look at how `tdl` does it.
     # `tdl` uses `gotd/td`, which has a middleware system. Telethon doesn't have a request middleware system exposed easily.
-    
+
     # However, we can use `client.download_file` directly?
     # `download_media` is just a wrapper that finds the location and calls `download_file`.
     # If we resolve the location ourselves, we can call `download_file`.
     # But `download_file` is also a method on `client`.
-    
+
     # WAIT! `TelegramClient` inherits from `UpdateMethods`, `UserMethods`, etc.
     # The `__call__` is defined in `TelegramBaseClient`.
-    
+
     # If we create a subclass of `TelegramClient` that shares the session/connection?
     # Too heavy.
-    
+
     # Let's look at `TakeoutClientWrapper` again.
     # If we pass `wrapper` as the `client` to `Message`?
     # `msg = Message(...)`
     # `msg._client = wrapper`
     # `msg.download_media(...)` -> calls `self._client.download_media(...)` -> `wrapper.download_media(...)`
     # -> `client.download_media(...)` -> `client(GetFileRequest)`. Still bypassed.
-    
+
     # We need `client.download_media` to use `wrapper` for sending requests.
     # It doesn't support that.
-    
+
     # HACK: We can temporarily replace `client.__call__` with our wrapper's call.
     # But `client` is shared.
-    
+
     # BETTER HACK:
     # Telethon's `download_file` implementation:
     # async def download_file(self, location, out=None, ...):
     #     sender = self._get_sender(dc_id)
     #     ...
     #     await sender.send(request)
-    
+
     # It uses `sender`.
-    
+
     # Maybe we can just use `InvokeWithTakeoutRequest` manually?
     # But `download_media` handles parallel downloads, parts, etc.
-    
+
     # Let's look at `tdl` again. It wraps the *Invoker*.
-    
+
     # In Telethon, `client` IS the invoker.
-    
-    # If we can't wrap the client easily, maybe we can just use the `TakeoutClientWrapper` 
+
+    # If we can't wrap the client easily, maybe we can just use the `TakeoutClientWrapper`
     # AND implement `download_media` on it by copying the minimal logic needed?
     # Or just use `client.download_media` but patch `client`?
-    
+
     # Let's try to use `telethon.utils.get_input_location(message.file)`
     # Then `client.download_file(location, ...)`
     # But `download_file` still uses `self` (client).
-    
-    # What if we use a `ProxyClient` that inherits from `TelegramClient` (or mixins) 
+
+    # What if we use a `ProxyClient` that inherits from `TelegramClient` (or mixins)
     # but delegates everything to the real client EXCEPT `__call__`?
     # `class ProxyClient(TelegramClient): ...`
     # But `TelegramClient` has a complex `__init__`.
-    
+
     # Let's go with the "Monkey Patch" approach but safer.
     # We can create a new instance of `TelegramClient` that shares the `session` and `connection`?
     # No, connection is stateful.
-    
+
     # Let's look at `src/telegram_sharded_client.py` again.
     # The workers are dedicated clients!
     # `self.worker_clients` are `TelegramClient` instances.
     # They are ONLY used for this export task.
     # So we CAN monkey-patch their `__call__` method!
     # Or better, we can wrap them *at creation time* in `ShardedTelegramManager`.
-    
+
     # But `ShardedTelegramManager` creates them as `TelegramClient`.
-    # We can define a `TakeoutTelegramClient` subclass in `ShardedTelegramManager` 
+    # We can define a `TakeoutTelegramClient` subclass in `ShardedTelegramManager`
     # that overrides `__call__`.
-    
+
     # This is the cleanest solution.
     # I will modify `src/telegram_sharded_client.py` to use a custom client class for workers.
-    
+
     pass
+
 
 def get_best_threads(file_size: int, max_threads: int = 16) -> int:
     """
@@ -201,7 +209,7 @@ def get_best_threads(file_size: int, max_threads: int = 16) -> int:
     # < 20MB: 4
     # < 50MB: 8
     # > 50MB: max (default 16 in tdl, we can use our env var)
-    
+
     if file_size < 1 * 1024 * 1024:
         return 1
     if file_size < 5 * 1024 * 1024:
@@ -327,16 +335,16 @@ class MediaDownloader:
             # Simple round-robin based on message ID to distribute load
             client_idx = message.id % len(self.worker_clients)
             download_client = self.worker_clients[client_idx]
-        
+
         # Auto-wrap in Takeout if available (Crucial for speed)
         # Check if client has takeout_id (ShardedTelegramManager or TakeoutWorkerClient)
         takeout_id = getattr(download_client, "takeout_id", None)
-        
+
         # If it has takeout_id but is NOT a TakeoutWorkerClient (e.g. it's the main manager),
         # we need to wrap it. TakeoutWorkerClient wraps itself.
         # We check class name to avoid circular imports or complex isinstance checks
         if takeout_id and type(download_client).__name__ != "TakeoutWorkerClient":
-             download_client = TakeoutClientWrapper(download_client, takeout_id)
+            download_client = TakeoutClientWrapper(download_client, takeout_id)
 
         file_size_mb = expected_size / (1024 * 1024)
         logger.info(
@@ -551,11 +559,11 @@ class MediaDownloader:
         if self.worker_clients:
             client_idx = message.id % len(self.worker_clients)
             download_client = self.worker_clients[client_idx]
-        
+
         # Auto-wrap in Takeout if available
         takeout_id = getattr(download_client, "takeout_id", None)
         if takeout_id and type(download_client).__name__ != "TakeoutWorkerClient":
-             download_client = TakeoutClientWrapper(download_client, takeout_id)
+            download_client = TakeoutClientWrapper(download_client, takeout_id)
 
         for attempt in range(max_retries):
             try:

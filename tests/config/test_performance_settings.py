@@ -10,7 +10,6 @@ Tests cover:
 
 from unittest.mock import MagicMock, patch
 
-
 from src.config import PerformanceSettings
 
 
@@ -61,7 +60,6 @@ class TestPerformanceSettingsDefaults:
         assert settings.max_concurrent_downloads == 3
 
 
-
 @patch("src.config.psutil.virtual_memory")
 @patch("src.config.os.cpu_count")
 class TestPerformanceSettingsConservativeProfile:
@@ -72,7 +70,7 @@ class TestPerformanceSettingsConservativeProfile:
         mock_cpu_count.return_value = 8
         mock_memory.return_value = MagicMock(
             total=16 * 1024**3,  # 16 GB total
-            available=12 * 1024**3  # 12 GB available
+            available=12 * 1024**3,  # 12 GB available
         )
 
         settings = PerformanceSettings.auto_configure("conservative")
@@ -92,10 +90,7 @@ class TestPerformanceSettingsConservativeProfile:
     def test_conservative_profile_timeouts(self, mock_cpu_count, mock_memory):
         """Test conservative profile timeout settings."""
         mock_cpu_count.return_value = 8
-        mock_memory.return_value = MagicMock(
-            total=16 * 1024**3,
-            available=12 * 1024**3
-        )
+        mock_memory.return_value = MagicMock(total=16 * 1024**3, available=12 * 1024**3)
 
         settings = PerformanceSettings.auto_configure("conservative")
 
@@ -105,13 +100,12 @@ class TestPerformanceSettingsConservativeProfile:
         assert settings.large_file_max_retries == 8
         assert settings.large_file_retry_delay == 15.0
 
-    def test_conservative_profile_persistent_downloads(self, mock_cpu_count, mock_memory):
+    def test_conservative_profile_persistent_downloads(
+        self, mock_cpu_count, mock_memory
+    ):
         """Test conservative profile persistent download settings."""
         mock_cpu_count.return_value = 8
-        mock_memory.return_value = MagicMock(
-            total=16 * 1024**3,
-            available=12 * 1024**3
-        )
+        mock_memory.return_value = MagicMock(total=16 * 1024**3, available=12 * 1024**3)
 
         settings = PerformanceSettings.auto_configure("conservative")
 
@@ -133,10 +127,7 @@ class TestPerformanceSettingsBalancedProfile:
     def test_balanced_profile_basic(self, mock_cpu_count, mock_memory):
         """Test balanced profile with normal resources."""
         mock_cpu_count.return_value = 8
-        mock_memory.return_value = MagicMock(
-            total=16 * 1024**3,
-            available=12 * 1024**3
-        )
+        mock_memory.return_value = MagicMock(total=16 * 1024**3, available=12 * 1024**3)
 
         settings = PerformanceSettings.auto_configure("balanced")
 
@@ -153,10 +144,7 @@ class TestPerformanceSettingsBalancedProfile:
     def test_balanced_profile_forum_settings(self, mock_cpu_count, mock_memory):
         """Test balanced profile forum settings."""
         mock_cpu_count.return_value = 8
-        mock_memory.return_value = MagicMock(
-            total=16 * 1024**3,
-            available=12 * 1024**3
-        )
+        mock_memory.return_value = MagicMock(total=16 * 1024**3, available=12 * 1024**3)
 
         settings = PerformanceSettings.auto_configure("balanced")
 
@@ -174,10 +162,7 @@ class TestPerformanceSettingsAggressiveProfile:
     def test_aggressive_profile_basic(self, mock_cpu_count, mock_memory):
         """Test aggressive profile with normal resources."""
         mock_cpu_count.return_value = 8
-        mock_memory.return_value = MagicMock(
-            total=16 * 1024**3,
-            available=12 * 1024**3
-        )
+        mock_memory.return_value = MagicMock(total=16 * 1024**3, available=12 * 1024**3)
 
         settings = PerformanceSettings.auto_configure("aggressive")
 
@@ -193,10 +178,7 @@ class TestPerformanceSettingsAggressiveProfile:
     def test_aggressive_profile_parallel_enabled(self, mock_cpu_count, mock_memory):
         """Test aggressive profile enables parallel downloads."""
         mock_cpu_count.return_value = 8
-        mock_memory.return_value = MagicMock(
-            total=16 * 1024**3,
-            available=12 * 1024**3
-        )
+        mock_memory.return_value = MagicMock(total=16 * 1024**3, available=12 * 1024**3)
 
         settings = PerformanceSettings.auto_configure("aggressive")
 
@@ -213,10 +195,7 @@ class TestPerformanceSettingsCustomProfile:
     def test_custom_profile_returns_defaults(self, mock_cpu_count, mock_memory):
         """Test custom profile returns default PerformanceSettings."""
         mock_cpu_count.return_value = 8
-        mock_memory.return_value = MagicMock(
-            total=16 * 1024**3,
-            available=12 * 1024**3
-        )
+        mock_memory.return_value = MagicMock(total=16 * 1024**3, available=12 * 1024**3)
 
         settings = PerformanceSettings.auto_configure("custom")
 
@@ -238,7 +217,7 @@ class TestPerformanceSettingsLowResources:
         mock_cpu_count.return_value = 4
         mock_memory.return_value = MagicMock(
             total=1.5 * 1024**3,  # 1.5 GB (below MIN_MEMORY_GB = 2)
-            available=1 * 1024**3
+            available=1 * 1024**3,
         )
 
         _ = PerformanceSettings.auto_configure("balanced")
@@ -248,12 +227,14 @@ class TestPerformanceSettingsLowResources:
         warning_call = str(mock_logger.warning.call_args)
         assert "1.5GB RAM" in warning_call or "minimum" in warning_call.lower()
 
-    def test_low_available_memory_logs_warning(self, mock_cpu_count, mock_memory, mock_logger):
+    def test_low_available_memory_logs_warning(
+        self, mock_cpu_count, mock_memory, mock_logger
+    ):
         """Test low available memory triggers warning."""
         mock_cpu_count.return_value = 4
         mock_memory.return_value = MagicMock(
             total=8 * 1024**3,
-            available=0.5 * 1024**3  # Only 0.5 GB available
+            available=0.5 * 1024**3,  # Only 0.5 GB available
         )
 
         _ = PerformanceSettings.auto_configure("balanced")

@@ -21,7 +21,7 @@ class TestMediaMetadata:
             file_size=1024,
             mime_type="video/mp4",
         )
-        
+
         assert metadata.file_size == 1024
         assert metadata.mime_type == "video/mp4"
         assert metadata.duration is None
@@ -42,7 +42,7 @@ class TestMediaMetadata:
             fps=30.0,
             checksum="abc123",
         )
-        
+
         assert metadata.file_size == 1024 * 1024 * 10
         assert metadata.duration == 120.5
         assert metadata.width == 1920
@@ -60,7 +60,7 @@ class TestMediaMetadata:
             channels=2,
             sample_rate=44100,
         )
-        
+
         assert metadata.mime_type == "audio/mpeg"
         assert metadata.channels == 2
         assert metadata.sample_rate == 44100
@@ -74,7 +74,7 @@ class TestMediaMetadata:
             height=3000,
             format="JPEG",
         )
-        
+
         assert metadata.width == 4000
         assert metadata.height == 3000
         assert metadata.format == "JPEG"
@@ -86,7 +86,7 @@ class TestProcessingSettings:
     def test_default_settings(self):
         """Test default processing settings."""
         settings = ProcessingSettings()
-        
+
         assert settings.max_video_resolution == (1920, 1080)
         assert settings.max_video_bitrate == 2000
         assert settings.max_audio_bitrate == 128
@@ -105,7 +105,7 @@ class TestProcessingSettings:
             enable_hardware_acceleration=False,
             aggressive_compression=True,
         )
-        
+
         assert settings.max_video_resolution == (1280, 720)
         assert settings.max_video_bitrate == 1500
         assert settings.video_codec == "libx265"
@@ -120,13 +120,13 @@ class TestProcessingTask:
         """Test creating ProcessingTask with minimal fields."""
         input_path = tmp_path / "input.mp4"
         output_path = tmp_path / "output.mp4"
-        
+
         task = ProcessingTask(
             input_path=input_path,
             output_path=output_path,
             media_type="video",
         )
-        
+
         assert task.input_path == input_path
         assert task.output_path == output_path
         assert task.media_type == "video"
@@ -144,7 +144,7 @@ class TestProcessingTask:
             media_type="video",
             metadata=video_metadata,
         )
-        
+
         assert task.metadata is not None
         assert task.metadata.mime_type == "video/mp4"
         assert task.metadata.width == 1920
@@ -152,15 +152,15 @@ class TestProcessingTask:
     def test_created_at_timestamp(self, tmp_path: Path):
         """Test that created_at is set automatically."""
         before = time.time()
-        
+
         task = ProcessingTask(
             input_path=tmp_path / "input.mp4",
             output_path=tmp_path / "output.mp4",
             media_type="video",
         )
-        
+
         after = time.time()
-        
+
         assert before <= task.created_at <= after
 
     def test_custom_priority(self, tmp_path: Path):
@@ -171,7 +171,7 @@ class TestProcessingTask:
             media_type="video",
             priority=10,
         )
-        
+
         assert task.priority == 10
 
     def test_attempts_tracking(self, tmp_path: Path):
@@ -182,10 +182,10 @@ class TestProcessingTask:
             media_type="video",
             max_attempts=5,
         )
-        
+
         assert task.attempts == 0
         assert task.max_attempts == 5
-        
+
         task.attempts += 1
         assert task.attempts == 1
 
@@ -199,6 +199,6 @@ class TestProcessingTask:
             media_type="video",
             processing_settings=processing_settings,
         )
-        
+
         assert task.processing_settings is not None
         assert task.processing_settings.max_video_bitrate == 2000

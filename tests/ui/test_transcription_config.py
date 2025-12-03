@@ -2,8 +2,9 @@
 Tests for transcription configuration in interactive UI.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from src.config import Config
 from src.ui.interactive import InteractiveUI
@@ -189,7 +190,15 @@ class TestTranscriptionConfiguration:
 
     def test_all_whisper_models_available(self, interactive_ui):
         """Test that all Whisper models are available for selection."""
-        expected_models = ["large-v3", "large", "tiny", "base", "small", "medium", "large"]
+        expected_models = [
+            "large-v3",
+            "large",
+            "tiny",
+            "base",
+            "small",
+            "medium",
+            "large",
+        ]
 
         # This test just verifies the model options are documented
         # In real code, the model validation happens in the Config class

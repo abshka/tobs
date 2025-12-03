@@ -4,14 +4,14 @@ Unit tests for AudioProcessor.
 Tests audio processing including transcoding and validation.
 """
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch, Mock
-from pathlib import Path
 import subprocess
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import pytest
+
+from src.media.models import MediaMetadata, ProcessingSettings, ProcessingTask
 from src.media.processors.audio import AudioProcessor
-from src.media.models import ProcessingTask, MediaMetadata, ProcessingSettings
-
 
 pytestmark = pytest.mark.unit
 
@@ -51,11 +51,11 @@ class TestAudioProcessor:
             codec="mp3",
             bitrate=320000,
         )
-        
+
         result = audio_processor.needs_processing_with_metadata(
             metadata, processing_settings
         )
-        
+
         # MP3 codec != AAC, so needs processing
         assert result is True
 
@@ -69,11 +69,11 @@ class TestAudioProcessor:
             codec="aac",
             bitrate=320000,  # Much higher than 128k target
         )
-        
+
         result = audio_processor.needs_processing_with_metadata(
             metadata, processing_settings
         )
-        
+
         # High bitrate needs optimization
         assert result is True
 
@@ -87,11 +87,11 @@ class TestAudioProcessor:
             codec="aac",
             bitrate=128000,  # Matches target
         )
-        
+
         result = audio_processor.needs_processing_with_metadata(
             metadata, processing_settings
         )
-        
+
         # Already optimized AAC at target bitrate
         assert result is False
 
@@ -102,9 +102,9 @@ class TestAudioProcessor:
         # Create file of medium size (should need processing)
         audio_file = tmp_path / "audio.mp3"
         audio_file.write_bytes(b"x" * (5 * 1024 * 1024))  # 5 MB
-        
+
         result = audio_processor.needs_processing(audio_file, processing_settings)
-        
+
         assert result is True
 
     async def test_needs_processing_skip_small_file(
@@ -114,9 +114,9 @@ class TestAudioProcessor:
         # Create very small file
         audio_file = tmp_path / "audio.mp3"
         audio_file.write_bytes(b"x" * (500 * 1024))  # 500 KB
-        
+
         result = audio_processor.needs_processing(audio_file, processing_settings)
-        
+
         # Too small, skip processing
         assert result is False
 
@@ -127,9 +127,9 @@ class TestAudioProcessor:
         # Create very large file
         audio_file = tmp_path / "audio.mp3"
         audio_file.write_bytes(b"x" * (150 * 1024 * 1024))  # 150 MB
-        
+
         result = audio_processor.needs_processing(audio_file, processing_settings)
-        
+
         # Too large, skip processing
         assert result is False
 
@@ -140,7 +140,7 @@ class TestAudioProcessor:
         input_file = tmp_path / "input.mp3"
         output_file = tmp_path / "output.m4a"
         input_file.write_bytes(b"test audio data")
-        
+
         metadata = MediaMetadata(
             file_size=len(b"test audio data"),
             mime_type="audio/mpeg",
@@ -154,19 +154,19 @@ class TestAudioProcessor:
             metadata=metadata,
             processing_settings=processing_settings,
         )
-        
+
         # Mock validator to return True
         audio_processor.validator.validate_file = AsyncMock(return_value=True)
-        
+
         # Mock FFmpeg execution
         def mock_ffmpeg_run(task, args):
             task.output_path.write_bytes(b"processed audio")
             return True
-        
+
         audio_processor._run_ffmpeg_audio = mock_ffmpeg_run
-        
+
         result = await audio_processor.process(task, "worker-1")
-        
+
         assert result is True
         assert output_file.exists()
         assert audio_processor._audio_processed_count == 1
@@ -178,7 +178,7 @@ class TestAudioProcessor:
         input_file = tmp_path / "input.mp3"
         output_file = tmp_path / "output.m4a"
         input_file.write_bytes(b"corrupted audio")
-        
+
         metadata = MediaMetadata(
             file_size=len(b"corrupted audio"),
             mime_type="audio/mpeg",
@@ -192,12 +192,12 @@ class TestAudioProcessor:
             metadata=metadata,
             processing_settings=processing_settings,
         )
-        
+
         # Mock validator to return False (invalid)
         audio_processor.validator.validate_file = AsyncMock(return_value=False)
-        
+
         result = await audio_processor.process(task, "worker-1")
-        
+
         # Should fall back to copy
         assert result is True
         assert output_file.exists()
@@ -210,7 +210,7 @@ class TestAudioProcessor:
         input_file = tmp_path / "input.m4a"
         output_file = tmp_path / "output.m4a"
         input_file.write_bytes(b"already optimized")
-        
+
         # Optimized AAC at target bitrate
         metadata = MediaMetadata(
             file_size=len(b"already optimized"),
@@ -225,9 +225,9 @@ class TestAudioProcessor:
             metadata=metadata,
             processing_settings=processing_settings,
         )
-        
+
         result = await audio_processor.process(task, "worker-1")
-        
+
         assert result is True
         assert output_file.exists()
         assert audio_processor._audio_copied_count == 1
@@ -240,7 +240,7 @@ class TestAudioProcessor:
         input_file = tmp_path / "input.mp3"
         output_file = tmp_path / "output.m4a"
         input_file.write_bytes(b"test audio")
-        
+
         metadata = MediaMetadata(
             file_size=len(b"test audio"),
             mime_type="audio/mpeg",
@@ -254,17 +254,17 @@ class TestAudioProcessor:
             metadata=metadata,
             processing_settings=processing_settings,
         )
-        
+
         audio_processor.validator.validate_file = AsyncMock(return_value=True)
-        
+
         # Mock FFmpeg to fail
         def mock_ffmpeg_fail(task, args):
             return False
-        
+
         audio_processor._run_ffmpeg_audio = mock_ffmpeg_fail
-        
+
         result = await audio_processor.process(task, "worker-1")
-        
+
         # Should fall back to copy
         assert result is True
         assert output_file.exists()
@@ -274,10 +274,10 @@ class TestAudioProcessor:
         """Test statistics are tracked correctly."""
         assert audio_processor._audio_processed_count == 0
         assert audio_processor._audio_copied_count == 0
-        
+
         # Simulate some processing
         audio_processor._audio_processed_count = 5
         audio_processor._audio_copied_count = 3
-        
+
         assert audio_processor._audio_processed_count == 5
         assert audio_processor._audio_copied_count == 3

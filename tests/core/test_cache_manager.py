@@ -20,7 +20,6 @@ from src.core.cache import (
     CompressionType,
 )
 
-
 # ============================================================================
 # Batch 1: CacheEntry, CacheStats, Initialization, Basic Get/Set
 # ============================================================================
@@ -396,7 +395,6 @@ class TestCacheManagerStats:
         assert stats.hit_rate == 0.75
 
 
-
 # ============================================================================
 # Batch 2: TTL & Expiration Logic
 # ============================================================================
@@ -532,7 +530,6 @@ class TestCacheManagerTTL:
         assert cache_manager_with_ttl._dirty is True
 
 
-
 # ============================================================================
 # Batch 3: LRU Eviction & Strategy
 # ============================================================================
@@ -642,7 +639,6 @@ class TestCacheManagerLRUEviction:
         assert len(cache_manager_lru._cache) <= cache_manager_lru.max_size
 
 
-
 # ============================================================================
 # Batch 4: Compression & Data Handling
 # ============================================================================
@@ -749,9 +745,7 @@ class TestCacheManagerCompression:
         assert entry.compression_type == "pickle"
 
     @pytest.mark.asyncio
-    async def test_pickle_decompression_restores_original(
-        self, cache_manager_pickle
-    ):
+    async def test_pickle_decompression_restores_original(self, cache_manager_pickle):
         """Test PICKLE decompression restores original data structure."""
         original_data = {
             "numbers": [1, 2, 3] * 50,

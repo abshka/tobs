@@ -29,7 +29,12 @@ logger = logging.getLogger(__name__)
 class CoreSystemManager:
     """Менеджер всех core систем."""
 
-    def __init__(self, config_path: Optional[Path] = None, performance_profile: str = "balanced", health_check_interval: float = 0.1):
+    def __init__(
+        self,
+        config_path: Optional[Path] = None,
+        performance_profile: str = "balanced",
+        health_check_interval: float = 0.1,
+    ):
         # config_path сохраняется для совместимости с API, но не используется
         self.config_path = config_path
         self.performance_profile = performance_profile
@@ -42,7 +47,7 @@ class CoreSystemManager:
         # Состояние
         self._initialized = False
         self._shutdown = False
-        
+
         # TaskGroup для управления background tasks (Phase 3 Task A.1)
         self._task_group: Optional[asyncio.TaskGroup] = None
         self._task_group_runner: Optional[asyncio.Task] = None
@@ -79,7 +84,9 @@ class CoreSystemManager:
 
             # Инициализируем компоненты в правильном порядке
             # 1. Сначала монитор производительности
-            self._performance_monitor = await get_performance_monitor(performance_profile=self.performance_profile)
+            self._performance_monitor = await get_performance_monitor(
+                performance_profile=self.performance_profile
+            )
             logger.info("Performance monitor initialized")
 
             # 2. Затем кэш-менеджер
@@ -112,7 +119,7 @@ class CoreSystemManager:
     async def _run_background_tasks(self):
         """
         Запуск и управление background tasks в TaskGroup (Phase 3 Task A.1).
-        
+
         TaskGroup автоматически:
         - Управляет жизненным циклом всех задач
         - Агрегирует исключения из всех задач
@@ -129,11 +136,11 @@ class CoreSystemManager:
             async with asyncio.TaskGroup() as tg:
                 self._task_group = tg
                 logger.debug("TaskGroup context entered")
-                
+
                 # Создаём health check task в TaskGroup
                 tg.create_task(self._health_check_loop())
                 logger.debug("Health check task created in TaskGroup")
-                
+
                 # TaskGroup будет ждать все задачи до завершения
                 # При выходе из контекста, все задачи будут отменены (если не завершены)
         except* Exception as exc_group:
@@ -141,8 +148,7 @@ class CoreSystemManager:
             # exc_group содержит все исключения
             for exc in exc_group.exceptions:
                 logger.error(
-                    f"Background task failed: {type(exc).__name__}: {exc}",
-                    exc_info=exc
+                    f"Background task failed: {type(exc).__name__}: {exc}", exc_info=exc
                 )
                 self._failed_operations += 1
         finally:
@@ -211,7 +217,7 @@ class CoreSystemManager:
         """Периодическая проверка здоровья системы."""
         logger.debug("Health check loop started")
         loop_iteration = 0
-        
+
         while not self._shutdown:
             loop_iteration += 1
             try:
@@ -224,12 +230,14 @@ class CoreSystemManager:
                     logger.error(f"Health check raised exception: {e}")
                 await self._sleep(self._health_check_interval)
             except asyncio.CancelledError:
-                logger.debug(f"Health check loop cancelled after {loop_iteration} iterations")
+                logger.debug(
+                    f"Health check loop cancelled after {loop_iteration} iterations"
+                )
                 break
             except Exception as e:
                 logger.error(
                     f"Error in health check loop iteration {loop_iteration}: {type(e).__name__}: {e}",
-                    exc_info=True
+                    exc_info=True,
                 )
                 # Continue loop despite error - don't let one failure kill the loop
                 self._failed_operations += 1
@@ -442,18 +450,22 @@ class CoreSystemManager:
         if profile not in ["conservative", "balanced", "aggressive"]:
             logger.warning(f"Unknown performance profile '{profile}', keeping current")
             return
-        
+
         old_profile = self.performance_profile
         self.performance_profile = profile
-        
+
         # Обновляем performance monitor если он инициализирован
         if self._performance_monitor:
             success = self._performance_monitor.set_performance_profile(profile)
             if success:
-                logger.info(f"Performance profile updated from {old_profile} to {profile}")
+                logger.info(
+                    f"Performance profile updated from {old_profile} to {profile}"
+                )
             else:
-                logger.warning(f"Failed to update performance monitor profile to {profile}")
-        
+                logger.warning(
+                    f"Failed to update performance monitor profile to {profile}"
+                )
+
         logger.info(f"Core manager performance profile set to: {profile}")
 
     def is_initialized(self) -> bool:
@@ -489,7 +501,9 @@ async def initialize_core_systems(
         logger.warning("Core systems already initialized")
         return _core_manager
 
-    _core_manager = CoreSystemManager(config_path, performance_profile=performance_profile)
+    _core_manager = CoreSystemManager(
+        config_path, performance_profile=performance_profile
+    )
     success = await _core_manager.initialize()
 
     if not success:

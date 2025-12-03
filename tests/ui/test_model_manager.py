@@ -2,14 +2,15 @@
 Tests for Whisper model manager functionality.
 """
 
-import pytest
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from src.media.processors.model_manager import (
-    WhisperModelManager,
     WHISPER_MODELS,
+    WhisperModelManager,
 )
 
 
@@ -111,7 +112,7 @@ class TestWhisperModelManager:
             path = Path(tmpdir)
             # Create file with ~1MB
             (path / "test.bin").write_bytes(b"x" * (1024 * 1024))
-            
+
             size = WhisperModelManager._get_directory_size_mb(path)
             assert size >= 1
 
@@ -177,7 +178,6 @@ class TestWhisperModelManager:
         assert len(WHISPER_MODELS) == 1
         assert "large-v3" in WHISPER_MODELS
 
-        
         for model_name, info in WHISPER_MODELS.items():
             assert "size_mb" in info
             assert "description" in info
@@ -186,7 +186,7 @@ class TestWhisperModelManager:
 
     def test_get_hf_cache_dir(self):
         """Test HuggingFace cache directory detection."""
-        with patch.dict('os.environ', {}, clear=True):
+        with patch.dict("os.environ", {}, clear=True):
             cache_dir = WhisperModelManager._get_hf_cache_dir()
             assert cache_dir is not None
             assert isinstance(cache_dir, Path)

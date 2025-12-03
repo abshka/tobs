@@ -10,7 +10,6 @@ Tests cover:
 
 from unittest.mock import MagicMock, patch
 
-
 from src.config import Config, ExportTarget
 
 
@@ -27,16 +26,14 @@ class TestConfigPathManagementStructured:
         disk_mock.free = 50 * 1024**3
         mock_disk.return_value = disk_mock
 
-        targets = [
-            ExportTarget(id="@channel1", name="Test Channel")
-        ]
+        targets = [ExportTarget(id="@channel1", name="Test Channel")]
 
         config = Config(
             api_id=12345,
             api_hash="a" * 32,
             export_targets=targets,
             use_entity_folders=True,
-            use_structured_export=True
+            use_structured_export=True,
         )
 
         # Verify paths are structured: entity_name/subdir
@@ -64,7 +61,7 @@ class TestConfigPathManagementStructured:
 
         targets = [
             ExportTarget(id="@channel1", name="Channel One"),
-            ExportTarget(id="-1001234567890", name="Channel Two")
+            ExportTarget(id="-1001234567890", name="Channel Two"),
         ]
 
         config = Config(
@@ -72,7 +69,7 @@ class TestConfigPathManagementStructured:
             api_hash="a" * 32,
             export_targets=targets,
             use_entity_folders=True,
-            use_structured_export=True
+            use_structured_export=True,
         )
 
         # Each target has its own folder
@@ -97,16 +94,14 @@ class TestConfigPathManagementLegacy:
         disk_mock.free = 50 * 1024**3
         mock_disk.return_value = disk_mock
 
-        targets = [
-            ExportTarget(id="@channel1", name="Old Channel")
-        ]
+        targets = [ExportTarget(id="@channel1", name="Old Channel")]
 
         config = Config(
             api_id=12345,
             api_hash="a" * 32,
             export_targets=targets,
             use_entity_folders=True,
-            use_structured_export=False
+            use_structured_export=False,
         )
 
         # Verify legacy structure: entity_name/_media
@@ -132,15 +127,13 @@ class TestConfigPathManagementFlat:
         disk_mock.free = 50 * 1024**3
         mock_disk.return_value = disk_mock
 
-        targets = [
-            ExportTarget(id="@channel1", name="Flat Channel")
-        ]
+        targets = [ExportTarget(id="@channel1", name="Flat Channel")]
 
         config = Config(
             api_id=12345,
             api_hash="a" * 32,
             export_targets=targets,
-            use_entity_folders=False
+            use_entity_folders=False,
         )
 
         # All paths should be at root level
@@ -158,7 +151,9 @@ class TestConfigPathManagementFlat:
 class TestConfigPathGetters:
     """Test path getter methods."""
 
-    def test_get_export_path_for_unknown_entity_returns_default(self, mock_mkdir, mock_memory, mock_disk):
+    def test_get_export_path_for_unknown_entity_returns_default(
+        self, mock_mkdir, mock_memory, mock_disk
+    ):
         """Test getting export path for unknown entity returns default export_path."""
         mock_memory.return_value = MagicMock(total=8 * 1024**3, available=6 * 1024**3)
         disk_mock = MagicMock()
@@ -171,7 +166,9 @@ class TestConfigPathGetters:
         path = config.get_export_path_for_entity("@unknown")
         assert path == config.export_path
 
-    def test_get_media_path_for_unknown_entity_returns_default(self, mock_mkdir, mock_memory, mock_disk):
+    def test_get_media_path_for_unknown_entity_returns_default(
+        self, mock_mkdir, mock_memory, mock_disk
+    ):
         """Test getting media path for unknown entity returns default."""
         mock_memory.return_value = MagicMock(total=8 * 1024**3, available=6 * 1024**3)
         disk_mock = MagicMock()
@@ -183,7 +180,9 @@ class TestConfigPathGetters:
         path = config.get_media_path_for_entity("@unknown")
         assert path == config.export_path / config.media_subdir
 
-    def test_get_cache_path_for_unknown_entity_returns_default(self, mock_mkdir, mock_memory, mock_disk):
+    def test_get_cache_path_for_unknown_entity_returns_default(
+        self, mock_mkdir, mock_memory, mock_disk
+    ):
         """Test getting cache path for unknown entity returns default."""
         mock_memory.return_value = MagicMock(total=8 * 1024**3, available=6 * 1024**3)
         disk_mock = MagicMock()
@@ -195,7 +194,9 @@ class TestConfigPathGetters:
         path = config.get_cache_path_for_entity("@unknown")
         assert path == config.export_path / config.cache_subdir
 
-    def test_get_monitoring_path_for_unknown_entity_returns_default(self, mock_mkdir, mock_memory, mock_disk):
+    def test_get_monitoring_path_for_unknown_entity_returns_default(
+        self, mock_mkdir, mock_memory, mock_disk
+    ):
         """Test getting monitoring path for unknown entity returns default."""
         mock_memory.return_value = MagicMock(total=8 * 1024**3, available=6 * 1024**3)
         disk_mock = MagicMock()
@@ -221,15 +222,13 @@ class TestConfigEntityFolderName:
         disk_mock.free = 50 * 1024**3
         mock_disk.return_value = disk_mock
 
-        targets = [
-            ExportTarget(id="@channel1", name="My: Test/Channel*")
-        ]
+        targets = [ExportTarget(id="@channel1", name="My: Test/Channel*")]
 
         config = Config(
             api_id=12345,
             api_hash="a" * 32,
             export_targets=targets,
-            use_entity_folders=True
+            use_entity_folders=True,
         )
 
         # Name should be sanitized (no special chars)
@@ -239,7 +238,9 @@ class TestConfigEntityFolderName:
         assert "/" not in path.name
         assert "*" not in str(path)
 
-    def test_entity_folder_name_uses_id_when_no_name(self, mock_mkdir, mock_memory, mock_disk):
+    def test_entity_folder_name_uses_id_when_no_name(
+        self, mock_mkdir, mock_memory, mock_disk
+    ):
         """Test entity folder uses id_ prefix when name is empty."""
         mock_memory.return_value = MagicMock(total=8 * 1024**3, available=6 * 1024**3)
         disk_mock = MagicMock()
@@ -254,7 +255,7 @@ class TestConfigEntityFolderName:
             api_id=12345,
             api_hash="a" * 32,
             export_targets=targets,
-            use_entity_folders=True
+            use_entity_folders=True,
         )
 
         path = config.get_export_path_for_entity("@channel1")
@@ -287,22 +288,18 @@ class TestConfigAddExportTarget:
         # Paths should be updated
         assert "@newchannel" in config.export_paths
 
-    def test_add_export_target_duplicate_skipped(self, mock_mkdir, mock_memory, mock_disk):
+    def test_add_export_target_duplicate_skipped(
+        self, mock_mkdir, mock_memory, mock_disk
+    ):
         """Test adding duplicate target is skipped."""
         mock_memory.return_value = MagicMock(total=8 * 1024**3, available=6 * 1024**3)
         disk_mock = MagicMock()
         disk_mock.free = 50 * 1024**3
         mock_disk.return_value = disk_mock
 
-        targets = [
-            ExportTarget(id="@existing", name="Existing")
-        ]
+        targets = [ExportTarget(id="@existing", name="Existing")]
 
-        config = Config(
-            api_id=12345,
-            api_hash="a" * 32,
-            export_targets=targets
-        )
+        config = Config(api_id=12345, api_hash="a" * 32, export_targets=targets)
 
         assert len(config.export_targets) == 1
 

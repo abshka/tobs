@@ -171,7 +171,6 @@ class TestOperationStatsSuccessRate:
         assert stats.success_rate == 1.0
 
 
-
 class TestOperationStatsSpeedTracking:
     """Tests for speed tracking."""
 
@@ -186,7 +185,7 @@ class TestOperationStatsSpeedTracking:
     def test_record_speed_maintains_window_size(self):
         """record_speed should maintain the specified window size."""
         stats = OperationStats()
-        
+
         # Add 7 speeds with window size 5
         for speed in [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]:
             stats.record_speed(speed, window_size=5)
@@ -198,7 +197,7 @@ class TestOperationStatsSpeedTracking:
     def test_record_speed_uses_default_window_size(self):
         """record_speed should use window_size=5 as default."""
         stats = OperationStats()
-        
+
         # Add 10 speeds without specifying window
         for speed in range(10):
             stats.record_speed(float(speed))

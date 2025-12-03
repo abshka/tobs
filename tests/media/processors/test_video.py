@@ -2,13 +2,13 @@
 Unit tests for VideoProcessor - Comprehensive coverage.
 """
 
-import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from src.media.models import MediaMetadata, ProcessingSettings
 from src.media.processors.video import VideoProcessor
-
 
 pytestmark = pytest.mark.unit
 
@@ -237,9 +237,7 @@ class TestVideoProcessor:
         assert result is False
 
     @patch("src.media.processors.video.ffmpeg")
-    def test_has_audio_stream_probe_error(
-        self, mock_ffmpeg, video_processor, tmp_path
-    ):
+    def test_has_audio_stream_probe_error(self, mock_ffmpeg, video_processor, tmp_path):
         """Test that probe errors default to False (no audio assumed)."""
         input_file = tmp_path / "corrupted.mp4"
         input_file.write_text("corrupted")
@@ -333,10 +331,10 @@ class TestVideoProcessor:
 
         # Verify format filter
         mock_input.video.filter.assert_called_once_with("format", "nv12")
-        
+
         # Verify hwupload filter
         mock_format.filter.assert_called_once_with("hwupload")
-        
+
         # Verify scale_vaapi filter was applied
         mock_hwupload.filter.assert_called_once()
         scale_call = mock_hwupload.filter.call_args
@@ -344,9 +342,7 @@ class TestVideoProcessor:
         assert scale_call[1]["w"] == 1920
         assert scale_call[1]["h"] == 1080
 
-    def test_build_vaapi_command_device_unavailable(
-        self, video_processor, tmp_path
-    ):
+    def test_build_vaapi_command_device_unavailable(self, video_processor, tmp_path):
         """Test that RuntimeError is raised when VAAPI device unavailable."""
         input_file = tmp_path / "input.mp4"
         output_file = tmp_path / "output.mp4"
@@ -377,25 +373,25 @@ class TestVideoProcessor:
         """Test that H.264 VAAPI codec is selected by default."""
         # Default config should not have use_h265
         video_processor.config.use_h265 = False
-        
+
         codec = video_processor._get_vaapi_codec()
-        
+
         assert codec == "h264_vaapi"
 
     def test_get_vaapi_codec_hevc(self, video_processor):
         """Test that HEVC VAAPI codec is selected when use_h265 is True."""
         video_processor.config.use_h265 = True
-        
+
         codec = video_processor._get_vaapi_codec()
-        
+
         assert codec == "hevc_vaapi"
 
     def test_get_vaapi_video_args_h264(self, video_processor):
         """Test VAAPI video arguments for H.264 codec."""
         video_processor.config.vaapi_quality = 23
-        
+
         args = video_processor._get_vaapi_video_args("h264_vaapi")
-        
+
         assert args["vcodec"] == "h264_vaapi"
         assert args["qp"] == 23
         assert args["profile:v"] == "high"
@@ -403,13 +399,12 @@ class TestVideoProcessor:
     def test_get_vaapi_video_args_hevc(self, video_processor):
         """Test VAAPI video arguments for HEVC codec."""
         video_processor.config.vaapi_quality = 28
-        
+
         args = video_processor._get_vaapi_video_args("hevc_vaapi")
-        
+
         assert args["vcodec"] == "hevc_vaapi"
         assert args["qp"] == 28
         assert args["profile:v"] == "main"
-
 
     # =========================================================================
     # Session 4: FFmpeg Execution & Error Handling Tests
@@ -420,21 +415,21 @@ class TestVideoProcessor:
     ):
         """Test that _run_ffmpeg returns False when input file doesn't exist."""
         from src.media.models import ProcessingTask
-        
+
         # Create task with non-existent input file
         input_file = tmp_path / "missing_video.mp4"
         output_file = tmp_path / "output.mp4"
-        
+
         task = ProcessingTask(
             input_path=input_file,
             output_path=output_file,
             media_type="video",
             processing_settings=processing_settings_default,
         )
-        
+
         video_args = {"vcodec": "libx264", "b:v": "2000k"}
         audio_args = {"acodec": "aac", "b:a": "128k"}
-        
+
         result = video_processor._run_ffmpeg(
             task=task,
             video_args=video_args,
@@ -444,7 +439,7 @@ class TestVideoProcessor:
             scale_width=None,
             scale_height=None,
         )
-        
+
         assert result is False
 
     def test_run_ffmpeg_input_validation_empty_file(
@@ -452,22 +447,22 @@ class TestVideoProcessor:
     ):
         """Test that _run_ffmpeg returns False when input file is empty."""
         from src.media.models import ProcessingTask
-        
+
         # Create empty input file
         input_file = tmp_path / "empty_video.mp4"
         output_file = tmp_path / "output.mp4"
         input_file.touch()  # Create empty file
-        
+
         task = ProcessingTask(
             input_path=input_file,
             output_path=output_file,
             media_type="video",
             processing_settings=processing_settings_default,
         )
-        
+
         video_args = {"vcodec": "libx264", "b:v": "2000k"}
         audio_args = {"acodec": "aac", "b:a": "128k"}
-        
+
         result = video_processor._run_ffmpeg(
             task=task,
             video_args=video_args,
@@ -477,7 +472,7 @@ class TestVideoProcessor:
             scale_width=None,
             scale_height=None,
         )
-        
+
         assert result is False
 
     @patch("src.media.processors.video.ffmpeg")
@@ -486,37 +481,37 @@ class TestVideoProcessor:
     ):
         """Test successful software encoding with FFmpeg."""
         from src.media.models import ProcessingTask
-        
+
         # Create input file with some content
         input_file = tmp_path / "input_video.mp4"
         output_file = tmp_path / "output.mp4"
         input_file.write_bytes(b"fake video data" * 1000)  # ~15KB
-        
+
         task = ProcessingTask(
             input_path=input_file,
             output_path=output_file,
             media_type="video",
             processing_settings=processing_settings_default,
         )
-        
+
         # Mock ffmpeg chain
         mock_input = MagicMock()
         mock_output = MagicMock()
         mock_ffmpeg.input.return_value = mock_input
         mock_input.output.return_value = mock_output
         mock_ffmpeg.compile.return_value = ["ffmpeg", "-i", "input.mp4"]
-        
+
         # Mock ffmpeg.run to create output file
         def create_output_file(*args, **kwargs):
             output_file.write_bytes(b"processed video" * 500)  # ~7.5KB
-        
+
         mock_ffmpeg.run.side_effect = create_output_file
-        
+
         # Mock audio stream detection
         with patch.object(video_processor, "_has_audio_stream", return_value=True):
             video_args = {"vcodec": "libx264", "b:v": "2000k"}
             audio_args = {"acodec": "aac", "b:a": "128k"}
-            
+
             result = video_processor._run_ffmpeg(
                 task=task,
                 video_args=video_args,
@@ -526,7 +521,7 @@ class TestVideoProcessor:
                 scale_width=None,
                 scale_height=None,
             )
-        
+
         assert result is True
         assert output_file.exists()
         assert output_file.stat().st_size > 0
@@ -537,38 +532,40 @@ class TestVideoProcessor:
         self, mock_ffmpeg, video_processor, processing_settings_default, tmp_path
     ):
         """Test hardware encoding failure with fallback to software encoding."""
-        from src.media.models import ProcessingTask
         import ffmpeg
-        
+
+        from src.media.models import ProcessingTask
+
         # Create input file
         input_file = tmp_path / "input_video.mp4"
         output_file = tmp_path / "output.mp4"
         input_file.write_bytes(b"fake video data" * 1000)
-        
+
         task = ProcessingTask(
             input_path=input_file,
             output_path=output_file,
             media_type="video",
             processing_settings=processing_settings_default,
         )
-        
+
         # Mock ffmpeg chain
         mock_input = MagicMock()
         mock_video = MagicMock()
         mock_format = MagicMock()
         mock_hwupload = MagicMock()
         mock_output = MagicMock()
-        
+
         mock_ffmpeg.input.return_value = mock_input
         mock_input.video.filter.return_value = mock_format
         mock_format.filter.return_value = mock_hwupload
         mock_ffmpeg.output.return_value = mock_output
         mock_input.output.return_value = mock_output
         mock_ffmpeg.compile.return_value = ["ffmpeg", "-hwaccel", "vaapi"]
-        
+
         # First call: hardware fails with "Cannot load" error
         # Second call: software succeeds
         call_count = 0
+
         def ffmpeg_run_side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1
@@ -579,15 +576,15 @@ class TestVideoProcessor:
             else:
                 # Second call: software encoding succeeds
                 output_file.write_bytes(b"processed video" * 500)
-        
+
         mock_ffmpeg.run.side_effect = ffmpeg_run_side_effect
         mock_ffmpeg.Error = ffmpeg.Error  # Make sure Error class is available
-        
+
         # Mock audio stream detection
         with patch.object(video_processor, "_has_audio_stream", return_value=True):
             video_args = {"vcodec": "h264_vaapi", "qp": 25}
             audio_args = {"acodec": "aac", "b:a": "128k"}
-            
+
             result = video_processor._run_ffmpeg(
                 task=task,
                 video_args=video_args,
@@ -597,7 +594,7 @@ class TestVideoProcessor:
                 scale_width=None,
                 scale_height=None,
             )
-        
+
         assert result is True
         assert output_file.exists()
         assert output_file.stat().st_size > 0

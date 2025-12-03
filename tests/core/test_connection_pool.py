@@ -58,7 +58,6 @@ class TestAdaptiveTaskPoolInitialization:
         assert pool.last_scale_time == 1000.0
 
 
-
 class TestAdaptiveTaskPoolSubmission:
     """Tests for task submission and execution."""
 
@@ -185,7 +184,6 @@ class TestAdaptiveTaskPoolSubmission:
             await pool.submit(failing_task)
 
 
-
 class TestAdaptiveTaskPoolSemaphore:
     """Tests for semaphore control."""
 
@@ -193,25 +191,25 @@ class TestAdaptiveTaskPoolSemaphore:
     async def test_submit_increments_queued_before_execution(self):
         """submit should increment queued_tasks before acquiring semaphore."""
         pool = AdaptiveTaskPool(PoolType.DOWNLOAD, max_workers=1, auto_scale=False)
-        
+
         # Create a task that blocks
         block_event = asyncio.Event()
-        
+
         async def blocking_task():
             await block_event.wait()
             return "done"
-        
+
         # Start first task (will acquire semaphore and block)
         task1 = asyncio.create_task(pool.submit(blocking_task))
         await asyncio.sleep(0.01)  # Let it start
-        
+
         # Check that queued increases for second task
         initial_queued = pool.queued_tasks
         task2 = asyncio.create_task(pool.submit(blocking_task))
         await asyncio.sleep(0.01)
-        
+
         assert pool.queued_tasks > initial_queued
-        
+
         # Cleanup
         block_event.set()
         await task1
@@ -272,22 +270,21 @@ class TestAdaptiveTaskPoolSemaphore:
     async def test_concurrent_tasks_respect_max_workers(self):
         """Concurrent tasks should respect max_workers limit."""
         pool = AdaptiveTaskPool(PoolType.DOWNLOAD, max_workers=2, auto_scale=False)
-        
+
         active_count = []
-        
+
         async def task():
             active_count.append(pool.active_tasks)
             await asyncio.sleep(0.01)
             return "ok"
-        
+
         # Submit 5 tasks concurrently
         tasks = [asyncio.create_task(pool.submit(task)) for _ in range(5)]
         await asyncio.gather(*tasks)
-        
+
         # No more than 2 tasks should be active at once
         assert all(count <= 2 for count in active_count)
         assert pool.completed_tasks == 5
-
 
 
 class TestAdaptiveTaskPoolScaling:
@@ -303,7 +300,7 @@ class TestAdaptiveTaskPoolScaling:
             return "ok"
 
         await pool.submit(task)
-        
+
         # Cooldown mechanism is tested more explicitly in next test
 
     @pytest.mark.asyncio
@@ -313,15 +310,15 @@ class TestAdaptiveTaskPoolScaling:
         pool = AdaptiveTaskPool(PoolType.DOWNLOAD, max_workers=5, auto_scale=True)
         pool.scale_cooldown = 30.0
         pool.last_scale_time = 1000.0
-        
+
         # Set up high utilization (would normally trigger scaling)
         pool.active_tasks = 5
         pool.queued_tasks = 20
         pool.performance_history = [1.0] * 20
-        
+
         # Try to scale - should be blocked by cooldown
         await pool._consider_scaling()
-        
+
         # Should not have scaled (cooldown not passed)
         assert pool.max_workers == 5
 
@@ -346,7 +343,7 @@ class TestAdaptiveTaskPoolScaling:
         """Pool should scale up under high utilization and queue pressure."""
         pool = AdaptiveTaskPool(PoolType.DOWNLOAD, max_workers=3, auto_scale=True)
         pool.scale_cooldown = 0.1  # Short cooldown for testing
-        
+
         # Simulate high load scenario
         # Need utilization > 0.8, so: active / (semaphore._value + active) > 0.8
         # If active=3, semaphore._value=0 (all busy), then utilization = 3/3 = 1.0 > 0.8
@@ -355,10 +352,10 @@ class TestAdaptiveTaskPoolScaling:
         pool.queued_tasks = 10  # High queue pressure (10/3 > 2)
         pool.performance_history = [1.0] * 20  # Stable performance
         pool.last_scale_time = 1000.0  # 100s ago, past cooldown
-        
+
         # Manually trigger scaling check
         await pool._consider_scaling()
-        
+
         # Should have scaled up (3 + 2 = 5)
         assert pool.max_workers == 5
 
@@ -369,15 +366,15 @@ class TestAdaptiveTaskPoolScaling:
         """Pool should scale down under low utilization."""
         pool = AdaptiveTaskPool(PoolType.DOWNLOAD, max_workers=10, auto_scale=True)
         pool.scale_cooldown = 0.1
-        
+
         # Simulate low load scenario
         pool.active_tasks = 1  # Low utilization (10%)
         pool.queued_tasks = 0  # No queue pressure
         pool.performance_history = [1.0] * 20
         pool.last_scale_time = 1000.0
-        
+
         await pool._consider_scaling()
-        
+
         # Should have scaled down
         assert pool.max_workers < 10
 
@@ -387,16 +384,16 @@ class TestAdaptiveTaskPoolScaling:
         """Pool should not scale beyond 20 workers."""
         pool = AdaptiveTaskPool(PoolType.DOWNLOAD, max_workers=19, auto_scale=True)
         pool.scale_cooldown = 0.1
-        
+
         # Simulate high load with all workers busy
         pool.semaphore._value = 0  # All 19 workers busy
         pool.active_tasks = 19  # utilization = 19/19 = 1.0 > 0.8
         pool.queued_tasks = 50  # queue_pressure = 50/19 > 2
         pool.performance_history = [1.0] * 20
         pool.last_scale_time = 1000.0
-        
+
         await pool._consider_scaling()
-        
+
         # Should scale to 20 max (19 + 2 = 21, capped at 20)
         assert pool.max_workers == 20
 
@@ -406,15 +403,15 @@ class TestAdaptiveTaskPoolScaling:
         """Pool should not scale below 2 workers."""
         pool = AdaptiveTaskPool(PoolType.DOWNLOAD, max_workers=3, auto_scale=True)
         pool.scale_cooldown = 0.1
-        
+
         # Simulate low load
         pool.active_tasks = 0
         pool.queued_tasks = 0
         pool.performance_history = [1.0] * 20
         pool.last_scale_time = 1000.0
-        
+
         await pool._consider_scaling()
-        
+
         # Should scale down to 2 min (3 - 1 = 2)
         assert pool.max_workers >= 2
 
@@ -424,20 +421,19 @@ class TestAdaptiveTaskPoolScaling:
         """Pool should not scale up if performance is degrading."""
         pool = AdaptiveTaskPool(PoolType.DOWNLOAD, max_workers=5, auto_scale=True)
         pool.scale_cooldown = 0.1
-        
+
         # High utilization but degraded performance
         pool.active_tasks = 5
         pool.queued_tasks = 15
         # Recent tasks slower than historical (degraded by >20%)
         pool.performance_history = [1.0] * 15 + [2.5, 2.5, 2.5, 2.5, 2.5]
         pool.last_scale_time = 1000.0
-        
+
         initial_workers = pool.max_workers
         await pool._consider_scaling()
-        
+
         # Should NOT scale up due to performance degradation
         assert pool.max_workers == initial_workers
-
 
 
 class TestAdaptiveTaskPoolStatistics:
@@ -446,9 +442,9 @@ class TestAdaptiveTaskPoolStatistics:
     def test_get_stats_returns_correct_structure(self):
         """get_stats should return dict with all expected keys."""
         pool = AdaptiveTaskPool(PoolType.PROCESSING, max_workers=4)
-        
+
         stats = pool.get_stats()
-        
+
         assert "pool_type" in stats
         assert "max_workers" in stats
         assert "active_tasks" in stats
@@ -464,9 +460,9 @@ class TestAdaptiveTaskPoolStatistics:
         pool = AdaptiveTaskPool(PoolType.DOWNLOAD)
         pool.completed_tasks = 7
         pool.failed_tasks = 3
-        
+
         stats = pool.get_stats()
-        
+
         # Success rate = 7 / (7 + 3) = 0.7
         assert stats["success_rate"] == 0.7
 
@@ -475,17 +471,17 @@ class TestAdaptiveTaskPoolStatistics:
         pool = AdaptiveTaskPool(PoolType.DOWNLOAD)
         pool.completed_tasks = 10
         pool.failed_tasks = 0
-        
+
         stats = pool.get_stats()
-        
+
         assert stats["success_rate"] == 1.0
 
     def test_get_stats_success_rate_no_tasks(self):
         """get_stats should return 1.0 success rate when no tasks run."""
         pool = AdaptiveTaskPool(PoolType.DOWNLOAD)
-        
+
         stats = pool.get_stats()
-        
+
         # Default optimistic: 1.0 when no tasks
         assert stats["success_rate"] == 1.0
 
@@ -493,43 +489,43 @@ class TestAdaptiveTaskPoolStatistics:
         """get_stats should calculate utilization correctly."""
         pool = AdaptiveTaskPool(PoolType.DOWNLOAD, max_workers=10)
         pool.active_tasks = 7
-        
+
         stats = pool.get_stats()
-        
+
         # Utilization = 7 / 10 = 0.7
         assert stats["utilization"] == 0.7
 
     def test_get_stats_includes_pool_type_value(self):
         """get_stats should include pool_type as string value."""
         pool = AdaptiveTaskPool(PoolType.FFMPEG, max_workers=2)
-        
+
         stats = pool.get_stats()
-        
+
         assert stats["pool_type"] == "ffmpeg"
 
     def test_get_stats_includes_avg_task_time(self):
         """get_stats should include current avg_task_time."""
         pool = AdaptiveTaskPool(PoolType.API)
         pool.avg_task_time = 2.5
-        
+
         stats = pool.get_stats()
-        
+
         assert stats["avg_task_time"] == 2.5
 
     @pytest.mark.asyncio
     async def test_get_stats_reflects_current_state(self):
         """get_stats should reflect current pool state."""
         pool = AdaptiveTaskPool(PoolType.DOWNLOAD, max_workers=5, auto_scale=False)
-        
+
         async def task():
             return "ok"
-        
+
         # Run 2 tasks
         await pool.submit(task)
         await pool.submit(task)
-        
+
         stats = pool.get_stats()
-        
+
         assert stats["completed_tasks"] == 2
         assert stats["max_workers"] == 5
         assert stats["active_tasks"] == 0  # After completion

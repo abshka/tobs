@@ -159,6 +159,7 @@ class TestCleanupOldStats:
     async def test_cleanup_logs_count(self, caplog):
         """Verify debug log with count of removed stats."""
         import logging
+
         manager = ConnectionManager()
 
         current_time = time.time()
@@ -187,6 +188,7 @@ class TestPerformanceSummary:
     async def test_log_summary_no_operations(self, caplog):
         """Verify no log when total_operations=0."""
         import logging
+
         manager = ConnectionManager()
 
         # No operations
@@ -231,6 +233,7 @@ class TestPerformanceSummary:
     async def test_log_summary_log_format(self, caplog):
         """Verify log message contains operations count and success rate."""
         import logging
+
         manager = ConnectionManager()
 
         # Create some operations
@@ -261,7 +264,9 @@ class TestPerformanceSummary:
         await manager._log_performance_summary()
 
         # Verify calculation: 0/10 = 0.0
-        total_success = sum(s.successful_attempts for s in manager.operation_stats.values())
+        total_success = sum(
+            s.successful_attempts for s in manager.operation_stats.values()
+        )
         total_attempts = sum(s.total_attempts for s in manager.operation_stats.values())
         assert total_success == 0
         assert total_attempts == 10

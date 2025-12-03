@@ -4,12 +4,12 @@ Unit tests for HardwareAccelerationDetector.
 Tests hardware acceleration detection (VAAPI, NVENC, QSV, AMF).
 """
 
-import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
-from src.media.hardware import HardwareAccelerationDetector
+import pytest
 
+from src.media.hardware import HardwareAccelerationDetector
 
 pytestmark = pytest.mark.unit
 
@@ -175,11 +175,11 @@ class TestHardwareAccelerationDetector:
 # @pytest.mark.slow
 # class TestHardwareAccelerationDetectorIntegration:
 #     """Integration tests requiring real hardware."""
-#     
+#
 #     async def test_detect_real_vaapi(self):
 #         """Test detection with real VAAPI device."""
 #         pass
-#     
+#
 #     async def test_detect_real_nvenc(self):
 #         """Test detection with real NVIDIA GPU."""
 #         pass

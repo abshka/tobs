@@ -19,9 +19,7 @@ class MediaCache:
     def __init__(self, cache_manager: Optional[Any] = None):
         self.cache_manager = cache_manager
 
-    async def check_cache(
-        self, message: Message, output_path: Path
-    ) -> Optional[Path]:
+    async def check_cache(self, message: Message, output_path: Path) -> Optional[Path]:
         """Проверка кэша обработанных файлов."""
         if not self.cache_manager:
             return None

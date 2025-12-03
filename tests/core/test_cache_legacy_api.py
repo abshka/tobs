@@ -35,15 +35,10 @@ def cache_manager(tmp_path):
 async def manager_with_entity(cache_manager):
     """Manager pre-populated with entity data."""
     await cache_manager.add_processed_message_async(
-        message_id=100,
-        entity_id="chat_123",
-        text="Test message",
-        timestamp=time.time()
+        message_id=100, entity_id="chat_123", text="Test message", timestamp=time.time()
     )
     await cache_manager.update_entity_info_async(
-        entity_id="chat_123",
-        title="Test Chat",
-        entity_type="channel"
+        entity_id="chat_123", title="Test Chat", entity_type="channel"
     )
     return cache_manager
 
@@ -94,9 +89,7 @@ async def test_is_processed_constructs_correct_key(manager_with_entity):
 async def test_add_processed_message_adds_to_entity(cache_manager):
     """Adds message to entity's processed_messages."""
     await cache_manager.add_processed_message_async(
-        message_id=101,
-        entity_id="chat_456",
-        text="Hello"
+        message_id=101, entity_id="chat_456", text="Hello"
     )
 
     is_processed = await cache_manager.is_processed(101, "chat_456")
@@ -107,8 +100,7 @@ async def test_add_processed_message_adds_to_entity(cache_manager):
 async def test_add_processed_message_creates_entity_if_not_exists(cache_manager):
     """Creates entity data if it doesn't exist."""
     await cache_manager.add_processed_message_async(
-        message_id=102,
-        entity_id="new_chat"
+        message_id=102, entity_id="new_chat"
     )
 
     # Entity should now exist
@@ -121,8 +113,7 @@ async def test_add_processed_message_creates_entity_if_not_exists(cache_manager)
 async def test_add_processed_message_updates_last_id(cache_manager):
     """Updates last_id to current message_id."""
     await cache_manager.add_processed_message_async(
-        message_id=200,
-        entity_id="chat_789"
+        message_id=200, entity_id="chat_789"
     )
 
     entity_data = await cache_manager.get("entity_chat_789")
@@ -133,10 +124,7 @@ async def test_add_processed_message_updates_last_id(cache_manager):
 async def test_add_processed_message_includes_timestamp(cache_manager):
     """Includes timestamp in message data."""
     before_time = time.time()
-    await cache_manager.add_processed_message_async(
-        message_id=103,
-        entity_id="chat_ts"
-    )
+    await cache_manager.add_processed_message_async(message_id=103, entity_id="chat_ts")
     after_time = time.time()
 
     entity_data = await cache_manager.get("entity_chat_ts")
@@ -154,7 +142,7 @@ async def test_add_processed_message_stores_kwargs(cache_manager):
         entity_id="chat_extra",
         text="Message text",
         sender="user_123",
-        reactions=5
+        reactions=5,
     )
 
     entity_data = await cache_manager.get("entity_chat_extra")
@@ -169,8 +157,7 @@ async def test_add_processed_message_stores_kwargs(cache_manager):
 async def test_add_processed_message_initializes_default_structure(cache_manager):
     """Initializes entity with default structure."""
     await cache_manager.add_processed_message_async(
-        message_id=105,
-        entity_id="chat_default"
+        message_id=105, entity_id="chat_default"
     )
 
     entity_data = await cache_manager.get("entity_chat_default")
@@ -191,9 +178,7 @@ async def test_add_processed_message_initializes_default_structure(cache_manager
 async def test_update_entity_info_updates_existing(manager_with_entity):
     """Updates title and type for existing entity."""
     await manager_with_entity.update_entity_info_async(
-        entity_id="chat_123",
-        title="Updated Chat",
-        entity_type="group"
+        entity_id="chat_123", title="Updated Chat", entity_type="group"
     )
 
     entity_data = await manager_with_entity.get("entity_chat_123")
@@ -205,9 +190,7 @@ async def test_update_entity_info_updates_existing(manager_with_entity):
 async def test_update_entity_info_creates_if_not_exists(cache_manager):
     """Creates entity if it doesn't exist."""
     await cache_manager.update_entity_info_async(
-        entity_id="new_entity",
-        title="New Chat",
-        entity_type="private"
+        entity_id="new_entity", title="New Chat", entity_type="private"
     )
 
     entity_data = await cache_manager.get("entity_new_entity")
@@ -226,9 +209,7 @@ async def test_update_entity_info_preserves_processed_messages(manager_with_enti
 
     # Update info
     await manager_with_entity.update_entity_info_async(
-        entity_id="chat_123",
-        title="Changed Title",
-        entity_type="megagroup"
+        entity_id="chat_123", title="Changed Title", entity_type="megagroup"
     )
 
     # Check preserved data
@@ -243,9 +224,7 @@ async def test_update_entity_info_sets_dirty_flag(cache_manager):
     cache_manager._dirty = False
 
     await cache_manager.update_entity_info_async(
-        entity_id="chat_flag",
-        title="Test",
-        entity_type="channel"
+        entity_id="chat_flag", title="Test", entity_type="channel"
     )
 
     assert cache_manager._dirty is True
@@ -274,12 +253,15 @@ async def test_get_last_message_id_returns_none_when_entity_not_exists(cache_man
 async def test_get_last_message_id_returns_none_when_last_id_none(cache_manager):
     """Returns None when last_id is None."""
     # Create entity with no messages
-    await cache_manager.set("entity_empty", {
-        "processed_messages": {},
-        "last_id": None,
-        "title": "Empty",
-        "type": "private"
-    })
+    await cache_manager.set(
+        "entity_empty",
+        {
+            "processed_messages": {},
+            "last_id": None,
+            "title": "Empty",
+            "type": "private",
+        },
+    )
 
     last_id = await cache_manager.get_last_processed_message_id_async("empty")
     assert last_id is None
@@ -324,11 +306,9 @@ async def test_get_all_messages_returns_empty_when_entity_not_exists(cache_manag
 @pytest.mark.asyncio
 async def test_get_all_messages_returns_empty_when_no_messages(cache_manager):
     """Returns empty dict when processed_messages is missing."""
-    await cache_manager.set("entity_nomsg", {
-        "last_id": None,
-        "title": "No Messages",
-        "type": "private"
-    })
+    await cache_manager.set(
+        "entity_nomsg", {"last_id": None, "title": "No Messages", "type": "private"}
+    )
 
     messages = await cache_manager.get_all_processed_messages_async("nomsg")
     assert messages == {}

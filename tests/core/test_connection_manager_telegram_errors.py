@@ -15,23 +15,25 @@ import pytest
 try:
     from telethon.errors import FloodWaitError, RPCError, SlowModeWaitError
     from telethon.errors import TimeoutError as TelegramTimeoutError
+
     TELETHON_AVAILABLE = True
 except ImportError:
     TELETHON_AVAILABLE = False
+
     # Create mock classes for testing
     class FloodWaitError(Exception):
         def __init__(self, seconds):
             self.seconds = seconds
             super().__init__(f"Flood wait: {seconds}s")
-    
+
     class SlowModeWaitError(Exception):
         def __init__(self, seconds):
             self.seconds = seconds
             super().__init__(f"Slow mode wait: {seconds}s")
-    
+
     class TelegramTimeoutError(Exception):
         pass
-    
+
     class RPCError(Exception):
         pass
 
@@ -46,7 +48,7 @@ class TestHandleTelegramError:
         error = MagicMock(spec=FloodWaitError)
         error.seconds = 120
 
-        with patch('src.core.connection.logger') as mock_logger:
+        with patch("src.core.connection.logger") as mock_logger:
             delay = await connection_manager.handle_telegram_error(
                 error, "test_op", attempt=1
             )
@@ -64,7 +66,7 @@ class TestHandleTelegramError:
         error = MagicMock(spec=SlowModeWaitError)
         error.seconds = 60
 
-        with patch('src.core.connection.logger') as mock_logger:
+        with patch("src.core.connection.logger") as mock_logger:
             delay = await connection_manager.handle_telegram_error(
                 error, "test_op", attempt=1
             )
@@ -76,7 +78,9 @@ class TestHandleTelegramError:
         assert "60s" in call_args
 
     @pytest.mark.asyncio
-    async def test_handle_telegram_timeout_error_first_occurrence(self, connection_manager):
+    async def test_handle_telegram_timeout_error_first_occurrence(
+        self, connection_manager
+    ):
         """Should calculate delay and increment timeout_count on first timeout."""
         error = TelegramTimeoutError("Connection timeout")
         stats = connection_manager.get_stats("test_op")
@@ -84,7 +88,7 @@ class TestHandleTelegramError:
         # Ensure timeout_count starts at 0
         assert stats.timeout_count == 0
 
-        with patch('src.core.connection.logger') as mock_logger:
+        with patch("src.core.connection.logger") as mock_logger:
             delay = await connection_manager.handle_telegram_error(
                 error, "test_op", attempt=2
             )
@@ -96,13 +100,15 @@ class TestHandleTelegramError:
         mock_logger.warning.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_handle_telegram_timeout_error_multiple_occurrences(self, connection_manager):
+    async def test_handle_telegram_timeout_error_multiple_occurrences(
+        self, connection_manager
+    ):
         """Should apply multiplier based on timeout_count."""
         error = TelegramTimeoutError("Connection timeout")
         stats = connection_manager.get_stats("test_op")
         stats.timeout_count = 3
 
-        with patch('src.core.connection.logger') as mock_logger:
+        with patch("src.core.connection.logger") as mock_logger:
             delay = await connection_manager.handle_telegram_error(
                 error, "test_op", attempt=1
             )
@@ -115,14 +121,18 @@ class TestHandleTelegramError:
         assert stats.timeout_count == 4
 
     @pytest.mark.asyncio
-    async def test_handle_telegram_timeout_error_capped_at_300(self, connection_manager):
+    async def test_handle_telegram_timeout_error_capped_at_300(
+        self, connection_manager
+    ):
         """Should cap timeout delay at 300 seconds."""
         error = TelegramTimeoutError("Connection timeout")
         stats = connection_manager.get_stats("test_op")
         stats.timeout_count = 10  # Very high count
 
         delay = await connection_manager.handle_telegram_error(
-            error, "test_op", attempt=20  # High attempt
+            error,
+            "test_op",
+            attempt=20,  # High attempt
         )
 
         # base_delay = 10.0 + (20 * 5.0) = 110.0
@@ -152,7 +162,7 @@ class TestHandleTelegramError:
         """Should handle GetFileRequest errors with specific delay."""
         error = Exception("GetFileRequest failed: file not found")
 
-        with patch('src.core.connection.logger') as mock_logger:
+        with patch("src.core.connection.logger") as mock_logger:
             delay = await connection_manager.handle_telegram_error(
                 error, "test_op", attempt=3
             )
@@ -169,7 +179,9 @@ class TestHandleTelegramError:
         error = Exception("GetFileRequest failed")
 
         delay = await connection_manager.handle_telegram_error(
-            error, "test_op", attempt=50  # Very high attempt
+            error,
+            "test_op",
+            attempt=50,  # Very high attempt
         )
 
         # delay = 5.0 + (50 * 2.0) = 105.0, should be capped at 60
@@ -181,7 +193,7 @@ class TestHandleTelegramError:
         # Create a mock that will pass isinstance check
         error = MagicMock(spec=RPCError)
 
-        with patch('src.core.connection.logger') as mock_logger:
+        with patch("src.core.connection.logger") as mock_logger:
             delay = await connection_manager.handle_telegram_error(
                 error, "test_op", attempt=4
             )
@@ -199,7 +211,9 @@ class TestHandleTelegramError:
         error = MagicMock(spec=RPCError)
 
         delay = await connection_manager.handle_telegram_error(
-            error, "test_op", attempt=30  # Very high attempt
+            error,
+            "test_op",
+            attempt=30,  # Very high attempt
         )
 
         # delay = 3.0 + (30 * 1.5) = 48.0, should be capped at 30
@@ -210,7 +224,7 @@ class TestHandleTelegramError:
         """Should handle unknown errors with fallback delay."""
         error = ValueError("Some random error")
 
-        with patch('src.core.connection.logger') as mock_logger:
+        with patch("src.core.connection.logger") as mock_logger:
             delay = await connection_manager.handle_telegram_error(
                 error, "test_op", attempt=5
             )
@@ -227,7 +241,9 @@ class TestHandleTelegramError:
         error = RuntimeError("Unexpected error")
 
         delay = await connection_manager.handle_telegram_error(
-            error, "test_op", attempt=100  # Very high attempt
+            error,
+            "test_op",
+            attempt=100,  # Very high attempt
         )
 
         # delay = 2.0 + 100 = 102.0, should be capped at 60

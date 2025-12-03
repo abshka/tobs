@@ -28,9 +28,7 @@ class MetadataExtractor:
         self._metadata_cache: Dict[str, MediaMetadata] = {}
         self._file_checksums: Dict[Path, str] = {}
 
-    async def get_metadata(
-        self, file_path: Path, media_type: str
-    ) -> MediaMetadata:
+    async def get_metadata(self, file_path: Path, media_type: str) -> MediaMetadata:
         """Получение метаданных медиа файла."""
         try:
             # Проверка кэша метаданных

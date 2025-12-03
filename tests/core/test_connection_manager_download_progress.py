@@ -16,7 +16,6 @@ import pytest
 
 from src.core.connection import ConnectionConfig, ConnectionManager
 
-
 # ============================================================================
 # Batch 12: Download Progress Tracking Tests
 # ============================================================================
@@ -34,7 +33,9 @@ class TestDownloadProgressInit:
 
         # Act
         with patch("src.core.connection.time.time", return_value=1000.0):
-            progress = connection_manager.init_download_progress(download_id, total_size)
+            progress = connection_manager.init_download_progress(
+                download_id, total_size
+            )
 
         # Assert
         assert download_id in connection_manager.download_progress
@@ -199,9 +200,10 @@ class TestDownloadProgressStall:
         total_size = 10 * 1024 * 1024
         downloaded = 1024 * 1024
 
-        with patch("src.core.connection.time.time") as mock_time, patch(
-            "src.core.connection.logger"
-        ) as mock_logger:
+        with (
+            patch("src.core.connection.time.time") as mock_time,
+            patch("src.core.connection.logger") as mock_logger,
+        ):
             mock_time.return_value = 1000.0
             connection_manager.init_download_progress(download_id, total_size)
 
@@ -247,19 +249,22 @@ class TestDownloadProgressStall:
         total_size = 10 * 1024 * 1024
         downloaded = 1024 * 1024
 
-        with patch("src.core.connection.time.time") as mock_time, patch(
-            "src.core.connection.logger"
-        ) as mock_logger:
+        with (
+            patch("src.core.connection.time.time") as mock_time,
+            patch("src.core.connection.logger") as mock_logger,
+        ):
             mock_time.return_value = 1000.0
             connection_manager.init_download_progress(download_id, total_size)
-            
+
             # First update with progress
             mock_time.return_value = 1001.0
             connection_manager.update_download_progress(download_id, downloaded)
 
             # Stall - update with SAME downloaded amount after 70 seconds
             mock_time.return_value = 1072.0  # 71 seconds later
-            connection_manager.update_download_progress(download_id, downloaded)  # Same value = no progress
+            connection_manager.update_download_progress(
+                download_id, downloaded
+            )  # Same value = no progress
 
             stats = connection_manager.get_stats(download_id)
             assert stats.stall_count >= 1  # Should have detected stall
@@ -283,8 +288,9 @@ class TestDownloadProgressFinish:
         download_id = "test_download"
         total_size = 1024 * 1024
 
-        with patch("src.core.connection.time.time", return_value=1000.0), patch(
-            "src.core.connection.logger"
+        with (
+            patch("src.core.connection.time.time", return_value=1000.0),
+            patch("src.core.connection.logger"),
         ):
             connection_manager.init_download_progress(download_id, total_size)
             connection_manager.update_download_progress(download_id, total_size)
@@ -302,8 +308,9 @@ class TestDownloadProgressFinish:
         download_id = "test_download"
         total_size = 1024 * 1024
 
-        with patch("src.core.connection.time.time", return_value=1000.0), patch(
-            "src.core.connection.logger"
+        with (
+            patch("src.core.connection.time.time", return_value=1000.0),
+            patch("src.core.connection.logger"),
         ):
             connection_manager.init_download_progress(download_id, total_size)
 
@@ -327,9 +334,10 @@ class TestDownloadProgressFinish:
         download_id = "test_download"
         total_size = 1024 * 1024
 
-        with patch("src.core.connection.time.time") as mock_time, patch(
-            "src.core.connection.logger"
-        ) as mock_logger:
+        with (
+            patch("src.core.connection.time.time") as mock_time,
+            patch("src.core.connection.logger") as mock_logger,
+        ):
             mock_time.return_value = 1000.0
             connection_manager.init_download_progress(download_id, total_size)
 
@@ -353,8 +361,9 @@ class TestDownloadProgressIntegration:
         download_id = "full_workflow_test"
         total_size = 5 * 1024 * 1024  # 5 MB
 
-        with patch("src.core.connection.time.time") as mock_time, patch(
-            "src.core.connection.logger"
+        with (
+            patch("src.core.connection.time.time") as mock_time,
+            patch("src.core.connection.logger"),
         ):
             # Init
             mock_time.return_value = 1000.0
@@ -389,8 +398,9 @@ class TestDownloadProgressIntegration:
             "download_3": 5 * 1024 * 1024,
         }
 
-        with patch("src.core.connection.time.time") as mock_time, patch(
-            "src.core.connection.logger"
+        with (
+            patch("src.core.connection.time.time") as mock_time,
+            patch("src.core.connection.logger"),
         ):
             mock_time.return_value = 1000.0
 

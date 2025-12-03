@@ -79,10 +79,10 @@ def processing_task(tmp_path: Path, video_metadata: MediaMetadata) -> Processing
     """Sample processing task."""
     input_path = tmp_path / "input.mp4"
     output_path = tmp_path / "output.mp4"
-    
+
     # Create a dummy input file
     input_path.write_bytes(b"dummy video content")
-    
+
     return ProcessingTask(
         input_path=input_path,
         output_path=output_path,
@@ -165,7 +165,7 @@ def sample_audio_file(tmp_path: Path) -> Path:
 def sample_image_file(tmp_path: Path) -> Path:
     """Create a sample image file for testing."""
     from PIL import Image
-    
+
     image_file = tmp_path / "sample_image.jpg"
     # Create a simple test image
     img = Image.new("RGB", (100, 100), color="red")

@@ -14,7 +14,6 @@ from unittest.mock import patch
 
 from src.config import Config, ExportTarget, _parse_bool
 
-
 # Valid API hash for testing
 VALID_API_HASH = "a" * 32
 
@@ -64,6 +63,7 @@ class TestConfigFromEnv:
 
     def make_getenv_mock(self, **overrides):
         """Helper to create a getenv mock with standard defaults + overrides."""
+
         def getenv_side_effect(key, default=None):
             # Always include these minimal required values
             env_vars = {
@@ -75,6 +75,7 @@ class TestConfigFromEnv:
             # Merge with overrides
             env_vars.update(overrides)
             return env_vars.get(key, default)
+
         return getenv_side_effect
 
     @patch("src.config.Path.mkdir")

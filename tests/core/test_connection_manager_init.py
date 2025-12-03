@@ -122,6 +122,7 @@ class TestConnectionManagerStart:
     async def test_start_logs_startup_message(self, caplog):
         """Verify log message on startup."""
         import logging
+
         manager = ConnectionManager()
 
         # Capture logs from loguru (which writes to stderr)
@@ -141,10 +142,17 @@ class TestConnectionManagerStart:
         """Mock sleep, verify cleanup & log called periodically."""
         manager = ConnectionManager()
 
-        with patch.object(manager, "_cleanup_old_stats", new_callable=AsyncMock) as mock_cleanup, \
-             patch.object(manager, "_log_performance_summary", new_callable=AsyncMock) as mock_log, \
-             patch("src.core.connection.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-
+        with (
+            patch.object(
+                manager, "_cleanup_old_stats", new_callable=AsyncMock
+            ) as mock_cleanup,
+            patch.object(
+                manager, "_log_performance_summary", new_callable=AsyncMock
+            ) as mock_log,
+            patch(
+                "src.core.connection.asyncio.sleep", new_callable=AsyncMock
+            ) as mock_sleep,
+        ):
             # Setup: make sleep raise CancelledError after 2 iterations
             call_count = 0
 
@@ -190,6 +198,7 @@ class TestConnectionManagerStart:
         # Just verify the monitoring loop has try/except for errors
         # (checking the actual loop code structure)
         import inspect
+
         source = inspect.getsource(manager._monitoring_loop)
 
         # Verify error handling exists
@@ -204,6 +213,7 @@ class TestConnectionManagerStart:
 
         # Verify the loop code checks the shutdown flag
         import inspect
+
         source = inspect.getsource(manager._monitoring_loop)
 
         assert "while not self._shutdown" in source
@@ -223,7 +233,9 @@ class TestConnectionManagerStart:
         # Should have created task (implementation may replace or keep existing)
         assert second_task is not None
         # At minimum, one of them should be a Task
-        assert isinstance(first_task, asyncio.Task) or isinstance(second_task, asyncio.Task)
+        assert isinstance(first_task, asyncio.Task) or isinstance(
+            second_task, asyncio.Task
+        )
 
         # Cleanup
         await manager.shutdown()

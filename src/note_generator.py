@@ -47,7 +47,7 @@ class NoteGenerator:
         self.connection_manager = connection_manager
         self.cache_manager = cache_manager
         self.file_locks: Dict[Path, asyncio.Lock] = {}
-        
+
         # Буферизация записи (оптимизация #3)
         self._write_buffers: Dict[Path, List[str]] = {}
         self._buffer_locks: Dict[Path, asyncio.Lock] = {}
@@ -226,13 +226,13 @@ class NoteGenerator:
                     channel_id = getattr(main_post.to_id, "channel_id", None)
                 if channel_id is None:
                     return ""
-                
+
                 comments = []
                 async for comment in client.iter_messages(
                     channel_id, reply_to=main_post.id, reverse=True
                 ):
                     comments.append(comment)
-                
+
                 if not comments:
                     return "\n\n*No comments.*\n"
 
@@ -337,7 +337,7 @@ class NoteGenerator:
                         )
                         md += f"> ![[{relative_media_path}]]\n"
                 return md
-            
+
             except FloodWaitError as e:
                 # Handle FloodWait with retry
                 retry_count += 1
@@ -355,19 +355,21 @@ class NoteGenerator:
                     )
                     last_error = e
                     break
-            
+
             except Exception as e:
                 # Other errors
                 if "The message ID used in the peer was invalid" in str(e):
                     return ""
                 logger.error(f"Failed to export comments for post {main_post.id}: {e}")
                 return ""
-        
+
         # If all retries failed due to FloodWait, return empty
         if last_error:
-            logger.warning(f"Comments export failed for post {main_post.id} after {max_retries} retries")
+            logger.warning(
+                f"Comments export failed for post {main_post.id} after {max_retries} retries"
+            )
             return ""
-        
+
         return ""
 
     def _get_sender_name(self, sender):
@@ -739,21 +741,18 @@ class NoteGenerator:
             )
             return f"\n---\n## Сообщение {getattr(message, 'id', 'unknown')}\n**Ошибка форматирования**\n\n"
 
-
     async def _get_buffer_lock(self, note_path: Path) -> asyncio.Lock:
         """Получить или создать lock для буфера файла."""
         if note_path not in self._buffer_locks:
             self._buffer_locks[note_path] = asyncio.Lock()
         return self._buffer_locks[note_path]
 
-    async def append_message_to_topic_note(
-        self, note_path: Path, message_content: str
-    ):
+    async def append_message_to_topic_note(self, note_path: Path, message_content: str):
         """
         Запись сообщения в файл с буферизацией (оптимизировано).
         Накапливает несколько сообщений перед записью на диск.
-        
-        Note: Обязательно вызовите flush_all_buffers() или shutdown() 
+
+        Note: Обязательно вызовите flush_all_buffers() или shutdown()
         перед завершением работы!
         """
         lock = await self._get_buffer_lock(note_path)
@@ -761,10 +760,10 @@ class NoteGenerator:
             # Инициализируем буфер если нужно
             if note_path not in self._write_buffers:
                 self._write_buffers[note_path] = []
-            
+
             # Добавляем сообщение в буфер
             self._write_buffers[note_path].append(message_content)
-            
+
             # Если буфер полон, сбрасываем на диск
             if len(self._write_buffers[note_path]) >= self._buffer_size:
                 await self._flush_buffer(note_path)
@@ -773,12 +772,12 @@ class NoteGenerator:
         """Сбросить буфер на диск."""
         if note_path not in self._write_buffers or not self._write_buffers[note_path]:
             return
-        
+
         try:
             # Собираем все сообщения из буфера
             messages = self._write_buffers[note_path]
             content = "\n" + "\n".join(messages) + "\n"
-            
+
             # Записываем все сразу
             if note_path.exists():
                 async with aiofiles.open(note_path, "a", encoding="utf-8") as f:
@@ -786,11 +785,11 @@ class NoteGenerator:
             else:
                 async with aiofiles.open(note_path, "w", encoding="utf-8") as f:
                     await f.write(content)
-            
+
             # Очищаем буфер
             self._write_buffers[note_path] = []
             logger.debug(f"Flushed {len(messages)} messages to {note_path.name}")
-            
+
         except Exception as e:
             logger.error(f"Error flushing buffer for {note_path}: {e}")
             raise

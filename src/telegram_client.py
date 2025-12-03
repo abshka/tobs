@@ -1,7 +1,7 @@
 import asyncio
+import os
 import re
 import sys
-import os
 from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
@@ -112,17 +112,20 @@ class TelegramManager:
         if config.tdata_path and not os.path.exists(f"{config.session_name}.session"):
             try:
                 from src.auth.tdesktop import TDesktopManager
+
                 if TDesktopManager.is_tdata(config.tdata_path):
                     logger.info(f"Found tdata at {config.tdata_path}, importing...")
                     # This creates the session file
                     TDesktopManager.convert_tdata(
-                        config.tdata_path, 
-                        config.session_name, 
-                        config.api_id, 
-                        config.api_hash
+                        config.tdata_path,
+                        config.session_name,
+                        config.api_id,
+                        config.api_hash,
                     )
                 else:
-                    logger.warning(f"Provided tdata_path {config.tdata_path} does not look like a valid tdata folder")
+                    logger.warning(
+                        f"Provided tdata_path {config.tdata_path} does not look like a valid tdata folder"
+                    )
             except ImportError:
                 logger.warning("opentele not installed, skipping tdata import")
             except Exception as e:
@@ -691,11 +694,12 @@ class TelegramManager:
 
         # Use robust parser first
         from src.utils import LinkParser
+
         parsed = LinkParser.parse(link)
-        
+
         chat_id = None
         topic_id = None
-        
+
         if parsed:
             chat_id = parsed["peer"]
             # If topic_id is explicit (from ?thread= or /c/ID/TOPIC/MSG)

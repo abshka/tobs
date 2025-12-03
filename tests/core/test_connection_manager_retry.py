@@ -159,9 +159,7 @@ class TestCalculateDelay:
         """Verify always returns base_delay."""
         manager = ConnectionManager()
         config = ConnectionConfig(
-            strategy=BackoffStrategy.FIXED,
-            base_delay=5.0,
-            jitter=False
+            strategy=BackoffStrategy.FIXED, base_delay=5.0, jitter=False
         )
 
         # Different attempts should all return same delay
@@ -173,9 +171,7 @@ class TestCalculateDelay:
         """Verify base_delay * attempt."""
         manager = ConnectionManager()
         config = ConnectionConfig(
-            strategy=BackoffStrategy.LINEAR,
-            base_delay=2.0,
-            jitter=False
+            strategy=BackoffStrategy.LINEAR, base_delay=2.0, jitter=False
         )
 
         assert manager.calculate_delay(1, "test_op", config) == 2.0
@@ -190,14 +186,14 @@ class TestCalculateDelay:
             strategy=BackoffStrategy.EXPONENTIAL,
             base_delay=1.0,
             backoff_multiplier=2.0,
-            jitter=False
+            jitter=False,
         )
 
         # delay = base_delay * (multiplier ^ (attempt - 1))
-        assert manager.calculate_delay(1, "test_op", config) == 1.0   # 1 * 2^0
-        assert manager.calculate_delay(2, "test_op", config) == 2.0   # 1 * 2^1
-        assert manager.calculate_delay(3, "test_op", config) == 4.0   # 1 * 2^2
-        assert manager.calculate_delay(4, "test_op", config) == 8.0   # 1 * 2^3
+        assert manager.calculate_delay(1, "test_op", config) == 1.0  # 1 * 2^0
+        assert manager.calculate_delay(2, "test_op", config) == 2.0  # 1 * 2^1
+        assert manager.calculate_delay(3, "test_op", config) == 4.0  # 1 * 2^2
+        assert manager.calculate_delay(4, "test_op", config) == 8.0  # 1 * 2^3
 
     def test_calculate_delay_adaptive_strategy(self):
         """Verify uses adaptive multiplier."""
@@ -206,7 +202,7 @@ class TestCalculateDelay:
             strategy=BackoffStrategy.ADAPTIVE,
             base_delay=2.0,
             backoff_multiplier=2.0,
-            jitter=False
+            jitter=False,
         )
 
         # Create stats with high success rate (should reduce delay)
@@ -229,7 +225,7 @@ class TestCalculateDelay:
             base_delay=10.0,
             backoff_multiplier=3.0,
             max_delay=50.0,
-            jitter=False
+            jitter=False,
         )
 
         # 10 * 3^9 = 196,830 — should be capped at 50
@@ -243,7 +239,7 @@ class TestCalculateDelay:
             strategy=BackoffStrategy.FIXED,
             base_delay=10.0,
             jitter=True,
-            jitter_range=0.2
+            jitter_range=0.2,
         )
 
         # Run multiple times
@@ -267,9 +263,7 @@ class TestCalculateTimeout:
         """<500MB, verify base_timeout."""
         manager = ConnectionManager()
         config = ConnectionConfig(
-            base_timeout=60.0,
-            large_file_timeout=300.0,
-            huge_file_timeout=600.0
+            base_timeout=60.0, large_file_timeout=300.0, huge_file_timeout=600.0
         )
 
         # 100 MB file
@@ -287,9 +281,7 @@ class TestCalculateTimeout:
         """500-1000MB, verify large_file_timeout."""
         manager = ConnectionManager()
         config = ConnectionConfig(
-            base_timeout=60.0,
-            large_file_timeout=1800.0,
-            huge_file_timeout=3600.0
+            base_timeout=60.0, large_file_timeout=1800.0, huge_file_timeout=3600.0
         )
 
         # 750 MB file
@@ -301,12 +293,10 @@ class TestCalculateTimeout:
         assert timeout == 1800.0
 
     def test_calculate_timeout_huge_file(self):
-        """">1000MB, verify huge_file_timeout."""
+        """ ">1000MB, verify huge_file_timeout."""
         manager = ConnectionManager()
         config = ConnectionConfig(
-            base_timeout=60.0,
-            large_file_timeout=1800.0,
-            huge_file_timeout=3600.0
+            base_timeout=60.0, large_file_timeout=1800.0, huge_file_timeout=3600.0
         )
 
         # 1500 MB file
@@ -339,9 +329,7 @@ class TestCalculateTimeout:
         """Verify size-based calculation used when larger."""
         manager = ConnectionManager()
         config = ConnectionConfig(
-            base_timeout=30.0,
-            large_file_timeout=1800.0,
-            huge_file_timeout=3600.0
+            base_timeout=30.0, large_file_timeout=1800.0, huge_file_timeout=3600.0
         )
 
         # Large file: 2000 MB (> 1000 MB, so it's "huge")

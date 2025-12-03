@@ -22,6 +22,7 @@ async def test_get_cache_manager_creates_instance_on_first_call():
     """Creates singleton instance on first call."""
     # Reset global state
     import src.core.cache as cache_module
+
     cache_module._cache_manager = None
 
     manager = await get_cache_manager()
@@ -38,6 +39,7 @@ async def test_get_cache_manager_returns_same_instance():
     """Returns same instance on subsequent calls."""
     # Reset global state
     import src.core.cache as cache_module
+
     cache_module._cache_manager = None
 
     manager1 = await get_cache_manager()
@@ -54,6 +56,7 @@ async def test_get_cache_manager_creates_temp_directory():
     """Creates temp directory for cache."""
     # Reset global state
     import src.core.cache as cache_module
+
     cache_module._cache_manager = None
 
     with patch("src.core.cache.Path.mkdir") as mock_mkdir:
@@ -74,6 +77,7 @@ async def test_get_cache_manager_starts_manager():
     """Starts the manager (calls start())."""
     # Reset global state
     import src.core.cache as cache_module
+
     cache_module._cache_manager = None
 
     start_called = False
@@ -96,6 +100,7 @@ async def test_get_cache_manager_uses_correct_cache_path():
     """Uses correct cache path in temp directory."""
     # Reset global state
     import src.core.cache as cache_module
+
     cache_module._cache_manager = None
 
     with patch.object(CacheManager, "start", new_callable=AsyncMock):
@@ -120,6 +125,7 @@ async def test_shutdown_cache_manager_shuts_down_existing_manager():
     """Shuts down existing manager."""
     # Reset global state and create manager
     import src.core.cache as cache_module
+
     cache_module._cache_manager = None
 
     with patch.object(CacheManager, "start", new_callable=AsyncMock):
@@ -131,7 +137,9 @@ async def test_shutdown_cache_manager_shuts_down_existing_manager():
         nonlocal shutdown_called
         shutdown_called = True
 
-    with patch.object(manager, "shutdown", new_callable=AsyncMock, side_effect=track_shutdown):
+    with patch.object(
+        manager, "shutdown", new_callable=AsyncMock, side_effect=track_shutdown
+    ):
         await shutdown_cache_manager()
 
     assert shutdown_called
@@ -142,6 +150,7 @@ async def test_shutdown_cache_manager_sets_global_to_none():
     """Sets global _cache_manager to None."""
     # Reset global state and create manager
     import src.core.cache as cache_module
+
     cache_module._cache_manager = None
 
     with patch.object(CacheManager, "start", new_callable=AsyncMock):
@@ -158,6 +167,7 @@ async def test_shutdown_cache_manager_handles_no_manager():
     """Handles case when no manager exists."""
     # Reset global state
     import src.core.cache as cache_module
+
     cache_module._cache_manager = None
 
     # Should not raise
@@ -171,6 +181,7 @@ async def test_shutdown_cache_manager_allows_recreation():
     """Allows recreation after shutdown."""
     # Reset global state
     import src.core.cache as cache_module
+
     cache_module._cache_manager = None
 
     with patch.object(CacheManager, "start", new_callable=AsyncMock):

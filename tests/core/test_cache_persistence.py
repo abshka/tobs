@@ -11,13 +11,14 @@ Tests cover:
 """
 
 import asyncio
-import json
 import base64
+import json
 import pickle
-import zlib
 import time
+import zlib
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, mock_open as sync_mock_open
+from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import mock_open as sync_mock_open
 
 import pytest
 
@@ -100,20 +101,20 @@ def expired_cache_json():
 def create_async_file_mock(content=None, should_fail=False):
     """Helper to create properly structured async file mock."""
     mock_file = AsyncMock()
-    
+
     if should_fail:
         mock_file.__aenter__.side_effect = IOError("Read error")
     else:
         # Setup async context manager
         mock_file.__aenter__.return_value = mock_file
         mock_file.__aexit__.return_value = False
-        
+
         if content is not None:
             mock_file.read.return_value = content
-        
+
         # For writes
         mock_file.write = AsyncMock()
-    
+
     return mock_file
 
 
@@ -126,7 +127,7 @@ def create_async_file_mock(content=None, should_fail=False):
 async def test_load_cache_success(temp_cache_path, sample_cache_json):
     """Successfully loads valid cache file with entries."""
     manager = CacheManager(temp_cache_path)
-    
+
     mock_file = create_async_file_mock(json.dumps(sample_cache_json))
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -154,7 +155,7 @@ async def test_load_cache_file_not_exists(temp_cache_path):
 async def test_load_cache_empty_file(temp_cache_path):
     """Handles empty cache file."""
     manager = CacheManager(temp_cache_path)
-    
+
     mock_file = create_async_file_mock("   \n  ")
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -168,7 +169,7 @@ async def test_load_cache_empty_file(temp_cache_path):
 async def test_load_cache_reconstructs_entries(temp_cache_path, sample_cache_json):
     """Parses JSON and reconstructs CacheEntry objects correctly."""
     manager = CacheManager(temp_cache_path)
-    
+
     mock_file = create_async_file_mock(json.dumps(sample_cache_json))
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -186,7 +187,7 @@ async def test_load_cache_reconstructs_entries(temp_cache_path, sample_cache_jso
 async def test_load_cache_skips_expired_entries(temp_cache_path, expired_cache_json):
     """Skips expired entries during load."""
     manager = CacheManager(temp_cache_path)
-    
+
     mock_file = create_async_file_mock(json.dumps(expired_cache_json))
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -202,7 +203,7 @@ async def test_load_cache_skips_expired_entries(temp_cache_path, expired_cache_j
 async def test_load_cache_skips_invalid_entries(temp_cache_path):
     """Skips invalid entries (malformed data) with warning."""
     manager = CacheManager(temp_cache_path)
-    
+
     # Create truly invalid entry data (missing required fields will raise TypeError)
     invalid_json = {
         "version": 2,
@@ -225,7 +226,7 @@ async def test_load_cache_skips_invalid_entries(temp_cache_path):
             },
         },
     }
-    
+
     mock_file = create_async_file_mock(json.dumps(invalid_json))
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -242,12 +243,14 @@ async def test_load_cache_skips_invalid_entries(temp_cache_path):
 async def test_load_cache_invalid_json_triggers_backup(temp_cache_path):
     """Handles invalid JSON and triggers backup restore."""
     manager = CacheManager(temp_cache_path)
-    
+
     mock_file = create_async_file_mock("{invalid json")
 
     with patch("src.core.cache.Path.exists", return_value=True):
         with patch("aiofiles.open", return_value=mock_file):
-            with patch.object(manager, "_try_restore_from_backup", new_callable=AsyncMock) as mock_restore:
+            with patch.object(
+                manager, "_try_restore_from_backup", new_callable=AsyncMock
+            ) as mock_restore:
                 await manager._load_cache()
 
     mock_restore.assert_called_once()
@@ -257,12 +260,14 @@ async def test_load_cache_invalid_json_triggers_backup(temp_cache_path):
 async def test_load_cache_exception_triggers_backup(temp_cache_path):
     """Handles general exceptions and triggers backup restore."""
     manager = CacheManager(temp_cache_path)
-    
+
     mock_file = create_async_file_mock(should_fail=True)
 
     with patch("src.core.cache.Path.exists", return_value=True):
         with patch("aiofiles.open", return_value=mock_file):
-            with patch.object(manager, "_try_restore_from_backup", new_callable=AsyncMock) as mock_restore:
+            with patch.object(
+                manager, "_try_restore_from_backup", new_callable=AsyncMock
+            ) as mock_restore:
                 await manager._load_cache()
 
     mock_restore.assert_called_once()
@@ -273,7 +278,7 @@ async def test_load_cache_updates_internal_state(temp_cache_path, sample_cache_j
     """Updates internal cache state correctly."""
     manager = CacheManager(temp_cache_path)
     initial_size = len(manager._cache)
-    
+
     mock_file = create_async_file_mock(json.dumps(sample_cache_json))
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -296,21 +301,23 @@ async def test_save_cache_success(temp_cache_path):
     await manager.set("key1", "value1")
 
     written_content = None
-    
+
     def create_write_mock():
         mock_file = AsyncMock()
         mock_file.__aenter__.return_value = mock_file
         mock_file.__aexit__.return_value = False
-        
+
         async def capture_write(content):
             nonlocal written_content
             written_content = content
-        
+
         mock_file.write = capture_write
         return mock_file
 
     with patch("src.core.cache.Path.exists", return_value=False):
-        with patch("aiofiles.open", side_effect=lambda *args, **kwargs: create_write_mock()):
+        with patch(
+            "aiofiles.open", side_effect=lambda *args, **kwargs: create_write_mock()
+        ):
             await manager._save_cache()
 
     assert written_content is not None
@@ -334,18 +341,20 @@ async def test_save_cache_creates_backup(temp_cache_path, sample_cache_json):
         mock_file = AsyncMock()
         mock_file.__aenter__.return_value = mock_file
         mock_file.__aexit__.return_value = False
-        
+
         nonlocal backup_write_called
         if "backup" in str(path) and "w" in mode:
+
             async def track_backup_write(content):
                 nonlocal backup_write_called
                 backup_write_called = True
+
             mock_file.write = track_backup_write
         elif mode == "r":
             mock_file.read = AsyncMock(return_value=original_content)
         else:
             mock_file.write = AsyncMock()
-        
+
         return mock_file
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -395,21 +404,23 @@ async def test_save_cache_excludes_expired_entries(temp_cache_path):
     await asyncio.sleep(0.02)
 
     written_content = None
-    
+
     def create_write_mock():
         mock_file = AsyncMock()
         mock_file.__aenter__.return_value = mock_file
         mock_file.__aexit__.return_value = False
-        
+
         async def capture_write(content):
             nonlocal written_content
             written_content = content
-        
+
         mock_file.write = capture_write
         return mock_file
 
     with patch("src.core.cache.Path.exists", return_value=False):
-        with patch("aiofiles.open", side_effect=lambda *args, **kwargs: create_write_mock()):
+        with patch(
+            "aiofiles.open", side_effect=lambda *args, **kwargs: create_write_mock()
+        ):
             await manager._save_cache()
 
     data = json.loads(written_content)
@@ -424,7 +435,7 @@ async def test_save_cache_resets_dirty_flag(temp_cache_path):
     await manager.set("key1", "value1")
 
     assert manager._dirty is True
-    
+
     mock_file = AsyncMock()
     mock_file.__aenter__.return_value = mock_file
     mock_file.__aexit__.return_value = False
@@ -446,7 +457,7 @@ async def test_save_cache_uses_lock(temp_cache_path):
     # Simpler approach: verify lock is used by checking it exists and is a Lock
     assert hasattr(manager, "_lock")
     assert isinstance(manager._lock, asyncio.Lock)
-    
+
     # Run save and verify it works (lock is used internally)
     mock_file = AsyncMock()
     mock_file.__aenter__.return_value = mock_file
@@ -457,7 +468,7 @@ async def test_save_cache_uses_lock(temp_cache_path):
         with patch("aiofiles.open", return_value=mock_file):
             # Should complete without deadlock or errors
             await manager._save_cache()
-    
+
     # If we got here, lock was used correctly (no exception raised)
     assert True
 
@@ -483,21 +494,23 @@ async def test_save_cache_includes_metadata(temp_cache_path):
     await manager.set("key1", "value1")
 
     written_content = None
-    
+
     def create_write_mock():
         mock_file = AsyncMock()
         mock_file.__aenter__.return_value = mock_file
         mock_file.__aexit__.return_value = False
-        
+
         async def capture_write(content):
             nonlocal written_content
             written_content = content
-        
+
         mock_file.write = capture_write
         return mock_file
 
     with patch("src.core.cache.Path.exists", return_value=False):
-        with patch("aiofiles.open", side_effect=lambda *args, **kwargs: create_write_mock()):
+        with patch(
+            "aiofiles.open", side_effect=lambda *args, **kwargs: create_write_mock()
+        ):
             await manager._save_cache()
 
     data = json.loads(written_content)
@@ -514,21 +527,23 @@ async def test_save_cache_serializes_entries_correctly(temp_cache_path):
     await manager.set("key1", {"nested": "data"})
 
     written_content = None
-    
+
     def create_write_mock():
         mock_file = AsyncMock()
         mock_file.__aenter__.return_value = mock_file
         mock_file.__aexit__.return_value = False
-        
+
         async def capture_write(content):
             nonlocal written_content
             written_content = content
-        
+
         mock_file.write = capture_write
         return mock_file
 
     with patch("src.core.cache.Path.exists", return_value=False):
-        with patch("aiofiles.open", side_effect=lambda *args, **kwargs: create_write_mock()):
+        with patch(
+            "aiofiles.open", side_effect=lambda *args, **kwargs: create_write_mock()
+        ):
             await manager._save_cache()
 
     data = json.loads(written_content)
@@ -542,7 +557,9 @@ async def test_save_cache_serializes_entries_correctly(temp_cache_path):
 @pytest.mark.asyncio
 async def test_save_cache_encodes_bytes_as_base64(temp_cache_path):
     """Ensure that bytes in entry.data are encoded as base64 when saving cache."""
-    manager = CacheManager(temp_cache_path, compression=CompressionType.PICKLE, compression_threshold=1)
+    manager = CacheManager(
+        temp_cache_path, compression=CompressionType.PICKLE, compression_threshold=1
+    )
     # Create content that will be pickled and compressed
     complex_data = {
         "items": set(range(50)),
@@ -565,7 +582,9 @@ async def test_save_cache_encodes_bytes_as_base64(temp_cache_path):
         return mock_file
 
     with patch("src.core.cache.Path.exists", return_value=False):
-        with patch("aiofiles.open", side_effect=lambda *args, **kwargs: create_write_mock()):
+        with patch(
+            "aiofiles.open", side_effect=lambda *args, **kwargs: create_write_mock()
+        ):
             await manager._save_cache()
 
     data = json.loads(written_content)
@@ -588,7 +607,7 @@ async def test_save_cache_encodes_bytes_as_base64(temp_cache_path):
 async def test_restore_from_backup_success(temp_cache_path, sample_cache_json):
     """Successfully restores from backup file."""
     manager = CacheManager(temp_cache_path)
-    
+
     mock_file = create_async_file_mock(json.dumps(sample_cache_json))
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -656,7 +675,7 @@ async def test_restore_from_backup_file_not_exists(temp_cache_path):
 async def test_restore_from_backup_parses_json(temp_cache_path, sample_cache_json):
     """Parses backup JSON correctly."""
     manager = CacheManager(temp_cache_path)
-    
+
     mock_file = create_async_file_mock(json.dumps(sample_cache_json))
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -671,7 +690,7 @@ async def test_restore_from_backup_parses_json(temp_cache_path, sample_cache_jso
 async def test_restore_from_backup_skips_expired(temp_cache_path, expired_cache_json):
     """Skips expired entries during restore."""
     manager = CacheManager(temp_cache_path)
-    
+
     mock_file = create_async_file_mock(json.dumps(expired_cache_json))
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -686,7 +705,7 @@ async def test_restore_from_backup_skips_expired(temp_cache_path, expired_cache_
 async def test_restore_from_backup_skips_invalid(temp_cache_path):
     """Skips invalid entries with warning."""
     manager = CacheManager(temp_cache_path)
-    
+
     invalid_json = {
         "version": 2,
         "timestamp": time.time(),
@@ -708,7 +727,7 @@ async def test_restore_from_backup_skips_invalid(temp_cache_path):
             },
         },
     }
-    
+
     mock_file = create_async_file_mock(json.dumps(invalid_json))
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -723,7 +742,7 @@ async def test_restore_from_backup_skips_invalid(temp_cache_path):
 async def test_restore_from_backup_handles_invalid_json(temp_cache_path):
     """Handles invalid JSON in backup."""
     manager = CacheManager(temp_cache_path)
-    
+
     mock_file = create_async_file_mock("{invalid}")
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -737,7 +756,7 @@ async def test_restore_from_backup_handles_invalid_json(temp_cache_path):
 async def test_restore_from_backup_handles_exceptions(temp_cache_path):
     """Handles general exceptions during restore."""
     manager = CacheManager(temp_cache_path)
-    
+
     mock_file = create_async_file_mock(should_fail=True)
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -754,7 +773,7 @@ async def test_restore_from_backup_updates_cache_state(
     """Updates internal cache state correctly."""
     manager = CacheManager(temp_cache_path)
     initial_count = len(manager._cache)
-    
+
     mock_file = create_async_file_mock(json.dumps(sample_cache_json))
 
     with patch("src.core.cache.Path.exists", return_value=True):
@@ -966,7 +985,7 @@ async def test_start_loads_cache(temp_cache_path):
         await manager.start()
 
     assert load_called
-    
+
     # Cleanup
     manager._shutdown = True
     if manager._auto_save_task:
@@ -1063,7 +1082,7 @@ async def test_shutdown_waits_for_task(temp_cache_path):
     # No need to track completion - just verify shutdown completes
     with patch.object(manager, "_save_cache", new_callable=AsyncMock):
         await manager.shutdown()
-    
+
     # If we got here, shutdown completed successfully
     assert manager._shutdown is True
 

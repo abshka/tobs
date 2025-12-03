@@ -8,7 +8,6 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 
-
 from ..models import ProcessingSettings, ProcessingTask
 
 
@@ -37,9 +36,7 @@ class BaseProcessor(ABC):
         pass
 
     @abstractmethod
-    def needs_processing(
-        self, file_path: Path, settings: ProcessingSettings
-    ) -> bool:
+    def needs_processing(self, file_path: Path, settings: ProcessingSettings) -> bool:
         """
         Определяет, нужна ли обработка файла.
 

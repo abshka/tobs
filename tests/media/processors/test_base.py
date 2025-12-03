@@ -4,13 +4,13 @@ Unit tests for BaseProcessor.
 Tests the abstract base class for all media processors.
 """
 
-import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from src.media.processors.base import BaseProcessor
-from src.media.models import ProcessingTask, ProcessingSettings
+import pytest
 
+from src.media.models import ProcessingSettings, ProcessingTask
+from src.media.processors.base import BaseProcessor
 
 pytestmark = pytest.mark.unit
 
