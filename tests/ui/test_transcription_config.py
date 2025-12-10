@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.config import Config
+from src.config import Config, TranscriptionConfig
 from src.ui.interactive import InteractiveUI
 
 
@@ -26,6 +26,8 @@ def mock_config():
     config.transcription_device = "cpu"
     config.transcription_compute_type = "int8"
     config.transcription_cache_enabled = True
+    # Add TranscriptionConfig object (v5.1.0)
+    config.transcription = TranscriptionConfig()
     return config
 
 
@@ -74,8 +76,8 @@ class TestTranscriptionConfiguration:
         # Setup: transcription is enabled
         interactive_ui.config.enable_transcription = True
 
-        # User chooses option 1 (toggle), then option 7 (return)
-        mock_prompt.side_effect = ["1", "6", "6"]
+        # User chooses option 1 (toggle), then option 8 (return)
+        mock_prompt.side_effect = ["1", "8"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
@@ -90,14 +92,14 @@ class TestTranscriptionConfiguration:
     async def test_configure_transcription_model_selection(
         self, mock_input, mock_clear, mock_rprint, mock_prompt, interactive_ui
     ):
-        """Test selecting Whisper model."""
-        # User chooses option 2 (model), selects "small", then option 7 (return)
-        mock_prompt.side_effect = ["6"]
+        """Test selecting Whisper model (now fixed to large-v3)."""
+        # User just returns (option 8) - model is fixed
+        mock_prompt.side_effect = ["8"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
 
-        # Verify model was changed to "small"
+        # Verify model remains "large-v3" (fixed)
         assert interactive_ui.config.transcription_model == "large-v3"
 
     @patch("src.ui.interactive.Prompt.ask")
@@ -108,8 +110,8 @@ class TestTranscriptionConfiguration:
         self, mock_input, mock_clear, mock_rprint, mock_prompt, interactive_ui
     ):
         """Test setting transcription language."""
-        # User chooses option 3 (language), selects Russian, then option 7 (return)
-        mock_prompt.side_effect = ["2", "2", "6"]
+        # User chooses option 2 (language), selects Russian (2), then option 8 (return)
+        mock_prompt.side_effect = ["2", "2", "8"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
@@ -125,8 +127,8 @@ class TestTranscriptionConfiguration:
         self, mock_input, mock_clear, mock_rprint, mock_prompt, interactive_ui
     ):
         """Test selecting transcription device."""
-        # User chooses option 4 (device), selects CUDA, then option 7 (return)
-        mock_prompt.side_effect = ["3", "2", "6"]
+        # User chooses option 3 (device), selects CUDA (2), then option 8 (return)
+        mock_prompt.side_effect = ["3", "2", "8"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
@@ -142,8 +144,8 @@ class TestTranscriptionConfiguration:
         self, mock_input, mock_clear, mock_rprint, mock_prompt, interactive_ui
     ):
         """Test selecting compute type."""
-        # User chooses option 5 (compute type), selects float16, then option 7 (return)
-        mock_prompt.side_effect = ["4", "2", "6"]
+        # User chooses option 4 (compute type), selects float16 (2), then option 8 (return)
+        mock_prompt.side_effect = ["4", "2", "8"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
@@ -162,8 +164,8 @@ class TestTranscriptionConfiguration:
         # Setup: cache is enabled
         interactive_ui.config.transcription_cache_enabled = True
 
-        # User chooses option 6 (cache toggle), then option 7 (return)
-        mock_prompt.side_effect = ["5", "6"]
+        # User chooses option 5 (cache toggle), then option 8 (return)
+        mock_prompt.side_effect = ["5", "8"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
@@ -179,8 +181,8 @@ class TestTranscriptionConfiguration:
         self, mock_input, mock_clear, mock_rprint, mock_prompt, interactive_ui
     ):
         """Test setting custom language code."""
-        # User chooses option 3 (language), option 5 (custom), enters "de", then option 7 (return)
-        mock_prompt.side_effect = ["2", "5", "de", "6"]
+        # User chooses option 2 (language), option 5 (custom), enters "de", then option 8 (return)
+        mock_prompt.side_effect = ["2", "5", "de", "8"]
 
         # Run configuration
         await interactive_ui._configure_transcription_settings()
@@ -215,3 +217,62 @@ class TestTranscriptionConfiguration:
         expected_types = ["int8", "float16", "float32"]
 
         assert interactive_ui.config.transcription_compute_type in expected_types
+
+    # Tests for parallelism and sorting (v5.1.0)
+
+    def test_transcription_config_has_parallelism_fields(self, mock_config):
+        """Test that TranscriptionConfig has parallelism fields."""
+        assert hasattr(mock_config.transcription, "max_concurrent")
+        assert hasattr(mock_config.transcription, "sorting")
+
+    def test_transcription_parallelism_defaults(self, mock_config):
+        """Test default parallelism values."""
+        assert mock_config.transcription.max_concurrent == 2
+        assert mock_config.transcription.sorting == "size_asc"
+
+    @patch("src.ui.interactive.Prompt.ask")
+    @patch("src.ui.interactive.rprint")
+    @patch("src.ui.interactive.clear_screen")
+    @patch("builtins.input")
+    async def test_configure_transcription_parallelism(
+        self, mock_input, mock_clear, mock_rprint, mock_prompt, interactive_ui
+    ):
+        """Test setting transcription parallelism."""
+        # User chooses option 6 (parallelism), selects high (4), then option 8 (return)
+        mock_prompt.side_effect = ["6", "4", "8"]
+
+        # Run configuration
+        await interactive_ui._configure_transcription_settings()
+
+        # Verify parallelism was set to 8 (high)
+        assert interactive_ui.config.transcription.max_concurrent == 8
+
+    @patch("src.ui.interactive.Prompt.ask")
+    @patch("src.ui.interactive.rprint")
+    @patch("src.ui.interactive.clear_screen")
+    @patch("builtins.input")
+    async def test_configure_transcription_sorting(
+        self, mock_input, mock_clear, mock_rprint, mock_prompt, interactive_ui
+    ):
+        """Test setting transcription sorting."""
+        # User chooses option 7 (sorting), selects LPT (2), then option 8 (return)
+        mock_prompt.side_effect = ["7", "2", "8"]
+
+        # Run configuration
+        await interactive_ui._configure_transcription_settings()
+
+        # Verify sorting was set to size_desc (LPT)
+        assert interactive_ui.config.transcription.sorting == "size_desc"
+
+    def test_all_sorting_options_valid(self, interactive_ui):
+        """Test that all sorting options are valid."""
+        expected_sorting = ["none", "size_asc", "size_desc"]
+
+        assert interactive_ui.config.transcription.sorting in expected_sorting
+
+    def test_all_parallelism_options_valid(self, interactive_ui):
+        """Test that all parallelism options are valid."""
+        # Valid values: 0 (auto), 1, 2, 4, 8
+        valid_values = [0, 1, 2, 4, 8]
+
+        assert interactive_ui.config.transcription.max_concurrent in valid_values

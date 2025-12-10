@@ -9,7 +9,7 @@ import signal
 import sys
 from pathlib import Path
 
-# Try to use uvloop for better performance
+# Attempt to use uvloop for performance improvement
 try:
     import uvloop
 
@@ -39,59 +39,59 @@ def handle_sigint(signum, frame):
 
 
 def print_comprehensive_summary(stats, performance_monitor, core_manager):
-    """Print comprehensive export summary matching old main.py format."""
-    # Export Summary
+    """Print comprehensive export summary in old main.py format."""
+    # Export summary
     rprint("\n[bold green]═══════════════════════════════════════════════[/bold green]")
-    rprint("[bold green]          EXPORT SUMMARY[/bold green]")
+    rprint("[bold green]          СВОДКА ЭКСПОРТА[/bold green]")
     rprint("[bold green]═══════════════════════════════════════════════[/bold green]")
-    rprint(f"[cyan]Total Messages:[/cyan] {stats.messages_processed}")
-    rprint(f"[cyan]Total Media Files:[/cyan] {stats.media_downloaded}")
-    rprint(f"[cyan]Errors:[/cyan] {stats.errors_encountered}")
-    rprint(f"[cyan]Total Duration:[/cyan] {stats.duration:.1f}s")
+    rprint(f"[cyan]Всего сообщений:[/cyan] {stats.messages_processed}")
+    rprint(f"[cyan]Всего медиафайлов:[/cyan] {stats.media_downloaded}")
+    rprint(f"[cyan]Ошибок:[/cyan] {stats.errors_encountered}")
+    rprint(f"[cyan]Общее время:[/cyan] {stats.duration:.1f}s")
     rprint("[bold green]═══════════════════════════════════════════════[/bold green]\n")
 
-    # Duration in minutes
+    # Time in minutes
     duration_minutes = stats.duration / 60
-    rprint(f"Export completed in {duration_minutes:.1f} minutes")
+    rprint(f"Экспорт завершен за {duration_minutes:.1f} минут")
 
     # Resource usage
     if hasattr(stats, "peak_memory_mb") and stats.peak_memory_mb > 0:
-        rprint(f"Peak memory usage: {stats.peak_memory_mb:.1f}MB")
+        rprint(f"Пиковое использование памяти: {stats.peak_memory_mb:.1f}MB")
     elif performance_monitor:
         metrics = performance_monitor.get_current_metrics()
         if metrics:
-            rprint(f"Peak memory usage: {metrics.process_memory_mb:.1f}MB")
+            rprint(f"Пиковое использование памяти: {metrics.process_memory_mb:.1f}MB")
 
     if hasattr(stats, "avg_cpu_percent") and stats.avg_cpu_percent > 0:
-        rprint(f"Average CPU usage: {stats.avg_cpu_percent:.1f}%")
+        rprint(f"Среднее использование CPU: {stats.avg_cpu_percent:.1f}%")
     elif performance_monitor:
         metrics = performance_monitor.get_current_metrics()
         if metrics:
-            rprint(f"Average CPU usage: {metrics.process_cpu_percent:.1f}%")
+            rprint(f"Среднее использование CPU: {metrics.process_cpu_percent:.1f}%")
 
-    # Core System Report
+    # Core systems report
     if core_manager:
         cache_manager = core_manager.get_cache_manager()
         performance_monitor_obj = core_manager.get_performance_monitor()
 
-        rprint("\nCore System Report:")
+        rprint("\nОтчет основных систем:")
 
-        # Cache stats
+        # Cache statistics
         if cache_manager and hasattr(cache_manager, "get_stats"):
             cache_stats = cache_manager.get_stats()
             hit_rate = cache_stats.hit_rate * 100
             cache_size_mb = cache_stats.total_size_mb
-            rprint(f"✅ Cache Hit Rate: {hit_rate:.1f}%")
-            rprint(f"✅ Cache Size: {cache_size_mb:.1f}MB")
+            rprint(f"✅ Попаданий в кэш: {hit_rate:.1f}%")
+            rprint(f"✅ Размер кэша: {cache_size_mb:.1f}MB")
 
-        # Compression stats
+        # Compression statistics
         compression_saves = (
             cache_stats.compression_saves
             if cache_manager and hasattr(cache_manager, "get_stats")
             else 0
         )
-        rprint(f"✅ Compression Saves: {compression_saves}")
-        rprint(f"✅ Total Operations: {stats.messages_processed}")
+        rprint(f"✅ Экономия от сжатия: {compression_saves}")
+        rprint(f"✅ Всего операций: {stats.messages_processed}")
 
         # Success rate
         total_ops = stats.messages_processed
@@ -100,7 +100,7 @@ def print_comprehensive_summary(stats, performance_monitor, core_manager):
             if total_ops > 0
             else 100.0
         )
-        rprint(f"✅ Success Rate: {success_rate:.1f}%")
+        rprint(f"✅ Уровень успеха: {success_rate:.1f}%")
 
         # Resource state and profile
         if performance_monitor_obj:
@@ -108,14 +108,14 @@ def print_comprehensive_summary(stats, performance_monitor, core_manager):
             if metrics:
                 # Determine resource state
                 if metrics.process_memory_mb > 3000 or metrics.process_cpu_percent > 80:
-                    state = "overloaded"
+                    state = "перегружен"
                 elif (
                     metrics.process_memory_mb > 2000 or metrics.process_cpu_percent > 60
                 ):
-                    state = "high"
+                    state = "высокий"
                 else:
-                    state = "normal"
-                rprint(f"✅ Resource State: {state}")
+                    state = "нормальный"
+                rprint(f"✅ Состояние ресурсов: {state}")
 
             # Performance profile
             profile = (
@@ -123,18 +123,18 @@ def print_comprehensive_summary(stats, performance_monitor, core_manager):
                 if hasattr(core_manager, "performance_profile")
                 else "balanced"
             )
-            rprint(f"✅ Performance Profile: {profile}")
+            rprint(f"✅ Профиль производительности: {profile}")
 
             # Active alerts
             active_alerts = performance_monitor_obj.get_active_alerts()
-            rprint(f"⚠️  Active Alerts: {len(active_alerts)}")
+            rprint(f"⚠️  Активных предупреждений: {len(active_alerts)}")
 
-        # Performance Recommendations
+        # Performance recommendations
         if performance_monitor_obj:
             active_alerts = performance_monitor_obj.get_active_alerts()
             if active_alerts:
-                rprint("\nPerformance Recommendations:\n")
-                for i, alert in enumerate(active_alerts[:3], 1):  # Show top 3
+                rprint("\nРекомендации по производительности:\n")
+                for i, alert in enumerate(active_alerts[:3], 1):  # Показать топ 3
                     if "memory" in alert.metric_name.lower():
                         rprint(
                             f"{i}. Процесс использует много памяти. Рекомендуется перезапустить приложение."
@@ -159,9 +159,9 @@ def print_comprehensive_summary(stats, performance_monitor, core_manager):
                     else metrics.timestamp - stats.duration
                 )
                 uptime_minutes = uptime / 60
-                rprint(f"\n✅ System Uptime: {uptime_minutes:.1f} minutes")
+                rprint(f"\n✅ Время работы системы: {uptime_minutes:.1f} минут")
 
-    rprint("\n[bold green]TOBS export completed successfully![/bold green]\n")
+    rprint("\n[bold green]Экспорт TOBS завершен успешно![/bold green]\n")
 
 
 async def async_main():
@@ -196,7 +196,7 @@ async def async_main():
 
     connection_manager = core_manager.get_connection_manager()
 
-    telegram_manager = ShardedTelegramManager(
+    telegram_manager = TelegramManager(
         config=config, connection_manager=connection_manager
     )
     await telegram_manager.connect()
@@ -207,6 +207,27 @@ async def async_main():
             # User selected "Start Export" - update core manager with new config
             core_manager.update_performance_profile(config.performance_profile)
 
+            # 🚀 CRITICAL FIX: If sharding was enabled via menu, replace telegram_manager
+            if config.enable_shard_fetch:
+                rprint("[bold cyan]🚀 Switching to Sharded Telegram Manager...[/bold cyan]")
+                # Create new ShardedTelegramManager with existing connection
+                old_client = telegram_manager.client
+                sharded_manager = ShardedTelegramManager(
+                    config=config, connection_manager=connection_manager
+                )
+                # Reuse the existing connected client
+                sharded_manager.client = old_client
+                sharded_manager.client_connected = True
+                sharded_manager.telegram_manager = telegram_manager  # Keep reference to base manager
+                telegram_manager = sharded_manager
+                
+                # DEBUG: Verify the switch worked
+                logger.info(f"✅ Switched to ShardedTelegramManager with {config.shard_count} workers")
+                logger.info(f"🔍 telegram_manager type: {type(telegram_manager)}")
+                logger.info(f"🔍 telegram_manager.__class__.__name__: {telegram_manager.__class__.__name__}")
+                logger.info(f"🔍 Has fetch_messages: {hasattr(telegram_manager, 'fetch_messages')}")
+                logger.info(f"🔍 fetch_messages method: {telegram_manager.fetch_messages}")
+
             # User selected "Start Export" - proceed with export
             rprint("\n[bold green]✓ Starting export...[/bold green]\n")
 
@@ -215,7 +236,7 @@ async def async_main():
             connection_manager = core_manager.get_connection_manager()
             performance_monitor = core_manager.get_performance_monitor()
 
-            # Initialize HTTP session with optimized connection pooling
+            # Initialize HTTP session with connection pooling
             connector = aiohttp.TCPConnector(
                 limit=100,  # Total connection pool size
                 limit_per_host=30,  # Connections per host

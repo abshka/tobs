@@ -320,7 +320,7 @@ class ConnectionManager:
             PoolType.FFMPEG: AdaptiveTaskPool(PoolType.FFMPEG, 2),
             PoolType.API: AdaptiveTaskPool(
                 PoolType.API, 10
-            ),  # ⚡ Quick Win: увеличено с 3 до 10
+            ),  # Increased from 3 to 10
         }
 
         # Состояние

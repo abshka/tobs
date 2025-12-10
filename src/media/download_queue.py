@@ -11,6 +11,7 @@ Architecture:
 """
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -19,6 +20,17 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from loguru import logger
 from telethon.tl.types import Message
+
+# Patterns indicating Telegram server-side issues (not client-side)
+TELEGRAM_SERVER_ERROR_PATTERNS = [
+    r"Telegram is having internal issues",
+    r"Request was unsuccessful \d+ time",  # Telethon exhausted internal retries
+    r"TimeoutError.*GetFileRequest",
+    r"TimeoutError.*Timeout while fetching",
+    r"DC_MIGRATE",
+    r"FILE_MIGRATE",
+    r"TelegramServerError",  # Our custom exception
+]
 
 
 class DownloadStatus(Enum):
@@ -49,6 +61,7 @@ class DownloadTask:
     max_attempts: int = 3
     error: Optional[str] = None
     result_path: Optional[Path] = None
+    telegram_server_errors: int = 0  # Track server errors specifically for this task
 
     @property
     def duration(self) -> Optional[float]:
@@ -71,9 +84,11 @@ class QueueStats:
     total_queued: int = 0
     total_completed: int = 0
     total_failed: int = 0
+    total_cancelled: int = 0
     total_bytes_downloaded: int = 0
     total_download_time: float = 0.0
     peak_queue_size: int = 0
+    telegram_errors: int = 0  # Count of Telegram server-side errors
 
     @property
     def success_rate(self) -> float:
@@ -114,6 +129,8 @@ class MediaDownloadQueue:
         max_workers: int = 3,
         max_queue_size: int = 1000,
         retry_delay: float = 2.0,
+        task_timeout: float = 1800.0,  # 30 min max per task
+        telegram_error_threshold: int = 5,  # Pause after N consecutive Telegram errors
     ):
         """
         Initialize the download queue.
@@ -123,11 +140,15 @@ class MediaDownloadQueue:
             max_workers: Maximum concurrent download workers
             max_queue_size: Maximum tasks in queue (0 = unlimited)
             retry_delay: Delay between retry attempts
+            task_timeout: Maximum time for a single task (prevents stuck workers)
+            telegram_error_threshold: Pause downloads after this many Telegram errors
         """
         self.downloader = downloader
         self.max_workers = max_workers
         self.max_queue_size = max_queue_size
         self.retry_delay = retry_delay
+        self.task_timeout = task_timeout
+        self.telegram_error_threshold = telegram_error_threshold
 
         # Queue and tracking
         self._queue: asyncio.Queue = asyncio.Queue(
@@ -135,8 +156,13 @@ class MediaDownloadQueue:
         )
         self._tasks: Dict[str, DownloadTask] = {}
         self._workers: List[asyncio.Task] = []
+        self._active_downloads: Dict[
+            str, asyncio.Task
+        ] = {}  # Track active download coroutines
         self._running = False
         self._shutdown_event = asyncio.Event()
+        self._paused = False  # Global pause flag for Telegram errors
+        self._consecutive_telegram_errors = 0
 
         # Statistics
         self.stats = QueueStats()
@@ -148,7 +174,9 @@ class MediaDownloadQueue:
         # Lock for thread-safe operations
         self._lock = asyncio.Lock()
 
-        logger.info(f"MediaDownloadQueue initialized with {max_workers} workers")
+        logger.info(
+            f"MediaDownloadQueue initialized with {max_workers} workers, task_timeout={task_timeout}s"
+        )
 
     async def start(self) -> None:
         """Start the background download workers."""
@@ -269,17 +297,21 @@ class MediaDownloadQueue:
             if t.status == DownloadStatus.COMPLETED and t.result_path
         ]
 
-    async def wait_all(self, timeout: Optional[float] = None) -> bool:
+    async def wait_all(
+        self, timeout: Optional[float] = None, cancel_on_timeout: bool = True
+    ) -> bool:
         """
         Wait for all queued downloads to complete.
 
         Args:
             timeout: Maximum time to wait (None = wait forever)
+            cancel_on_timeout: If True, cancel stuck tasks on timeout
 
         Returns:
             True if all downloads completed, False if timeout
         """
         start_time = time.time()
+        last_log_time = start_time
 
         while True:
             pending = self.get_pending_count()
@@ -289,18 +321,91 @@ class MediaDownloadQueue:
                 logger.info("All downloads completed")
                 return True
 
-            if timeout and (time.time() - start_time) > timeout:
+            # Log progress every 30 seconds
+            current_time = time.time()
+            if current_time - last_log_time > 30:
+                elapsed = current_time - start_time
+                logger.info(
+                    f"⏳ Waiting for downloads: {in_progress} in progress, {pending} pending "
+                    f"(elapsed: {elapsed:.0f}s, telegram_errors: {self._consecutive_telegram_errors})"
+                )
+                last_log_time = current_time
+
+            if timeout and (current_time - start_time) > timeout:
                 logger.warning(
                     f"Timeout waiting for downloads. Pending: {pending}, In Progress: {in_progress}"
                 )
+                if cancel_on_timeout:
+                    await self._cancel_stuck_tasks()
                 return False
 
             await asyncio.sleep(0.5)
 
+    async def _cancel_stuck_tasks(self) -> int:
+        """Cancel all currently active download tasks."""
+        cancelled_count = 0
+        async with self._lock:
+            for task_id, download_task in list(self._active_downloads.items()):
+                if not download_task.done():
+                    download_task.cancel()
+                    cancelled_count += 1
+                    logger.warning(f"Cancelled stuck download: {task_id}")
+
+                    # Update task status
+                    if task_id in self._tasks:
+                        self._tasks[task_id].status = DownloadStatus.CANCELLED
+                        self._tasks[task_id].error = "Cancelled due to timeout"
+                        self.stats.total_cancelled += 1
+
+        if cancelled_count > 0:
+            logger.info(f"Cancelled {cancelled_count} stuck download tasks")
+        return cancelled_count
+
+    def is_telegram_server_error(self, error: Exception) -> bool:
+        """Check if error indicates Telegram server-side issues."""
+        error_str = str(error)
+        for pattern in TELEGRAM_SERVER_ERROR_PATTERNS:
+            if re.search(pattern, error_str, re.IGNORECASE):
+                return True
+        return False
+
+    async def _handle_telegram_error(self) -> None:
+        """Handle Telegram server error - implement backoff."""
+        async with self._lock:
+            self._consecutive_telegram_errors += 1
+            self.stats.telegram_errors += 1
+
+            if self._consecutive_telegram_errors >= self.telegram_error_threshold:
+                if not self._paused:
+                    self._paused = True
+                    backoff_time = min(
+                        60 * self._consecutive_telegram_errors, 300
+                    )  # Max 5 min
+                    logger.warning(
+                        f"🛑 Telegram server errors detected ({self._consecutive_telegram_errors}x). "
+                        f"Pausing downloads for {backoff_time}s..."
+                    )
+                    # Schedule unpause
+                    asyncio.create_task(self._unpause_after(backoff_time))
+
+    async def _unpause_after(self, seconds: float) -> None:
+        """Unpause downloads after a delay."""
+        await asyncio.sleep(seconds)
+        async with self._lock:
+            self._paused = False
+            self._consecutive_telegram_errors = max(
+                0, self._consecutive_telegram_errors - 2
+            )
+            logger.info("▶️ Resuming downloads after backoff")
+
+    def _reset_telegram_error_count(self) -> None:
+        """Reset consecutive error count on success."""
+        self._consecutive_telegram_errors = 0
+
     def get_progress_info(self) -> dict:
         """
         Get current progress information for display.
-        
+
         Returns:
             Dict with completed, failed, pending, in_progress, total counts
         """
@@ -309,7 +414,7 @@ class MediaDownloadQueue:
         pending = self.get_pending_count()
         in_progress = self.get_in_progress_count()
         total = self.stats.total_queued
-        
+
         return {
             "completed": completed,
             "failed": failed,
@@ -325,6 +430,11 @@ class MediaDownloadQueue:
 
         while self._running and not self._shutdown_event.is_set():
             try:
+                # Check if paused due to Telegram errors
+                if self._paused:
+                    await asyncio.sleep(2.0)
+                    continue
+
                 try:
                     task = await asyncio.wait_for(self._queue.get(), timeout=1.0)
                 except asyncio.TimeoutError:
@@ -343,7 +453,7 @@ class MediaDownloadQueue:
         logger.debug(f"{worker_name} stopped")
 
     async def _process_task(self, task: DownloadTask, worker_name: str) -> None:
-        """Process a single download task."""
+        """Process a single download task with timeout protection."""
         task.status = DownloadStatus.IN_PROGRESS
         task.started_at = time.time()
         task.attempts += 1
@@ -353,16 +463,33 @@ class MediaDownloadQueue:
         )
 
         try:
-            result_path = await self.downloader.download_media(
+            # Wrap download in timeout to prevent infinite hangs
+            download_coro = self.downloader.download_media(
                 message=task.message,
                 progress_queue=None,
                 task_id=task.task_id,
             )
 
+            # Track active download for cancellation support
+            download_task = asyncio.create_task(download_coro)
+            async with self._lock:
+                self._active_downloads[task.task_id] = download_task
+
+            try:
+                result_path = await asyncio.wait_for(
+                    download_task, timeout=self.task_timeout
+                )
+            finally:
+                async with self._lock:
+                    self._active_downloads.pop(task.task_id, None)
+
             if result_path and result_path.exists():
                 task.status = DownloadStatus.COMPLETED
                 task.completed_at = time.time()
                 task.result_path = result_path
+
+                # Reset telegram error count on success
+                self._reset_telegram_error_count()
 
                 async with self._lock:
                     self.stats.total_completed += 1
@@ -377,6 +504,7 @@ class MediaDownloadQueue:
                 if result_path != task.output_path:
                     try:
                         import shutil
+
                         task.output_path.parent.mkdir(parents=True, exist_ok=True)
                         shutil.move(str(result_path), str(task.output_path))
                         task.result_path = task.output_path
@@ -395,15 +523,80 @@ class MediaDownloadQueue:
             else:
                 raise RuntimeError("Download returned no result")
 
+        except asyncio.TimeoutError:
+            error_msg = f"Task timeout after {self.task_timeout}s"
+            logger.error(f"{worker_name} TIMEOUT: {task.task_id} - {error_msg}")
+
+            task.status = DownloadStatus.FAILED
+            task.completed_at = time.time()
+            task.error = error_msg
+
+            async with self._lock:
+                self.stats.total_failed += 1
+                self._active_downloads.pop(task.task_id, None)
+
+            if self._on_error:
+                try:
+                    self._on_error(task)
+                except Exception:
+                    pass
+
+        except asyncio.CancelledError:
+            logger.warning(f"{worker_name} cancelled: {task.task_id}")
+            task.status = DownloadStatus.CANCELLED
+            task.completed_at = time.time()
+            task.error = "Cancelled"
+
+            async with self._lock:
+                self.stats.total_cancelled += 1
+                self._active_downloads.pop(task.task_id, None)
+            raise  # Re-raise to stop worker
+
         except Exception as e:
             error_msg = str(e)
-            logger.warning(f"{worker_name} failed: {task.task_id} - {error_msg}")
+            is_telegram_error = self.is_telegram_server_error(e)
 
-            if task.attempts < task.max_attempts:
+            if is_telegram_error:
+                task.telegram_server_errors += 1
+                logger.warning(
+                    f"{worker_name} Telegram error ({task.telegram_server_errors}x): {task.task_id}"
+                )
+                await self._handle_telegram_error()
+            else:
+                logger.warning(f"{worker_name} failed: {task.task_id} - {error_msg}")
+
+            # Decide whether to retry
+            should_retry = task.attempts < task.max_attempts
+
+            # Don't retry if this specific task has hit Telegram server errors
+            # (file is likely unavailable, no point retrying)
+            if is_telegram_error and task.telegram_server_errors >= 1:
+                should_retry = False
+                logger.warning(
+                    f"Not retrying {task.task_id} - Telegram server error indicates file unavailable"
+                )
+
+            # Also don't retry if global Telegram errors are too high
+            if (
+                is_telegram_error
+                and self._consecutive_telegram_errors
+                >= self.telegram_error_threshold * 2
+            ):
+                should_retry = False
+                logger.warning(f"Skipping retry due to persistent Telegram errors")
+
+            if should_retry:
                 task.status = DownloadStatus.PENDING
-                await asyncio.sleep(self.retry_delay * task.attempts)
+                retry_delay = self.retry_delay * task.attempts
+                if is_telegram_error:
+                    retry_delay = min(
+                        retry_delay * 3, 60
+                    )  # Longer delay for Telegram errors
+                await asyncio.sleep(retry_delay)
                 await self._queue.put(task)
-                logger.debug(f"Re-queued: {task.task_id}")
+                logger.debug(
+                    f"Re-queued: {task.task_id} (delay was {retry_delay:.1f}s)"
+                )
             else:
                 task.status = DownloadStatus.FAILED
                 task.completed_at = time.time()
@@ -437,6 +630,7 @@ class MediaDownloadQueue:
             "total_queued": self.stats.total_queued,
             "total_completed": self.stats.total_completed,
             "total_failed": self.stats.total_failed,
+            "total_cancelled": self.stats.total_cancelled,
             "pending": self.get_pending_count(),
             "in_progress": self.get_in_progress_count(),
             "success_rate": f"{self.stats.success_rate:.1%}",
@@ -444,16 +638,26 @@ class MediaDownloadQueue:
             "total_mb": f"{self.stats.total_bytes_downloaded / (1024 * 1024):.1f}",
             "avg_download_time": f"{self.stats.avg_download_time:.1f}s",
             "peak_queue_size": self.stats.peak_queue_size,
+            "telegram_errors": self.stats.telegram_errors,
+            "paused": self._paused,
         }
 
     def log_stats(self) -> None:
         """Log current queue statistics."""
         stats = self.get_stats_summary()
+        extra_info = ""
+        if stats["telegram_errors"] > 0:
+            extra_info = f", TG Errors: {stats['telegram_errors']}"
+        if stats["total_cancelled"] > 0:
+            extra_info += f", Cancelled: {stats['total_cancelled']}"
+        if stats["paused"]:
+            extra_info += " [PAUSED]"
+
         logger.info(
             f"📊 Download Queue Stats: "
             f"Completed: {stats['total_completed']}, "
             f"Failed: {stats['total_failed']}, "
             f"Pending: {stats['pending']}, "
             f"In Progress: {stats['in_progress']}, "
-            f"Total: {stats['total_mb']} MB"
+            f"Total: {stats['total_mb']} MB{extra_info}"
         )

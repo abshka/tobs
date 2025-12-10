@@ -1,5 +1,5 @@
 """
-Единый кэш-менеджер, объединяющий простое и продвинутое кэширование.
+Unified cache manager combining simple and advanced caching.
 """
 
 import asyncio
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class CacheStrategy(Enum):
-    """Стратегии кэширования."""
+    """Caching strategies."""
 
     SIMPLE = "simple"
     LRU = "lru"
@@ -29,7 +29,7 @@ class CacheStrategy(Enum):
 
 
 class CompressionType(Enum):
-    """Типы сжатия данных."""
+    """Data compression types."""
 
     NONE = "none"
     GZIP = "gzip"
@@ -38,7 +38,7 @@ class CompressionType(Enum):
 
 @dataclass
 class CacheEntry:
-    """Запись в кэше."""
+    """Cache entry."""
 
     data: Any
     created_at: float
@@ -49,20 +49,20 @@ class CacheEntry:
     compression_type: str = "none"
 
     def is_expired(self) -> bool:
-        """Проверка истечения TTL."""
+        """Check TTL expiration."""
         if self.ttl is None:
             return False
         return (time.time() - self.created_at) > self.ttl
 
     def update_access(self):
-        """Обновление статистики доступа."""
+        """Update access statistics."""
         self.last_accessed = time.time()
         self.access_count += 1
 
 
 @dataclass
 class CacheStats:
-    """Статистика кэша."""
+    """Cache statistics."""
 
     hits: int = 0
     misses: int = 0
@@ -119,7 +119,7 @@ class CacheManager:
         self._stats = CacheStats()
         self._dirty = False
 
-        # TaskGroup для управления background tasks (Phase 3 Task A.2)
+        # TaskGroup для управления background tasks
         self._task_group: Optional[asyncio.TaskGroup] = None
         self._task_group_runner: Optional[asyncio.Task] = None
         self._shutdown = False
@@ -127,7 +127,7 @@ class CacheManager:
     async def start(self):
         """Запуск кэш-менеджера."""
         await self._load_cache()
-        # Start background tasks in TaskGroup (Phase 3 Task A.2)
+        # Start background tasks in TaskGroup
         self._task_group_runner = asyncio.create_task(self._run_background_tasks())
         # Backward compatibility: alias for older tests or code that expects _auto_save_task
         self._auto_save_task = self._task_group_runner
@@ -135,7 +135,7 @@ class CacheManager:
 
     async def _run_background_tasks(self):
         """
-        Запуск и управление background tasks в TaskGroup (Phase 3 Task A.2).
+        Запуск и управление background tasks в TaskGroup.
 
         TaskGroup автоматически:
         - Управляет жизненным циклом всех задач
@@ -571,7 +571,7 @@ class CacheManager:
         """Корректное завершение работы."""
         self._shutdown = True
 
-        # Остановка background tasks runner (Phase 3 Task A.2)
+        # Остановка background tasks runner
         # TaskGroup автоматически отменит все задачи при выходе
         if self._task_group_runner:
             if not self._task_group_runner.done():

@@ -6,9 +6,11 @@ Provides core export orchestration and processing capabilities with visual progr
 import asyncio
 import functools
 import inspect
+import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import aiofiles
 import aiohttp
@@ -35,19 +37,113 @@ from ..note_generator import NoteGenerator
 from ..telegram_client import TelegramManager
 from ..utils import is_voice_message, logger, sanitize_filename
 
+# ============================================================================
+# Configurable constants via environment variables
+# ============================================================================
+
+# Prefetch pipeline settings
+PREFETCH_BATCH_SIZE = int(os.getenv("PREFETCH_BATCH_SIZE", "100"))  # Telegram API max
+PREFETCH_LOOKAHEAD = int(os.getenv("PREFETCH_LOOKAHEAD", "2"))  # Double-buffering
+
+# LRU cache for sender names
+SENDER_CACHE_MAX_SIZE = int(os.getenv("SENDER_CACHE_SIZE", "10000"))
+
+# AsyncBufferedSaver buffer size (512KB default for better SSD performance)
+# For NVMe SSD: can increase to 1MB (1048576) for even better throughput
+# For HDD: 256KB (262144) may be more efficient
+EXPORT_BUFFER_SIZE = int(os.getenv("EXPORT_BUFFER_SIZE", "524288"))  # 512KB
+
+# Media file copy chunk size (8MB for large media files)
+# Larger chunks = fewer syscalls but more memory per operation
+MEDIA_COPY_CHUNK_SIZE = int(
+    os.getenv("MEDIA_COPY_CHUNK_SIZE", str(8 * 1024 * 1024))
+)  # 8MB
+
+
+from ..logging_context import set_batch_context, set_prefetch_context
+
+
+class BloomFilter:
+    """
+    Memory-efficient Bloom filter for approximate set membership testing.
+    Uses ~1.2MB for 1M items with 1% false positive rate.
+    """
+
+    def __init__(
+        self, expected_items: int = 1000000, false_positive_rate: float = 0.01
+    ):
+        """
+        Initialize Bloom filter.
+
+        Args:
+            expected_items: Expected number of items to store
+            false_positive_rate: Desired false positive rate (0.01 = 1%)
+        """
+        import math
+
+        # Calculate optimal parameters
+        self.size = int(
+            -expected_items * math.log(false_positive_rate) / (math.log(2) ** 2)
+        )
+        self.hash_count = int((self.size / expected_items) * math.log(2))
+
+        # Use bit array for memory efficiency
+        self.bit_array = bytearray((self.size + 7) // 8)  # 1 byte = 8 bits
+
+        # Statistics
+        self.items_added = 0
+
+    def _hash(self, item: int, seed: int) -> int:
+        """Simple hash function with seed."""
+        # Use Python's built-in hash with seed mixing
+        return hash((item, seed)) % self.size
+
+    def add(self, item: int):
+        """Add item to the filter."""
+        for i in range(self.hash_count):
+            bit_index = self._hash(item, i)
+            byte_index = bit_index // 8
+            bit_offset = bit_index % 8
+            self.bit_array[byte_index] |= 1 << bit_offset
+        self.items_added += 1
+
+    def __contains__(self, item: int) -> bool:
+        """Check if item might be in the filter (false positives possible)."""
+        for i in range(self.hash_count):
+            bit_index = self._hash(item, i)
+            byte_index = bit_index // 8
+            bit_offset = bit_index % 8
+            if not (self.bit_array[byte_index] & (1 << bit_offset)):
+                return False
+        return True
+
+    def memory_usage_mb(self) -> float:
+        """Get memory usage in MB."""
+        return len(self.bit_array) / (1024 * 1024)
+
+    def stats(self) -> Dict[str, any]:
+        """Get filter statistics."""
+        return {
+            "size_bits": self.size,
+            "hash_functions": self.hash_count,
+            "items_added": self.items_added,
+            "memory_mb": self.memory_usage_mb(),
+            "bits_per_item": self.size / max(self.items_added, 1),
+        }
+
 
 class TakeoutSessionWrapper:
     """
     Context manager for manual Takeout session management.
     Bypasses Telethon's client.takeout() to avoid client-side state conflicts.
-    
+
     This is a proper proxy that rebinds methods so that internal self() calls
     go through our __call__ which wraps requests in InvokeWithTakeoutRequest.
     Based on Telethon's _TakeoutClient implementation.
     """
-    
+
     # Methods that should NOT be proxied to avoid infinite recursion
-    __PROXY_INTERFACE = ('__enter__', '__exit__', '__aenter__', '__aexit__')
+    __PROXY_INTERFACE = ("__enter__", "__exit__", "__aenter__", "__aexit__")
 
     def __init__(self, client, config):
         # Use name mangling to avoid conflicts with proxied attributes
@@ -59,7 +155,7 @@ class TakeoutSessionWrapper:
     @property
     def takeout_id(self):
         return self.__takeout_id
-    
+
     @takeout_id.setter
     def takeout_id(self, value):
         self.__takeout_id = value
@@ -118,13 +214,12 @@ class TakeoutSessionWrapper:
         This is called by Telethon methods internally when they do self(request).
         """
         if self.__takeout_id is None:
-            raise ValueError('Takeout mode has not been initialized '
-                '(are you calling outside of "with"?)')
-        
-        wrapped = InvokeWithTakeoutRequest(
-            takeout_id=self.__takeout_id,
-            query=request
-        )
+            raise ValueError(
+                "Takeout mode has not been initialized "
+                '(are you calling outside of "with"?)'
+            )
+
+        wrapped = InvokeWithTakeoutRequest(takeout_id=self.__takeout_id, query=request)
         return await self.__client(wrapped, ordered=ordered)
 
     def __getattribute__(self, name):
@@ -133,9 +228,9 @@ class TakeoutSessionWrapper:
         Based on Telethon's _TakeoutClient implementation.
         """
         # Access class via type() to avoid infinite recursion
-        if name.startswith('__') and name not in type(self).__PROXY_INTERFACE:
+        if name.startswith("__") and name not in type(self).__PROXY_INTERFACE:
             raise AttributeError  # Force call of __getattr__
-        
+
         # Try to access attribute in the proxy object first
         return super().__getattribute__(name)
 
@@ -150,15 +245,13 @@ class TakeoutSessionWrapper:
         if inspect.ismethod(value):
             # Rebind the method: get the unbound function from the class,
             # then partially apply our proxy as 'self'
-            return functools.partial(
-                getattr(self.__client.__class__, name), self
-            )
+            return functools.partial(getattr(self.__client.__class__, name), self)
         return value
 
     def __setattr__(self, name, value):
         """Handle attribute setting with proper name mangling."""
         # Check if this is our own name-mangled attribute
-        if name.startswith('_{}__'.format(type(self).__name__.lstrip('_'))):
+        if name.startswith("_{}__".format(type(self).__name__.lstrip("_"))):
             return super().__setattr__(name, value)
         # Otherwise, set on the underlying client
         return setattr(self.__client, name, value)
@@ -168,11 +261,14 @@ class AsyncBufferedSaver:
     """
     Buffered file writer that accumulates writes to reduce I/O syscalls and thread context switches.
     Wraps aiofiles to provide a similar interface but with internal buffering.
+
+    Buffer size is configurable via EXPORT_BUFFER_SIZE env var (default: 512KB).
+    Larger buffers reduce syscalls but use more memory.
     """
 
     def __init__(
-        self, path, mode="w", encoding="utf-8", buffer_size=131072
-    ):  # 128KB buffer
+        self, path, mode="w", encoding="utf-8", buffer_size=EXPORT_BUFFER_SIZE
+    ):
         self.path = path
         self.mode = mode
         self.encoding = encoding
@@ -198,10 +294,7 @@ class AsyncBufferedSaver:
 
     async def flush(self):
         if not self._buffer:
-            # Even if buffer is empty, we might want to flush the underlying file
-            if self._file:
-                await self._file.flush()
-            return
+            return  # Nothing to flush
 
         content = "".join(self._buffer)
         self._buffer = []
@@ -235,11 +328,19 @@ class EntityCacheData:
     total_messages: int = 0
     processed_messages: int = 0
     last_message_id: Optional[int] = None
-    processed_message_ids: Set[int] = field(default_factory=set)
+    processed_message_ids: BloomFilter = field(default_factory=lambda: BloomFilter())
 
 
 class ExportStatistics:
-    """Statistics tracking for export operations."""
+    """
+    Statistics tracking for export operations.
+
+    Tracks separate durations for each operation:
+    - messages_export_duration: Time spent fetching and writing messages
+    - media_download_duration: Time spent downloading media files
+    - transcription_duration: Time spent on audio transcription
+    - total_duration: Overall wall-clock time (via duration property)
+    """
 
     def __init__(self):
         self.start_time = time.time()
@@ -253,9 +354,49 @@ class ExportStatistics:
         self.avg_cpu_percent = 0.0
         self.peak_memory_mb = 0.0
 
+        # Operation durations (in seconds)
+        self.messages_export_duration: float = 0.0
+        self.media_download_duration: float = 0.0
+        self.transcription_duration: float = 0.0
+
+        # Start times (for tracking)
+        self._messages_start: Optional[float] = None
+        self._media_start: Optional[float] = None
+        self._transcription_start: Optional[float] = None
+
+    def start_messages_phase(self):
+        """Mark start of message export."""
+        self._messages_start = time.time()
+
+    def end_messages_phase(self):
+        """Mark end of message export."""
+        if self._messages_start:
+            self.messages_export_duration = time.time() - self._messages_start
+            self._messages_start = None
+
+    def start_media_phase(self):
+        """Mark start of media download."""
+        self._media_start = time.time()
+
+    def end_media_phase(self):
+        """Mark end of media download."""
+        if self._media_start:
+            self.media_download_duration = time.time() - self._media_start
+            self._media_start = None
+
+    def start_transcription_phase(self):
+        """Mark start of transcription."""
+        self._transcription_start = time.time()
+
+    def end_transcription_phase(self):
+        """Mark end of transcription."""
+        if self._transcription_start:
+            self.transcription_duration = time.time() - self._transcription_start
+            self._transcription_start = None
+
     @property
     def duration(self) -> float:
-        """Get duration in seconds."""
+        """Get total duration in seconds."""
         end = self.end_time or time.time()
         return end - self.start_time
 
@@ -265,6 +406,32 @@ class ExportStatistics:
         if self.duration > 0:
             return (self.messages_processed / self.duration) * 60
         return 0.0
+
+    @property
+    def messages_per_second(self) -> float:
+        """Calculate messages per second rate (based on messages export only)."""
+        if self.messages_export_duration > 0:
+            return self.messages_processed / self.messages_export_duration
+        elif self.duration > 0:
+            return self.messages_processed / self.duration
+        return 0.0
+
+    def get_phase_breakdown(self) -> Dict[str, float]:
+        """Get breakdown of time spent in each phase."""
+        total = self.duration
+        return {
+            "messages_export": self.messages_export_duration,
+            "media_download": self.media_download_duration,
+            "transcription": self.transcription_duration,
+            "other": max(
+                0,
+                total
+                - self.messages_export_duration
+                - self.media_download_duration
+                - self.transcription_duration,
+            ),
+            "total": total,
+        }
 
 
 class Exporter:
@@ -285,6 +452,7 @@ class Exporter:
     ):
         self.config = config
         self.telegram_manager = telegram_manager
+
         self.cache_manager = cache_manager
         self.media_processor = media_processor
         self.note_generator = note_generator
@@ -294,10 +462,11 @@ class Exporter:
         self._shutdown_requested = False
         self.progress = None  # Progress bar instance
 
-        # 🚀 Medium Win 3: Sender name cache
+        # Sender name cache with string interning
         self._sender_name_cache: Dict[int, str] = {}
+        self._interned_strings: Set[str] = set()  # Track interned strings
 
-        # 🚀 Medium Win 2: Prefetch pipeline
+        # Prefetch pipeline
         self._prefetch_task = None
         self._prefetch_result = None
         self._prefetch_stats = {"hits": 0, "misses": 0}
@@ -307,6 +476,85 @@ class Exporter:
             base_monitoring_path=self.config.export_path,
             performance_monitor=self.performance_monitor,
         )
+
+        # Batch cache operations to reduce I/O
+        self._pending_cache_updates: Dict[str, Any] = {}
+        self._cache_batch_size = 10  # Flush every 10 updates
+
+        # Time-based progress updates
+        self._last_progress_update = 0.0
+        self._progress_update_interval = 0.5  # Update progress every 0.5 seconds
+
+        # Lazy logging to reduce overhead
+        self._log_batch: Dict[str, int] = {}  # Message -> count
+        self._last_log_flush = 0.0
+        self._log_batch_interval = 2.0  # Flush logs every 2 seconds
+
+    def _intern_string(self, s: str) -> str:
+        """Intern string to reduce memory usage for repeated strings."""
+        if s in self._interned_strings:
+            return s
+        self._interned_strings.add(s)
+        return sys.intern(s)
+
+    def _lazy_log(self, level: str, message: str):
+        """Batch similar log messages to reduce overhead."""
+        # For critical messages, log immediately
+        if level in ["ERROR", "CRITICAL"]:
+            logger.error(message) if level == "ERROR" else logger.critical(message)
+            return
+
+        # Batch info/debug messages
+        key = f"{level}:{message}"
+        self._log_batch[key] = self._log_batch.get(key, 0) + 1
+
+        # Flush batch periodically
+        current_time = time.time()
+        if current_time - self._last_log_flush >= self._log_batch_interval:
+            self._flush_log_batch()
+            self._last_log_flush = current_time
+
+    def _flush_log_batch(self):
+        """Flush batched log messages."""
+        for key, count in self._log_batch.items():
+            level, message = key.split(":", 1)
+            if count > 1:
+                message = f"{message} (×{count})"
+
+            if level == "INFO":
+                logger.info(message)
+            elif level == "DEBUG":
+                logger.debug(message)
+            elif level == "WARNING":
+                logger.warning(message)
+
+        self._log_batch.clear()
+        """Intern string to reduce memory usage for repeated strings."""
+        if s in self._interned_strings:
+            return s
+        self._interned_strings.add(s)
+        return sys.intern(s)
+
+    async def _batch_cache_set(self, key: str, value: Any):
+        """Add cache update to batch queue."""
+        self._pending_cache_updates[key] = value
+        if len(self._pending_cache_updates) >= self._cache_batch_size:
+            await self._flush_cache_batch()
+
+    async def _flush_cache_batch(self):
+        """Flush all pending cache updates in a single batch."""
+        if not self._pending_cache_updates:
+            return
+
+        try:
+            # Batch all updates
+            for key, value in self._pending_cache_updates.items():
+                await self.cache_manager.set(key, value)
+            self._pending_cache_updates.clear()
+        except Exception as e:
+            logger.warning(f"Failed to flush cache batch: {e}")
+            # Clear on error to avoid infinite retries
+            self._pending_cache_updates.clear()
 
     async def initialize(self):
         """Initialize exporter and all components."""
@@ -343,7 +591,7 @@ class Exporter:
             # Reset statistics
             self.statistics = ExportStatistics()
 
-            # 🚀 Medium Win 3: Clear caches
+            # Clear caches
             self._sender_name_cache.clear()
             self._prefetch_stats = {"hits": 0, "misses": 0}
             if self._prefetch_task and not self._prefetch_task.done():
@@ -389,7 +637,7 @@ class Exporter:
     async def _process_message_parallel(
         self, message, target, media_dir, output_dir, entity_reporter
     ):
-        """Process a single message in parallel (MW3)."""
+        """Process a single message in parallel (optimized for memory efficiency)."""
         try:
             # Get sender name
             sender_name = await self._get_sender_name(message)
@@ -397,11 +645,12 @@ class Exporter:
             # Format timestamp
             timestamp = self._format_timestamp(message.date)
 
-            content = []
-            content.append(f"{sender_name}, [{timestamp}]\n")
+            # Use list-based string building for better performance
+            content_parts = []
+            content_parts.append(f"{sender_name}, [{timestamp}]\n")
 
             if message.text:
-                content.append(f"{message.text}\n")
+                content_parts.append(f"{message.text}\n")
 
             local_media_count = 0
 
@@ -430,7 +679,7 @@ class Exporter:
                         for media_path in media_paths:
                             try:
                                 relative_path = media_path.relative_to(output_dir)
-                                content.append(f"![[{relative_path}]]\n")
+                                content_parts.append(f"![[{relative_path}]]\n")
 
                                 # Transcription
                                 if (
@@ -444,34 +693,37 @@ class Exporter:
                                             )
                                         )
                                         if transcription:
-                                            content.append(
+                                            content_parts.append(
                                                 f"**Расшифровка:** {transcription}\n"
                                             )
                                     except Exception:
                                         pass
                             except ValueError:
-                                content.append(f"![[{media_path.name}]]\n")
+                                content_parts.append(f"![[{media_path.name}]]\n")
                     else:
-                        content.append("[[No files downloaded]]\n")
+                        content_parts.append("[[No files downloaded]]\n")
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to process media for message {message.id}: {e}"
+                    self._lazy_log(
+                        "WARNING",
+                        f"Failed to process media for message {message.id}: {e}",
                     )
-                    content.append("[[Failed to download]]\n")
+                    content_parts.append("[[Failed to download]]\n")
             elif message.media:
                 media_type = self._get_media_type_name(message.media)
-                content.append(f"[{media_type}]\n")
+                content_parts.append(f"[{media_type}]\n")
 
-            content.append("\n")
+            content_parts.append("\n")
+
+            # Join all parts at once for better performance
             return (
-                "".join(content),
+                "".join(content_parts),
                 message.id,
                 bool(message.media),
                 local_media_count,
             )
 
         except Exception as e:
-            logger.error(f"Error processing message {message.id}: {e}")
+            self._lazy_log("ERROR", f"Error processing message {message.id}: {e}")
             return "", message.id, False, 0
 
     async def _export_regular_target(
@@ -493,12 +745,9 @@ class Exporter:
             # Handle dict restoration (from JSON cache)
             if isinstance(entity_data, dict):
                 try:
-                    if "processed_message_ids" in entity_data and isinstance(
-                        entity_data["processed_message_ids"], list
-                    ):
-                        entity_data["processed_message_ids"] = set(
-                            entity_data["processed_message_ids"]
-                        )
+                    # Remove processed_message_ids from dict since we can't restore BloomFilter
+                    # It will be recreated as new BloomFilter
+                    entity_data.pop("processed_message_ids", None)
                     entity_data = EntityCacheData(**entity_data)
                 except Exception as e:
                     logger.warning(f"Failed to restore EntityCacheData from dict: {e}")
@@ -526,7 +775,7 @@ class Exporter:
 
             # Prepare export settings for monitoring
             export_settings = {
-                "sharding_enabled": self.config.sharding_enabled,
+                "sharding_enabled": self.config.enable_shard_fetch,
                 "shard_count": self.config.shard_count,
                 "use_takeout": self.config.use_takeout,
                 "performance_profile": self.config.performance_profile,
@@ -538,10 +787,6 @@ class Exporter:
             # Update entity info
             entity_data.entity_name = entity_name
 
-            # Debug logging for paths
-            logger.info(f"🔍 Export paths for {entity_name} (ID: {target.id}):")
-            logger.info(f"  📁 Output dir: {output_dir}")
-            logger.info(f"  📁 Media dir: {media_dir}")
             logger.info(f"  ⚙️  Structured export: {self.config.use_structured_export}")
 
             await asyncio.to_thread(output_dir.mkdir, parents=True, exist_ok=True)
@@ -559,9 +804,10 @@ class Exporter:
 
             logger.info(f"  📄 Chat file: {chat_file}")
 
-            # Initialize counters
-            message_count = 0
+            # Initialize counters (defined here so they're accessible in exception handler)
+            processed_count = 0
             media_count = 0
+            periodic_saves_count = 0
 
             # Create media subdirectory if needed
             media_dir = output_dir / "media"
@@ -582,7 +828,7 @@ class Exporter:
                     f"[cyan]Exporting {entity_name}...", total=None, messages=0, media=0
                 )
 
-                # Open chat file for writing (using AsyncBufferedSaver for optimized I/O)
+                # Open chat file for writing (using AsyncBufferedSaver for I/O)
                 async with AsyncBufferedSaver(chat_file, "w", encoding="utf-8") as f:
                     # Write chat header
                     await f.write(f"# Chat Export: {entity_name}\n\n")
@@ -593,90 +839,31 @@ class Exporter:
                     # Single-pass streaming: process messages as they arrive
                     logger.info(f"📊 Starting streaming export for {entity_name}...")
 
-                    # Initialize loop state
-                    current_min_id = 0
-                    consecutive_flood_waits = 0
-                    max_retries = 10
-                    adaptive_delay = self.config.request_delay  # 🚀 Start with configured delay
-
-                    # Initial fetch task (MW2: Prefetch)
-                    fetch_task = asyncio.create_task(
-                        self._fetch_messages_batch(entity, current_min_id)
+                    # 🚀 Use telegram_manager.fetch_messages() - it handles sharding if enabled
+                    # This replaces the old manual batch loop with the intelligent generator
+                    batch = []
+                    batch_size = (
+                        100  # Group messages into batches for efficient processing
                     )
 
-                    while True:
-                        try:
-                            # Await the batch
-                            batch = await fetch_task
-                            consecutive_flood_waits = 0  # Reset on success
-                            
-                            # 🚀 Adaptive delay: decrease delay on success (minimum 0)
-                            if adaptive_delay > 0:
-                                adaptive_delay = max(0.0, adaptive_delay - 0.1)
+                    fetched_count = (
+                        0  # Count of messages fetched from generator (for debugging)
+                    )
+                    # processed_count and media_count already initialized above
 
-                        except FloodWaitError as e:
-                            # Handle FloodWait
-                            consecutive_flood_waits += 1
-                            if consecutive_flood_waits > max_retries:
-                                logger.error("Max retries reached for FloodWait")
-                                break
+                    async for message in self.telegram_manager.fetch_messages(
+                        entity,
+                        limit=None,  # Export all messages
+                    ):
+                        fetched_count += 1
 
-                            wait_time = e.seconds
-                            backoff = min(consecutive_flood_waits * 5, 60)
-                            total_wait = wait_time + backoff
-                            
-                            # 🚀 Adaptive delay: increase delay after FloodWait
-                            adaptive_delay = min(adaptive_delay + 0.5, 3.0)
-                            logger.info(f"📈 Adaptive delay increased to {adaptive_delay:.1f}s")
+                        batch.append(message)
 
-                            logger.warning(
-                                f"FloodWait: {wait_time}s (+{backoff}s buffer). Retry {consecutive_flood_waits}/{max_retries}"
-                            )
-
-                            # Flush file (Fix)
-                            try:
-                                await f.flush()
-                                logger.debug("📁 File flushed before FloodWait sleep")
-                            except Exception as flush_error:
-                                logger.warning(
-                                    f"Failed to flush file before FloodWait: {flush_error}"
-                                )
-
-                            # Update progress
-                            progress.update(
-                                task_id_progress,
-                                description=f"[yellow]⏳ FloodWait: {total_wait}s[/yellow]",
-                            )
-                            await asyncio.sleep(total_wait)
-                            progress.update(
-                                task_id_progress,
-                                description=f"[cyan]Exporting {entity_name}...[/cyan]",
-                            )
-
-                            # Retry fetching same batch
-                            fetch_task = asyncio.create_task(
-                                self._fetch_messages_batch(entity, current_min_id)
-                            )
+                        # Process batch when it reaches target size
+                        if len(batch) < batch_size:
                             continue
 
-                        except Exception as e:
-                            logger.error(f"Error fetching batch: {e}")
-                            break
-
-                        if not batch:
-                            break
-
-                        # Start next fetch immediately (MW2)
-                        last_msg_id = batch[-1].id
-
-                        # 🚀 Adaptive rate limiting
-                        if adaptive_delay > 0:
-                            await asyncio.sleep(adaptive_delay)
-
-                        fetch_task = asyncio.create_task(
-                            self._fetch_messages_batch(entity, last_msg_id)
-                        )
-
+                        # --- BATCH PROCESSING ---
                         # Process batch in parallel (MW3)
                         tasks = [
                             self._process_message_parallel(
@@ -686,84 +873,154 @@ class Exporter:
                             if (msg.text or msg.media)  # Filter empty
                         ]
 
-                        if not tasks:
-                            current_min_id = last_msg_id
-                            continue
+                        if tasks:
+                            results = await asyncio.gather(*tasks)
 
-                        results = await asyncio.gather(*tasks)
+                            # Write results sequentially
+                            for content, msg_id, has_media, media_cnt in results:
+                                if not content:
+                                    continue  # Skip failed
 
-                        # Write results sequentially
-                        for content, msg_id, has_media, media_cnt in results:
-                            if not content:
-                                continue  # Skip failed
+                                await f.write(content)
 
-                            await f.write(content)
+                                # Update stats (only count successfully processed messages)
+                                processed_count += 1
+                                media_count += media_cnt
+                                self.statistics.messages_processed += 1
+                                self.statistics.media_downloaded += media_cnt
 
-                            # Update stats
-                            message_count += 1
-                            media_count += media_cnt
-                            self.statistics.messages_processed += 1
-                            self.statistics.media_downloaded += media_cnt
-
-                            # Update entity data
-                            entity_data.processed_message_ids.add(msg_id)
-                            entity_data.last_message_id = msg_id
-                            entity_reporter.record_message_processed(
-                                msg_id, has_media=has_media
-                            )
-
-                        # Periodic save
-                        if message_count % 100 == 0:
-                            try:
-                                await self.cache_manager.set(cache_key, entity_data)
-                                entity_reporter.save_metrics()
-                                logger.info(
-                                    f"💾 Periodic save: {message_count} messages processed for {entity_name}"
-                                )
-                            except Exception as save_error:
-                                logger.warning(
-                                    f"Failed periodic save at message {message_count}: {save_error}"
+                                # Update entity data
+                                entity_data.processed_message_ids.add(msg_id)
+                                entity_data.last_message_id = msg_id
+                                entity_reporter.record_message_processed(
+                                    msg_id, has_media=has_media
                                 )
 
-                        # Update progress bar
-                        progress.update(
-                            task_id_progress, messages=message_count, media=media_count
-                        )
+                            # Periodic save
+                            if processed_count % 100 == 0:
+                                try:
+                                    save_start = time.time()
 
-                        # Also update progress queue if provided
-                        if progress_queue:
-                            await progress_queue.put(
-                                {
-                                    "task_id": task_id,
-                                    "progress": message_count,
-                                    "total": None,
-                                    "status": f"Processed {message_count} messages",
-                                }
+                                    # Batch cache update instead of immediate save
+                                    await self._batch_cache_set(cache_key, entity_data)
+                                    cache_time = time.time() - save_start
+
+                                    reporter_start = time.time()
+                                    entity_reporter.save_metrics()
+                                    reporter_time = time.time() - reporter_start
+
+                                    total_save_time = time.time() - save_start
+
+                                    if total_save_time > 1.0:  # Log slow saves (>1s)
+                                        logger.warning(
+                                            f"⚠️ Slow periodic save at {processed_count} messages: "
+                                            f"cache {cache_time:.2f}s, reporter {reporter_time:.2f}s, "
+                                            f"total {total_save_time:.2f}s"
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"💾 Periodic save: {processed_count} messages processed for {entity_name}"
+                                        )
+                                except Exception as save_error:
+                                    logger.warning(
+                                        f"Failed periodic save at message {processed_count}: {save_error}"
+                                    )
+
+                            # Update progress bar with processed count (time-based)
+                            current_time = time.time()
+                            if (
+                                current_time - self._last_progress_update
+                                >= self._progress_update_interval
+                            ):
+                                progress.update(
+                                    task_id_progress,
+                                    messages=processed_count,
+                                    media=media_count,
+                                )
+                                self._last_progress_update = current_time
+
+                                # Also update progress queue if provided
+                                if progress_queue:
+                                    await progress_queue.put(
+                                        {
+                                            "task_id": task_id,
+                                            "progress": processed_count,
+                                            "total": None,
+                                            "status": f"Processed {processed_count} messages",
+                                        }
+                                    )
+
+                        # Clear batch for next iteration
+                        batch.clear()
+
+                    # Process remaining messages in batch
+                    if batch:
+                        tasks = [
+                            self._process_message_parallel(
+                                msg, target, media_dir, output_dir, entity_reporter
                             )
+                            for msg in batch
+                            if (msg.text or msg.media)
+                        ]
 
-                        # Update loop variable
-                        current_min_id = last_msg_id
+                        if tasks:
+                            results = await asyncio.gather(*tasks)
+
+                            for content, msg_id, has_media, media_cnt in results:
+                                if not content:
+                                    continue
+
+                                await f.write(content)
+
+                                processed_count += 1
+                                media_count += media_cnt
+                                self.statistics.messages_processed += 1
+                                self.statistics.media_downloaded += media_cnt
+
+                                entity_data.processed_message_ids.add(msg_id)
+                                entity_data.last_message_id = msg_id
+                                entity_reporter.record_message_processed(
+                                    msg_id, has_media=has_media
+                                )
+
+                            # Final update
+                            progress.update(
+                                task_id_progress,
+                                messages=processed_count,
+                                media=media_count,
+                            )
 
             # Update total messages count in file
-            await self._update_message_count(chat_file, message_count)
+            await self._update_message_count(chat_file, processed_count)
             self.statistics.notes_created = 1  # One file created
 
             logger.info(
-                f"✅ Export completed: {message_count} messages, {media_count} media files"
+                f"✅ Export completed: {processed_count} messages, {media_count} media files"
             )
 
             # Calculate periodic saves count
-            periodic_saves_count = message_count // 100
+            periodic_saves_count = processed_count // 100
 
             # Save final entity state and monitoring data
             try:
+                # Flush any remaining cache updates
+                await self._flush_cache_batch()
+                # Final cache save
                 await self.cache_manager.set(cache_key, entity_data)
+
+                # Set total_messages and processed_messages in metrics before finishing
+                entity_reporter.metrics.total_messages = processed_count
+                entity_reporter.metrics.processed_messages = processed_count
+                entity_reporter.metrics.total_media_files = media_count
 
                 # Collect worker stats if available
                 if hasattr(self.telegram_manager, "get_worker_stats"):
                     worker_stats = self.telegram_manager.get_worker_stats()
                     if worker_stats:
-                        entity_reporter.metrics.worker_stats = worker_stats.copy()
+                        # Convert integer keys to strings for JSON serialization
+                        entity_reporter.metrics.worker_stats = {
+                            str(k): v for k, v in worker_stats.items()
+                        }
                         logger.info(
                             f"📊 Collected stats from {len(worker_stats)} workers"
                         )
@@ -778,7 +1035,7 @@ class Exporter:
                 self.statistics.peak_memory_mb = entity_reporter.metrics.peak_memory_mb
 
                 logger.info(f"Final save completed for {entity_name}")
-                logger.info(f"  📊 Total messages: {message_count}")
+                logger.info(f"  📊 Total messages: {processed_count}")
                 logger.info(f"  🎬 Media files: {media_count}")
                 logger.info(f"  💾 Periodic saves: {periodic_saves_count}")
                 logger.info(f"  📂 Export location: {output_dir}")
@@ -798,14 +1055,21 @@ class Exporter:
             # Try to save cache/monitoring even on failure
             try:
                 await self.cache_manager.set(cache_key, entity_data)
+
+                # Set metrics even on failure for emergency save
+                entity_reporter.metrics.total_messages = processed_count
+                entity_reporter.metrics.processed_messages = processed_count
+                entity_reporter.metrics.total_media_files = media_count
+
                 entity_reporter.finish_export()
                 entity_reporter.save_report()
 
-                periodic_saves_count = message_count // 100
                 logger.info(
                     f"Emergency save completed for {entity_name} after export failure"
                 )
-                logger.info(f"  📊 Messages processed before failure: {message_count}")
+                logger.info(
+                    f"  📊 Messages processed before failure: {processed_count}"
+                )
                 logger.info(f"  💾 Periodic saves completed: {periodic_saves_count}")
                 logger.info(
                     f"  📈 Emergency monitoring saved to: {monitoring_dir}/monitoring_{target.id}.json"
@@ -821,11 +1085,11 @@ class Exporter:
         return self.statistics
 
     async def _get_sender_name(self, message) -> str:
-        """Get formatted sender name for message with caching."""
+        """Get formatted sender name for message with caching and string interning."""
         try:
             sender_id = message.sender_id
             if not sender_id:
-                return "Unknown User"
+                return self._intern_string("Unknown User")
 
             # Check cache first
             if sender_id in self._sender_name_cache:
@@ -847,18 +1111,22 @@ class Exporter:
                 else:
                     name = f"User {sender_id}"
 
-                # Cache the result
-                self._sender_name_cache[sender_id] = name
-                return name
+                # Intern and cache the result
+                interned_name = self._intern_string(name)
+                self._sender_name_cache[sender_id] = interned_name
+                return interned_name
             else:
-                return f"User {sender_id}"
+                return self._intern_string(f"User {sender_id}")
         except Exception:
-            return "Unknown User"
+            return self._intern_string("Unknown User")
 
     def _format_timestamp(self, dt) -> str:
-        """Format datetime in Telegram export format (optimized)."""
+        """Format datetime in Telegram export format (optimized with interning)."""
         # f-string is faster than strftime
-        return f"{dt.day:02d}.{dt.month:02d}.{dt.year} {dt.hour:02d}:{dt.minute:02d}"
+        timestamp_str = (
+            f"{dt.day:02d}.{dt.month:02d}.{dt.year} {dt.hour:02d}:{dt.minute:02d}"
+        )
+        return self._intern_string(timestamp_str)
 
     def _get_current_datetime(self) -> str:
         """Get current datetime formatted."""
@@ -1041,7 +1309,7 @@ async def run_export(
         # Initialize all components
         await exporter.initialize()
 
-        # 🚀 High Win: Takeout API Integration
+        # Takeout API Integration
         if config.use_takeout:
             # 1. Check if we are already in a Takeout session (Reuse Strategy)
             current_client = telegram_manager.client
@@ -1103,8 +1371,6 @@ async def run_export(
 
                     # Pass the ID to the manager so shards can reuse it
                     takeout_id = takeout_client.takeout_id
-
-                    logger.info(f"DEBUG: Extracted Takeout ID: {takeout_id}")
 
                     # Force set the attribute on the manager
                     setattr(telegram_manager, "_external_takeout_id", takeout_id)

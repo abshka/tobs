@@ -49,11 +49,13 @@ class ExportMetrics:
     errors: List[Dict[str, Any]] = field(default_factory=list)
     warnings: List[Dict[str, Any]] = field(default_factory=list)
 
-    # Worker stats (for sharded export)
-    worker_stats: Dict[int, Dict[str, int]] = field(default_factory=dict)
-
     # Настройки экспорта
     export_settings: Dict[str, Any] = field(default_factory=dict)
+
+    # Статистика воркеров (для шардированного экспорта)
+    # Keys are stringified worker indices for JSON compatibility
+    # Values include: messages, flood_waits, requests, total_latency_ms, io_time_ms
+    worker_stats: Optional[Dict[str, Dict[str, int]]] = None
 
 
 @dataclass

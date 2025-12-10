@@ -123,7 +123,7 @@ class MediaProcessor:
         self._total_processing_time = 0.0
         self._bytes_processed = 0
 
-        # ⚠️ Обработка ошибок (Phase 2 Task 2.3)
+        # Обработка ошибок
         self._failed_tasks = 0  # Счётчик неудачных задач
         self._worker_errors: Dict[str, List[str]] = {}  # Ошибки по воркеру
         self._failed_items_log: List[
@@ -172,7 +172,9 @@ class MediaProcessor:
                     max_queue_size=1000,
                 )
                 await self._download_queue.start()
-                logger.info(f"🚀 Background download queue started with {workers} workers")
+                logger.info(
+                    f"🚀 Background download queue started with {workers} workers"
+                )
 
             # Инициализация процессоров
             self._video_processor = VideoProcessor(
@@ -211,7 +213,12 @@ class MediaProcessor:
                         f"compute_type={transcription_config.compute_type}"
                     )
 
-                    # Create transcriber
+                    # Create transcriber with cache_dir from config
+                    cache_dir = None
+                    if transcription_config.cache_dir:
+                        from pathlib import Path
+                        cache_dir = Path(transcription_config.cache_dir)
+
                     self._transcriber = WhisperTranscriber(
                         device=transcription_config.device,
                         compute_type=transcription_config.compute_type,
@@ -219,6 +226,7 @@ class MediaProcessor:
                         duration_threshold=transcription_config.duration_threshold,
                         use_batched=transcription_config.use_batched,
                         enable_cache=transcription_config.cache_enabled,
+                        cache_dir=cache_dir,
                     )
 
                     # Lazy loading: model will be loaded on first transcription request
@@ -355,28 +363,28 @@ class MediaProcessor:
     ) -> List[Path]:
         """
         Queue media downloads to background workers.
-        
+
         Returns placeholder paths immediately - actual files will be downloaded
         by background workers.
         """
         result_paths = []
-        
+
         for media_type, msg in media_items:
             try:
                 # Check if file already exists
                 if not hasattr(msg, "file") or not msg.file:
                     continue
-                    
+
                 # Generate filename
                 filename = await self._generate_filename(msg, media_type)
                 if not filename:
                     continue
-                
+
                 # Output path
                 type_subdir = entity_media_path / media_type
                 await aiofiles.os.makedirs(type_subdir, exist_ok=True)
                 output_path = type_subdir / filename
-                
+
                 # Skip if file already exists with correct size
                 if output_path.exists():
                     expected_size = getattr(msg.file, "size", 0)
@@ -388,7 +396,7 @@ class MediaProcessor:
                             continue
                     except Exception:
                         pass
-                
+
                 # Check cache
                 if self.enable_smart_caching:
                     cached_path = await self._cache.check_cache(msg.id, output_path)
@@ -396,7 +404,7 @@ class MediaProcessor:
                         self._cache_hits += 1
                         result_paths.append(cached_path)
                         continue
-                
+
                 # Queue for background download
                 await self._download_queue.enqueue(
                     message=msg,
@@ -404,13 +412,13 @@ class MediaProcessor:
                     output_path=output_path,
                     media_type=media_type,
                 )
-                
+
                 # Return the expected output path (file will appear later)
                 result_paths.append(output_path)
-                
+
             except Exception as e:
                 logger.warning(f"Failed to queue media download: {e}")
-        
+
         return result_paths
 
     async def _extract_media_from_message(
@@ -485,7 +493,7 @@ class MediaProcessor:
         elif media_type == "MessageMediaDocument":
             if hasattr(media, "document") and media.document:
                 doc = media.document
-                
+
                 # Check for sticker attribute first (stickers have image/* mime but are "other")
                 if hasattr(doc, "attributes") and doc.attributes:
                     for attr in doc.attributes:
@@ -494,7 +502,7 @@ class MediaProcessor:
                             return "sticker"  # Stickers go to "other" category
                         elif attr_name == "DocumentAttributeAnimated":
                             return "sticker"  # Animated stickers too
-                
+
                 mime_type = getattr(doc, "mime_type", "")
                 if mime_type.startswith("video/"):
                     return "video"
@@ -787,7 +795,7 @@ class MediaProcessor:
         error_type: str = "task",
     ):
         """
-        Централизованная обработка ошибок воркера (Phase 2 Task 2.3).
+        Централизованная обработка ошибок воркера.
 
         Args:
             worker_name: Имя воркера
@@ -839,7 +847,7 @@ class MediaProcessor:
 
     async def _processing_worker(self, worker_name: str):
         """
-        Фоновый воркер для обработки медиа (Phase 2 Task 2.3: Enhanced error handling).
+        Фоновый воркер для обработки медиа.
         """
         logger.debug(f"Processing worker {worker_name} started")
 
@@ -1064,88 +1072,114 @@ class MediaProcessor:
             return False
 
     async def wait_for_downloads(
-        self, timeout: Optional[float] = None, show_progress: bool = True
+        self,
+        timeout: Optional[float] = None,
+        show_progress: bool = True,
+        export_start_time: Optional[float] = None,
     ) -> bool:
         """
         Wait for all background downloads to complete with optional progress bar.
-        
+
         Args:
             timeout: Maximum time to wait (None = wait forever)
             show_progress: Whether to display a progress bar
-            
+            export_start_time: Start time of export (for accurate elapsed time display)
+
         Returns:
             True if all downloads completed, False if timeout
         """
         if not self._download_queue:
             return True
-        
+
         # Get initial stats to check if there's anything to wait for
         initial_info = self._download_queue.get_progress_info()
         if initial_info["pending"] == 0 and initial_info["in_progress"] == 0:
             logger.info("✅ No pending downloads")
             return True
-            
+
         logger.info("⏳ Waiting for background downloads to complete...")
-        
+
         if show_progress:
-            result = await self._wait_for_downloads_with_progress(timeout)
+            result = await self._wait_for_downloads_with_progress(
+                timeout, export_start_time=export_start_time
+            )
         else:
             result = await self._download_queue.wait_all(timeout=timeout)
-        
+
         if result:
             self._download_queue.log_stats()
             logger.info("✅ All downloads completed")
         else:
             self._download_queue.log_stats()
             logger.warning("⚠️ Download wait timed out")
-            
+
         return result
 
     async def _wait_for_downloads_with_progress(
-        self, timeout: Optional[float] = None
+        self, timeout: Optional[float] = None, export_start_time: Optional[float] = None
     ) -> bool:
         """
         Wait for downloads with a Rich progress bar.
-        
+
         Args:
             timeout: Maximum time to wait
-            
+            export_start_time: Start time of export (for accurate elapsed time display)
+
         Returns:
             True if all completed, False if timeout
         """
+        from datetime import timedelta
+
         from rich.progress import (
-            Progress,
             BarColumn,
-            TextColumn,
-            TimeElapsedColumn,
+            Progress,
+            ProgressColumn,
             SpinnerColumn,
+            Task,
             TaskProgressColumn,
+            TextColumn,
         )
-        
+        from rich.text import Text
+
+        # Custom column to show time since export start
+        class ExportElapsedColumn(ProgressColumn):
+            """Shows elapsed time since export started."""
+
+            def __init__(self, export_start: float):
+                super().__init__()
+                self.export_start = export_start
+
+            def render(self, task: Task) -> Text:
+                elapsed = time.time() - self.export_start
+                delta = timedelta(seconds=int(elapsed))
+                return Text(str(delta), style="progress.elapsed")
+
         start_time = time.time()
-        
+        # Use export start time if provided, otherwise use current time
+        display_start_time = export_start_time or start_time
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[bold blue]Downloading media..."),
             BarColumn(bar_width=40),
             TaskProgressColumn(),
             TextColumn("[cyan]{task.fields[status]}"),
-            TimeElapsedColumn(),
+            ExportElapsedColumn(display_start_time),
             transient=False,
         ) as progress:
             # Get total from queue stats
             info = self._download_queue.get_progress_info()
             total = info["total"]
-            
+
             if total == 0:
                 return True
-            
+
             task_id = progress.add_task(
                 "Downloading",
                 total=total,
                 status=f"0/{total} files",
             )
-            
+
             while True:
                 info = self._download_queue.get_progress_info()
                 completed = info["completed"]
@@ -1153,23 +1187,27 @@ class MediaProcessor:
                 pending = info["pending"]
                 in_progress = info["in_progress"]
                 done = completed + failed
-                
+
                 # Update progress bar
                 progress.update(
                     task_id,
                     completed=done,
                     status=f"{completed}✓ {failed}✗ | {in_progress} active, {pending} queued",
                 )
-                
+
                 # Check if finished
                 if pending == 0 and in_progress == 0:
                     progress.update(task_id, completed=total)
                     return True
-                
+
                 # Check timeout
                 if timeout and (time.time() - start_time) > timeout:
+                    logger.warning(
+                        f"⏳ Download wait timed out after {timeout}s. Cancelling stuck tasks..."
+                    )
+                    await self._download_queue._cancel_stuck_tasks()
                     return False
-                
+
                 await asyncio.sleep(0.3)
 
     async def wait_until_idle(
@@ -1294,7 +1332,7 @@ class MediaProcessor:
 
     async def shutdown(self, timeout: float = 30.0):
         """
-        Корректное завершение работы (Phase 2 Task 2.3: Enhanced shutdown with error logging).
+        Корректное завершение работы.
         """
         logger.info("Shutting down media processor...")
 
@@ -1340,7 +1378,7 @@ class MediaProcessor:
                         task.cancel()
                         logger.warning(f"Cancelled task: {task.get_name()}")
 
-        # Закрытие пулов потоков (Phase 2 Task 2.3: Proper executor shutdown)
+        # Закрытие пулов потоков
         try:
             logger.debug("Shutting down thread executors...")
             self.io_executor.shutdown(wait=True)
@@ -1363,7 +1401,7 @@ class MediaProcessor:
 
     def log_statistics(self):
         """
-        Логирование статистики (Phase 2 Task 2.3: Include error statistics).
+        Логирование статистики.
         Синхронный метод для обратной совместимости.
         """
         logger.info("=== Media Processor Statistics ===")
@@ -1371,7 +1409,7 @@ class MediaProcessor:
         logger.info(f"Cache hits: {self._cache_hits}")
         logger.info(f"Total bytes processed: {self._bytes_processed}")
 
-        # ⚠️ Статистика ошибок (Phase 2 Task 2.3)
+        # Статистика ошибок
         logger.info(f"Failed tasks: {self._failed_tasks}")
         if self._worker_errors:
             logger.info(f"Workers with errors: {len(self._worker_errors)}")
@@ -1398,7 +1436,7 @@ class MediaProcessor:
 
     def get_error_statistics(self) -> Dict[str, Any]:
         """
-        Получить статистику ошибок (Phase 2 Task 2.3).
+        Получить статистику ошибок.
 
         Returns:
             Словарь с информацией об ошибках

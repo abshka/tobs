@@ -7,6 +7,7 @@ resume support, and multiple download strategies.
 
 import asyncio
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -15,6 +16,33 @@ from loguru import logger
 from telethon import utils
 from telethon.tl.functions import InvokeWithTakeoutRequest
 from telethon.tl.types import Message
+
+
+class TelegramServerError(Exception):
+    """Raised when Telegram servers are having issues (not client-side problem)."""
+
+    pass
+
+
+# Patterns indicating Telegram server-side issues
+TELEGRAM_SERVER_ERROR_PATTERNS = [
+    r"Telegram is having internal issues",
+    r"TimeoutError.*GetFileRequest",
+    r"TimeoutError.*Timeout while fetching",
+]
+
+# Pattern for Telethon's internal retry exhaustion - this is FINAL, no point retrying
+TELETHON_EXHAUSTED_PATTERN = r"Request was unsuccessful (\d+) time"
+
+
+def is_telegram_server_error(error: Exception) -> bool:
+    """Check if error indicates Telegram server-side issues."""
+    error_str = str(error)
+    for pattern in TELEGRAM_SERVER_ERROR_PATTERNS:
+        if re.search(pattern, error_str, re.IGNORECASE):
+            return True
+    return False
+
 
 # Environment variables for download control
 ENABLE_PARALLEL_DOWNLOAD = (
@@ -182,20 +210,8 @@ class TakeoutClientWrapper:
     # We can create a new instance of `TelegramClient` that shares the `session` and `connection`?
     # No, connection is stateful.
 
-    # Let's look at `src/telegram_sharded_client.py` again.
-    # The workers are dedicated clients!
-    # `self.worker_clients` are `TelegramClient` instances.
-    # They are ONLY used for this export task.
-    # So we CAN monkey-patch their `__call__` method!
-    # Or better, we can wrap them *at creation time* in `ShardedTelegramManager`.
-
-    # But `ShardedTelegramManager` creates them as `TelegramClient`.
-    # We can define a `TakeoutTelegramClient` subclass in `ShardedTelegramManager`
-    # that overrides `__call__`.
-
-    # This is the cleanest solution.
-    # I will modify `src/telegram_sharded_client.py` to use a custom client class for workers.
-
+    # NOTE: The TakeoutClientWrapper above handles wrapping requests with InvokeWithTakeoutRequest.
+    # For complex download scenarios, consider using the wrapper's download_media/download_file methods.
     pass
 
 
@@ -320,14 +336,21 @@ class MediaDownloader:
 
         Returns:
             Path к загруженному файлу или None после критических неудач
+
+        Raises:
+            TelegramServerError: If Telegram servers are having persistent issues
         """
         self._persistent_download_attempts += 1
 
         temp_path = self.temp_dir / f"persistent_{message.id}.tmp"
-        MAX_PERSISTENT_ATTEMPTS = 50  # Абсолютный лимит попыток
-        max_consecutive_failures = 5
+        # Reduced from 50 to 10 - download_queue already handles retries at task level
+        # with its own retry logic. No need for double retry loops.
+        MAX_PERSISTENT_ATTEMPTS = 10
+        max_consecutive_failures = 3  # Reduced from 5
+        max_telegram_server_errors = 3  # Fast-fail on server issues (reduced from 5)
         attempt = 0
         consecutive_failures = 0
+        telegram_server_error_count = 0
 
         # Select client for download (round-robin if workers available)
         download_client = self.client
@@ -337,7 +360,7 @@ class MediaDownloader:
             download_client = self.worker_clients[client_idx]
 
         # Auto-wrap in Takeout if available (Crucial for speed)
-        # Check if client has takeout_id (ShardedTelegramManager or TakeoutWorkerClient)
+        # Check if client has takeout_id (e.g. TakeoutSessionWrapper)
         takeout_id = getattr(download_client, "takeout_id", None)
 
         # If it has takeout_id but is NOT a TakeoutWorkerClient (e.g. it's the main manager),
@@ -463,11 +486,61 @@ class MediaDownloader:
                 )
                 consecutive_failures += 1
             except Exception as e:
+                error_str = str(e)
                 logger.warning(
                     f"Persistent download attempt {attempt} failed with error: {type(e).__name__}: {e}"
                 )
+
+                # Check for Telethon's internal retry exhaustion FIRST
+                # "Request was unsuccessful 26 time(s)" means Telethon already tried 26 times internally
+                # No point in retrying - this is a final failure from Telethon
+                exhausted_match = re.search(TELETHON_EXHAUSTED_PATTERN, error_str)
+                if exhausted_match:
+                    internal_retries = int(exhausted_match.group(1))
+                    logger.error(
+                        f"❌ Telethon exhausted {internal_retries} internal retries for message {message.id}. "
+                        f"This is a final failure - not retrying. "
+                        f"Downloaded: {temp_path.stat().st_size if temp_path.exists() else 0} bytes"
+                    )
+                    # Return partial file if exists and has data, otherwise None
+                    if temp_path.exists() and temp_path.stat().st_size > 0:
+                        final_size = temp_path.stat().st_size
+                        if expected_size > 0:
+                            completion = (final_size / expected_size) * 100
+                            logger.warning(
+                                f"⚠️ Returning partial file ({completion:.1f}% complete)"
+                            )
+                        return temp_path
+                    return None
+
+                # Check for Telegram server-side errors - fast fail on these
+                if is_telegram_server_error(e):
+                    telegram_server_error_count += 1
+                    logger.warning(
+                        f"Telegram server error detected ({telegram_server_error_count}/{max_telegram_server_errors})"
+                    )
+
+                    if telegram_server_error_count >= max_telegram_server_errors:
+                        logger.error(
+                            f"❌ Telegram servers are having issues. "
+                            f"Giving up on message {message.id} after {telegram_server_error_count} server errors. "
+                            f"Downloaded: {temp_path.stat().st_size if temp_path.exists() else 0} bytes"
+                        )
+                        raise TelegramServerError(
+                            f"Telegram servers unavailable after {telegram_server_error_count} attempts: {error_str}"
+                        )
+
+                    # Longer backoff for server errors
+                    backoff_time = min(30 * telegram_server_error_count, 120)
+                    logger.info(
+                        f"Backing off for {backoff_time}s due to Telegram server issues"
+                    )
+                    await asyncio.sleep(backoff_time)
+                    consecutive_failures += 1
+                    continue
+
                 # Special handling for DC migration errors
-                if "FileMigrateError" in str(type(e)) or "DC" in str(e):
+                if "FileMigrateError" in str(type(e)) or "DC" in error_str:
                     logger.info(
                         f"DC migration detected, extending timeout for next attempt"
                     )
@@ -542,10 +615,11 @@ class MediaDownloader:
         self._standard_download_attempts += 1
 
         file_size_mb = expected_size / (1024 * 1024)
-        max_retries = 15  # Максимум попыток
+        # Reduced from 15 to 5 - download_queue handles task-level retries
+        max_retries = 5
 
         # Адаптивный таймаут в зависимости от размера файла
-        base_timeout = min(1200, max(300, file_size_mb * 60))
+        base_timeout = min(600, max(180, file_size_mb * 30))  # Reduced timeouts
 
         temp_path = self.temp_dir / f"download_{message.id}_{int(time.time())}"
 

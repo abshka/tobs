@@ -12,24 +12,24 @@ from src.utils import logger, sanitize_filename
 DEFAULT_CACHE_PATH = Path("./huy.json")
 DEFAULT_EXPORT_PATH = Path("./huys")
 
-# Типизация для профилей производительности
+# Type hints for performance profiles
 PerformanceProfile = Literal["conservative", "balanced", "aggressive", "custom"]
 HardwareAcceleration = Literal["none", "vaapi", "nvenc", "qsv", "auto"]
 ProxyType = Literal["socks4", "socks5", "http"]
 
-# Минимальные системные требования
+# Minimum system requirements
 MIN_MEMORY_GB = 2
 MIN_FREE_DISK_GB = 1
 RECOMMENDED_MEMORY_GB = 8
 
-# ⏱️ Таймауты для асинхронных операций (Phase 2 Task 2.2)
-ITER_MESSAGES_TIMEOUT = 300  # 5 минут для fetching сообщений
+# ⏱️ Timeouts for async operations
+ITER_MESSAGES_TIMEOUT = 300  # 5 minutes for fetching messages
 EXPORT_OPERATION_TIMEOUT = (
-    7200  # 2 часа для экспорта одной сущности (значительно увеличено)
+    7200  # 2 hours for exporting one entity (significantly increased)
 )
-QUEUE_OPERATION_TIMEOUT = 30  # 30 секунд для получения задачи из очереди
-HEALTH_CHECK_TIMEOUT = 10  # 10 секунд для health check
-MEDIA_DOWNLOAD_TIMEOUT = 3600  # 1 час для скачивания медиа
+QUEUE_OPERATION_TIMEOUT = 30  # 30 seconds for getting task from queue
+HEALTH_CHECK_TIMEOUT = 10  # 10 seconds for health check
+MEDIA_DOWNLOAD_TIMEOUT = 3600  # 1 hour for downloading media
 
 
 @dataclass
@@ -46,37 +46,37 @@ class ExportTarget:
         0  # Start export from this message ID (0 = from beginning)
     )
 
-    # Новые поля для оптимизации
-    estimated_messages: Optional[int] = None  # Примерное количество сообщений
-    last_updated: Optional[float] = None  # Timestamp последнего обновления
-    priority: int = 1  # Приоритет обработки (1-10)
+    # New fields for optimization
+    estimated_messages: Optional[int] = None  # Estimated number of messages
+    last_updated: Optional[float] = None  # Timestamp of last update
+    priority: int = 1  # Processing priority (1-10)
 
-    # Поля для работы с топиками в чатах
-    is_forum: bool = False  # Является ли чат форумом с топиками
-    topic_id: Optional[int] = None  # ID конкретного топика (если экспортируем топик)
-    export_all_topics: bool = True  # Экспортировать все топики или только указанный
+    # Fields for working with forum topics
+    is_forum: bool = False  # Whether the chat is a forum with topics
+    topic_id: Optional[int] = None  # ID of specific topic (if exporting a topic)
+    export_all_topics: bool = True  # Export all topics or only specified
     topic_filter: Optional[List[int]] = (
-        None  # Список ID топиков для экспорта (если не все)
+        None  # List of topic IDs to export (if not all)
     )
     export_path: Optional[Path] = None  # Add the missing export_path
 
     def __post_init__(self):
         """
-        Инициализация ExportTarget с улучшенным определением типа.
+        Initialize ExportTarget with improved type detection.
         """
         self.id = str(self.id).strip()
         if self.type == "single_post":
             return
 
-        # Сначала проверяем ссылки на топики (приоритет)
+        # First check topic links (priority)
         if "/c/" in self.id and "/" in self.id.split("/c/")[-1]:
-            # Ссылка на топик: https://t.me/c/chat_id/topic_id или /c/chat_id/topic_id
+            # Topic link: https://t.me/c/chat_id/topic_id or /c/chat_id/topic_id
             self.type = "forum_topic"
             try:
                 parts = self.id.split("/c/")[-1].split("/")
                 if len(parts) >= 2:
                     chat_id, topic_id = parts[0], parts[1]
-                    self.id = f"-100{chat_id}"  # Преобразуем в полный chat_id
+                    self.id = f"-100{chat_id}"  # Convert to full chat_id
                     self.topic_id = int(topic_id)
                     self.is_forum = True
                     self.export_all_topics = False
@@ -84,7 +84,7 @@ class ExportTarget:
                 logger.warning(f"Could not parse forum topic URL: {self.id}")
             return
 
-        # Если тип уже правильно установлен, не переписываем его
+        # If type is already correctly set, don't overwrite it
         if self.type in [
             "forum_topic",
             "forum_chat",
@@ -95,11 +95,11 @@ class ExportTarget:
         ]:
             return
 
-        # Улучшенное определение типа сущности
+        # Improved entity type detection
         if self.id.startswith("@"):
             self.type = "channel"
         elif "t.me/" in self.id:
-            # Обычные t.me ссылки (не топики)
+            # Regular t.me links (not topics)
             self.type = "channel"
         elif self.id.startswith("-100"):
             self.type = "channel"
@@ -114,22 +114,22 @@ class ExportTarget:
 @dataclass
 class PerformanceSettings:
     """
-    Настройки производительности с автоматической оптимизацией.
+    Performance settings with automatic optimization.
     """
 
-    # Основные настройки параллелизма
+    # Core parallelism settings
     workers: int = 8
     download_workers: int = 12
     io_workers: int = 16
     ffmpeg_workers: int = 4
 
-    # Настройки батчевой обработки
+    # Batch processing settings
     message_batch_size: int = 100
     media_batch_size: int = 5
     cache_batch_size: int = 50
     cache_save_interval: int = 100
 
-    # Настройки параллельной обработки форумов
+    # Forum parallel processing settings
     forum_parallel_enabled: bool = True
     forum_max_workers: int = 8
     forum_batch_size: int = 20
@@ -319,7 +319,7 @@ class TranscriptionConfig:
     """
     Configuration for audio transcription system.
 
-    Version: 5.0.0 - Simplified standalone implementation (Whisper Large V3 only)
+    Version: 5.2.0 - Added cache_dir configuration
     """
 
     # Basic settings
@@ -335,6 +335,11 @@ class TranscriptionConfig:
 
     # Caching
     cache_enabled: bool = True  # Enable result caching
+    cache_dir: Optional[str] = None  # Cache directory (default: {export_path}/.cache/transcriptions)
+
+    # Parallelism settings (v5.1.0)
+    max_concurrent: int = 2  # Max parallel transcriptions (0 = auto based on device)
+    sorting: str = "size_asc"  # 'none', 'size_asc', 'size_desc' (LPT scheduling)
 
 
 @dataclass
@@ -348,7 +353,6 @@ class Config:
 
     phone_number: Optional[str] = None
     session_name: str = "tobs_session"
-    tdata_path: Optional[str] = None  # Path to Telegram Desktop tdata folder
     request_delay: float = 0.5
 
     # Core system settings
@@ -375,7 +379,7 @@ class Config:
     download_other: bool = True  # Download stickers, documents, and other media
     # Backward compatibility - deprecated, will be removed in future version
     media_download: bool = True
-    
+
     # Extension filtering (tdl-style)
     include_extensions: List[str] = field(default_factory=list)
     exclude_extensions: List[str] = field(default_factory=list)
@@ -385,10 +389,6 @@ class Config:
     # Takeout settings
     use_takeout: bool = False  # Use Telegram Takeout for export
     takeout_fallback_delay: float = 1.0  # Delay in seconds if Takeout fails/disabled
-
-    # Sharding settings (Parallel Takeout)
-    sharding_enabled: bool = False  # Enable parallel export using cloned sessions
-    shard_count: int = 4  # Number of worker sessions/connections
 
     @property
     def any_media_download_enabled(self) -> bool:
@@ -404,11 +404,15 @@ class Config:
     process_video: bool = False  # По умолчанию выключено (как в MediaProcessor)
     process_audio: bool = True  # По умолчанию включено
     process_images: bool = True  # По умолчанию включено
-    deferred_processing: bool = True  # 🚀 NEW: Process media AFTER export to save CPU/Network bandwidth
+    deferred_processing: bool = (
+        True  # 🚀 NEW: Process media AFTER export to save CPU/Network bandwidth
+    )
 
     # 🚀 Async media download - downloads happen in background, don't block message export
     async_media_download: bool = True  # Enable background download queue
-    async_download_workers: int = 0  # 0 = auto (derived from performance.download_workers)
+    async_download_workers: int = (
+        0  # 0 = auto (derived from performance.download_workers)
+    )
 
     # Audio transcription settings (v3.0.0)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
@@ -436,6 +440,37 @@ class Config:
 
     performance_profile: PerformanceProfile = "balanced"
     performance: PerformanceSettings = field(default_factory=PerformanceSettings)
+
+    # Параметры шардирования (параллельная загрузка сообщений)
+    enable_shard_fetch: bool = False  # Использовать шардирование для загрузки сообщений
+    shard_count: int = 8  # Количество воркеров для шардирования
+    shard_chunk_size: int = 1000  # Размер батча (лимит Takeout API)
+    shard_chunks_multiplier: int = 4  # NEW: Множитель чанков (4x workers = 32 chunks для 8 workers)
+    
+    # Adaptive chunking for slow regions (DC/API bottleneck mitigation)
+    slow_chunk_threshold: float = 10.0  # Seconds - chunks slower than this trigger adaptive splitting
+    slow_chunk_max_retries: int = 2  # Maximum recursive split attempts for slow chunks
+    slow_chunk_split_factor: int = 4  # How many pieces to split slow chunks into (default: 4)
+    
+    # Hot Zones & Density-Based Adaptive Chunking
+    enable_hot_zones: bool = True  # Enable pre-defined hot zone detection and pre-splitting
+    enable_density_estimation: bool = True  # Enable density estimation via sampling
+    hot_zones_db_path: Optional[str] = None  # Custom path for slow-ranges database (default: .monitoring/)
+    
+    # Density thresholds for adaptive chunking (messages per 1000 IDs)
+    density_very_high_threshold: float = 150.0  # >150 msgs/1K IDs = very high density
+    density_high_threshold: float = 100.0  # >100 msgs/1K IDs = high density
+    density_medium_threshold: float = 50.0  # >50 msgs/1K IDs = medium density
+    
+    # Chunk sizes for different density levels (in message IDs)
+    chunk_size_very_high_density: int = 5_000  # Very high density → small chunks
+    chunk_size_high_density: int = 10_000  # High density → medium-small chunks
+    chunk_size_medium_density: int = 15_000  # Medium density → medium chunks
+    chunk_size_low_density: int = 50_000  # Low density → large chunks (default)
+    
+    # Density estimation sampling parameters
+    density_sample_points: int = 3  # Number of sample points across ID range
+    density_sample_range: int = 1_000  # IDs to sample around each point
 
     image_quality: int = 85
     video_crf: int = 28
@@ -496,6 +531,16 @@ class Config:
         # Если путь к кэшу не абсолютный — делаем его относительным к export_path
         if not Path(self.cache_file).is_absolute():
             self.cache_file = Path(self.export_path) / Path(self.cache_file).name
+
+        # Если путь к кэшу транскрипций не задан — делаем относительным к export_path
+        if self.transcription.cache_dir is None:
+            self.transcription.cache_dir = str(
+                Path(self.export_path) / ".cache" / "transcriptions"
+            )
+        elif not Path(self.transcription.cache_dir).is_absolute():
+            self.transcription.cache_dir = str(
+                Path(self.export_path) / self.transcription.cache_dir
+            )
 
         # Валидация и нормализация путей
         self._setup_paths()
@@ -633,8 +678,19 @@ class Config:
         logger.info(f"Memory limit: {self.performance.memory_limit_mb}MB")
         logger.info(f"Export path: {self.export_path}")
         logger.info(f"Cache file: {self.cache_file}")
+        logger.info(f"Transcription cache: {self.transcription.cache_dir}")
         logger.info(f"Takeout enabled: {self.use_takeout}")
         logger.info(f"Async media download: {self.async_media_download}")
+        logger.info(f"🚀 Sharding: enabled={self.enable_shard_fetch}, workers={self.shard_count}, chunk_size={self.shard_chunk_size}")
+        if self.enable_hot_zones:
+            logger.info(
+                f"🔥 Hot Zones: enabled, density estimation={self.enable_density_estimation}, "
+                f"thresholds=[{self.density_medium_threshold}, {self.density_high_threshold}, {self.density_very_high_threshold}]"
+            )
+            logger.info(
+                f"   Chunk sizes: low={self.chunk_size_low_density}, med={self.chunk_size_medium_density}, "
+                f"high={self.chunk_size_high_density}, very_high={self.chunk_size_very_high_density}"
+            )
 
     def add_export_target(self, target: ExportTarget):
         """Добавить новую цель экспорта если её ещё нет."""
@@ -876,21 +932,47 @@ class Config:
                 "takeout_fallback_delay": float(
                     os.getenv("TAKEOUT_FALLBACK_DELAY", "1.0")
                 ),
-                "sharding_enabled": _parse_bool(os.getenv("SHARDING_ENABLED"), False),
-                "shard_count": int(os.getenv("SHARD_COUNT", "4")),
                 # Async media download
-                "async_media_download": _parse_bool(os.getenv("ASYNC_MEDIA_DOWNLOAD"), True),
-                "async_download_workers": int(os.getenv("ASYNC_DOWNLOAD_WORKERS", "0")),  # 0 = auto
+                "async_media_download": _parse_bool(
+                    os.getenv("ASYNC_MEDIA_DOWNLOAD"), True
+                ),
+                "async_download_workers": int(
+                    os.getenv("ASYNC_DOWNLOAD_WORKERS", "0")
+                ),  # 0 = auto
                 "log_level": os.getenv("LOG_LEVEL", "INFO"),
                 # Производительность
                 "performance_profile": performance_profile,
+                # Шардирование (параллельная загрузка сообщений, только Этап 1)
+                "enable_shard_fetch": _parse_bool(
+                    os.getenv("ENABLE_SHARD_FETCH"), False
+                ),
+                "shard_count": int(os.getenv("SHARD_COUNT", "8")),
+                "shard_chunk_size": int(os.getenv("SHARD_CHUNK_SIZE", "1000")),
+                "shard_chunks_multiplier": int(os.getenv("SHARD_CHUNKS_MULTIPLIER", "4")),
+                # Adaptive chunking parameters
+                "slow_chunk_threshold": float(os.getenv("SLOW_CHUNK_THRESHOLD", "10.0")),
+                "slow_chunk_max_retries": int(os.getenv("SLOW_CHUNK_MAX_RETRIES", "2")),
+                "slow_chunk_split_factor": int(os.getenv("SLOW_CHUNK_SPLIT_FACTOR", "4")),
+                # Hot Zones & Density-Based Adaptive Chunking
+                "enable_hot_zones": _parse_bool(os.getenv("ENABLE_HOT_ZONES"), True),
+                "enable_density_estimation": _parse_bool(os.getenv("ENABLE_DENSITY_ESTIMATION"), True),
+                "hot_zones_db_path": os.getenv("HOT_ZONES_DB_PATH"),
+                "density_very_high_threshold": float(os.getenv("DENSITY_VERY_HIGH_THRESHOLD", "150.0")),
+                "density_high_threshold": float(os.getenv("DENSITY_HIGH_THRESHOLD", "100.0")),
+                "density_medium_threshold": float(os.getenv("DENSITY_MEDIUM_THRESHOLD", "50.0")),
+                "chunk_size_very_high_density": int(os.getenv("CHUNK_SIZE_VERY_HIGH_DENSITY", "5000")),
+                "chunk_size_high_density": int(os.getenv("CHUNK_SIZE_HIGH_DENSITY", "10000")),
+                "chunk_size_medium_density": int(os.getenv("CHUNK_SIZE_MEDIUM_DENSITY", "15000")),
+                "chunk_size_low_density": int(os.getenv("CHUNK_SIZE_LOW_DENSITY", "50000")),
+                "density_sample_points": int(os.getenv("DENSITY_SAMPLE_POINTS", "3")),
+                "density_sample_range": int(os.getenv("DENSITY_SAMPLE_RANGE", "1000")),
                 # Медиа
                 "image_quality": int(os.getenv("IMAGE_QUALITY", 85)),
                 "video_crf": int(os.getenv("VIDEO_CRF", 28)),
                 "video_preset": os.getenv("VIDEO_PRESET", "fast"),
                 "hw_acceleration": os.getenv("HW_ACCELERATION", "vaapi"),
                 "use_h265": _parse_bool(os.getenv("USE_H265"), False),
-                # Транскрипция (v3.0.0)
+                # Транскрипция (v5.1.0)
                 "transcription": TranscriptionConfig(
                     enabled=_parse_bool(os.getenv("TRANSCRIPTION_ENABLED"), True),
                     language=os.getenv("TRANSCRIPTION_LANGUAGE", "ru"),
@@ -906,6 +988,11 @@ class Config:
                     cache_enabled=_parse_bool(
                         os.getenv("TRANSCRIPTION_CACHE_ENABLED"), True
                     ),
+                    cache_dir=os.getenv("TRANSCRIPTION_CACHE_DIR"),  # None = auto ({export_path}/.cache/transcriptions)
+                    max_concurrent=int(
+                        os.getenv("TRANSCRIPTION_MAX_CONCURRENT", "2")
+                    ),
+                    sorting=os.getenv("TRANSCRIPTION_SORTING", "size_asc"),
                 ),
                 "transcription_timeout": float(
                     os.getenv("TRANSCRIPTION_TIMEOUT", "1800.0")

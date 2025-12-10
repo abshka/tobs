@@ -311,3 +311,39 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 **TOBS** - Transform your Telegram data into beautifully formatted Markdown with enterprise-grade performance and reliability.
 
 _For technical details about the optimization journey, see [TOBS_OPTIMIZATION_PROJECT_COMPLETION_REPORT.md](TOBS_OPTIMIZATION_PROJECT_COMPLETION_REPORT.md)_
+
+## Windows-specific notes
+
+PyQt's Windows wheels are not always published for the latest `pyqt5-qt5` release. To avoid `uv sync` failing with a "no wheel for win_amd64" error we pinned a Windows-compatible PyQt in `pyproject.toml`:
+
+```toml
+pyqt5 = "==5.15.11; sys_platform == 'win32' and platform_machine == 'AMD64'"
+```
+
+If `uv sync` still fails on Windows, you can also force uv to use Python 3.11 (which has available wheels):
+
+```bash
+# Install a uv-managed Python 3.11 and sync dependencies with that environment
+uv python install cpython-3.11.12
+uv run --python cpython-3.11.12 uv sync
+```
+
+Or create and use a standard venv:
+
+```powershell
+# PowerShell (Windows)
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+```bash
+# Unix/macOS
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+These steps should allow `uv sync` to complete successfully on Windows.

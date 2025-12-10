@@ -68,3 +68,4 @@ Thumbs.db
 # Project files
 *.md
 !README.md
+docs/

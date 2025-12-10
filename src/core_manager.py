@@ -1,6 +1,6 @@
 """
-Менеджер core систем.
-Управляет жизненным циклом всех основных компонентов системы.
+Core systems manager.
+Manages lifecycle of all core system components.
 """
 
 import asyncio
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class CoreSystemManager:
-    """Менеджер всех core систем."""
+    """Manager of all core systems."""
 
     def __init__(
         self,
@@ -35,43 +35,43 @@ class CoreSystemManager:
         performance_profile: str = "balanced",
         health_check_interval: float = 0.1,
     ):
-        # config_path сохраняется для совместимости с API, но не используется
+        # config_path preserved for API compatibility but not used
         self.config_path = config_path
         self.performance_profile = performance_profile
 
-        # Менеджеры
+        # Managers
         self._cache_manager: Optional[CacheManager] = None
         self._connection_manager: Optional[ConnectionManager] = None
         self._performance_monitor: Optional[PerformanceMonitor] = None
 
-        # Состояние
+        # State
         self._initialized = False
         self._shutdown = False
 
-        # TaskGroup для управления background tasks (Phase 3 Task A.1)
+        # TaskGroup for managing background tasks
         self._task_group: Optional[asyncio.TaskGroup] = None
         self._task_group_runner: Optional[asyncio.Task] = None
 
         self._health_check_interval = health_check_interval
         self._sleep = asyncio.sleep  # Store reference to avoid global mocking
 
-        # Статистика
+        # Statistics
         self._start_time = 0.0
         self._total_operations = 0
         self._successful_operations = 0
         self._failed_operations = 0
 
-        # Конфигурация адаптации
+        # Adaptation configuration
         self.adaptation_enabled = True
         self.last_adaptation_time = 0.0
-        self.adaptation_cooldown = 60.0  # Минимум 60 секунд между адаптациями
+        self.adaptation_cooldown = 60.0  # Minimum 60 seconds between adaptations
 
     async def initialize(self) -> bool:
         """
-        Инициализация всех core систем.
+        Initialize all core systems.
 
         Returns:
-            True если инициализация прошла успешно
+            True if initialization was successful
         """
         if self._initialized:
             logger.warning("Core systems already initialized")
@@ -82,25 +82,25 @@ class CoreSystemManager:
 
             logger.info("Initializing core systems...")
 
-            # Инициализируем компоненты в правильном порядке
-            # 1. Сначала монитор производительности
+            # Initialize components in correct order
+            # 1. Performance monitor first
             self._performance_monitor = await get_performance_monitor(
                 performance_profile=self.performance_profile
             )
             logger.info("Performance monitor initialized")
 
-            # 2. Затем кэш-менеджер
+            # 2. Then cache manager
             self._cache_manager = await get_cache_manager()
             logger.info("Cache manager initialized")
 
-            # 3. Наконец менеджер соединений
+            # 3. Finally connection manager
             self._connection_manager = await get_connection_manager()
             logger.info("Connection manager initialized")
 
-            # Настраиваем интеграцию между компонентами
+            # Configure integration between components
             await self._setup_integration()
 
-            # Запускаем background tasks в TaskGroup (Phase 3 Task A.1)
+            # Start background tasks in TaskGroup
             self._task_group_runner = asyncio.create_task(self._run_background_tasks())
             logger.debug("Background task group started")
 
@@ -118,12 +118,12 @@ class CoreSystemManager:
 
     async def _run_background_tasks(self):
         """
-        Запуск и управление background tasks в TaskGroup (Phase 3 Task A.1).
+        Start and manage background tasks in TaskGroup.
 
-        TaskGroup автоматически:
-        - Управляет жизненным циклом всех задач
-        - Агрегирует исключения из всех задач
-        - Отменяет все оставшиеся задачи при выходе из контекста
+        TaskGroup automatically:
+        - Manages lifecycle of all tasks
+        - Aggregates exceptions from all tasks
+        - Cancels all remaining tasks when exiting context
         """
         # Run initial health check synchronously
         try:
@@ -137,15 +137,15 @@ class CoreSystemManager:
                 self._task_group = tg
                 logger.debug("TaskGroup context entered")
 
-                # Создаём health check task в TaskGroup
+                # Create health check task in TaskGroup
                 tg.create_task(self._health_check_loop())
                 logger.debug("Health check task created in TaskGroup")
 
-                # TaskGroup будет ждать все задачи до завершения
-                # При выходе из контекста, все задачи будут отменены (если не завершены)
+                # TaskGroup will wait for all tasks to complete
+                # When exiting context, all tasks will be cancelled (if not completed)
         except* Exception as exc_group:
-            # except* ловит все исключения из TaskGroup
-            # exc_group содержит все исключения
+            # except* catches all exceptions from TaskGroup
+            # exc_group contains all exceptions
             for exc in exc_group.exceptions:
                 logger.error(
                     f"Background task failed: {type(exc).__name__}: {exc}", exc_info=exc
@@ -156,8 +156,8 @@ class CoreSystemManager:
             logger.debug("TaskGroup context exited and cleaned up")
 
     async def _setup_integration(self):
-        """Настройка интеграции между компонентами."""
-        # Добавляем коллбеки для мониторинга
+        """Configure integration between components."""
+        # Add callbacks for monitoring
         if self._performance_monitor:
             self._performance_monitor.add_metric_callback(self._on_performance_metric)
             self._performance_monitor.add_alert_callback(self._on_performance_alert)
@@ -165,8 +165,8 @@ class CoreSystemManager:
         logger.debug("Component integration configured")
 
     def _on_performance_metric(self, metrics):
-        """Обработчик метрик производительности."""
-        # Можем логировать критические метрики
+        """Performance metrics handler."""
+        # Can log critical metrics
         if metrics.cpu_percent > 90 or metrics.memory_percent > 90:
             logger.warning(
                 f"High resource usage: CPU {metrics.cpu_percent:.1f}%, "
@@ -174,47 +174,47 @@ class CoreSystemManager:
             )
 
     async def _on_performance_alert(self, alert):
-        """Обработчик алертов производительности."""
+        """Performance alerts handler."""
         if alert.level == AlertLevel.CRITICAL:
             logger.critical(f"Critical performance alert: {alert.message}")
 
-            # При критических алертах можем автоматически адаптироваться
+            # For critical alerts, can automatically adapt
             if self.adaptation_enabled:
                 await self._emergency_adaptation()
 
     async def _emergency_adaptation(self):
-        """Экстренная адаптация при критических проблемах."""
+        """Emergency adaptation for critical issues."""
         if not self._performance_monitor:
             return
 
         current_time = time.time()
         if current_time - self.last_adaptation_time < self.adaptation_cooldown:
-            return  # Слишком рано для новой адаптации
+            return  # Too early for new adaptation
 
         state = self._performance_monitor.get_resource_state()
 
         if state == ResourceState.CRITICAL:
             logger.warning("Applying emergency performance adaptations")
 
-            # Переключаемся на консервативный профиль
+            # Switch to conservative profile
             self._performance_monitor.set_performance_profile("conservative")
 
-            # Уменьшаем нагрузку в connection manager
+            # Reduce load in connection manager
             if self._connection_manager:
-                # Можем добавить методы для снижения нагрузки
+                # Can add methods to reduce load
                 pass
 
-            # Очищаем кэш если нужно
+            # Clear cache if needed
             if self._cache_manager:
                 cache_stats = self._cache_manager.get_stats()
-                if cache_stats.total_size_mb > 500:  # Если кэш больше 500MB
+                if cache_stats.total_size_mb > 500:  # If cache > 500MB
                     await self._cache_manager.clear()
                     logger.info("Cache cleared due to memory pressure")
 
             self.last_adaptation_time = current_time
 
     async def _health_check_loop(self):
-        """Периодическая проверка здоровья системы."""
+        """Periodic system health check."""
         logger.debug("Health check loop started")
         loop_iteration = 0
 
@@ -243,13 +243,13 @@ class CoreSystemManager:
                 self._failed_operations += 1
 
     async def _perform_health_check(self):
-        """Выполнение проверки здоровья системы."""
+        """Perform system health check."""
         issues = []
 
-        # Проверяем кэш-менеджер
+        # Check cache manager
         if self._cache_manager:
             try:
-                # Простая проверка - попытка записи и чтения
+                # Simple check - attempt write and read
                 await self._cache_manager.set(
                     "health_check", {"timestamp": time.time()}
                 )
@@ -259,17 +259,17 @@ class CoreSystemManager:
             except Exception as e:
                 issues.append(f"Cache manager error: {e}")
 
-        # Проверяем connection manager
+        # Check connection manager
         if self._connection_manager:
             try:
                 stats = self._connection_manager.get_pool_stats()
-                # Проверяем что пулы отвечают
+                # Check that pools respond
                 if not stats:
                     issues.append("Connection manager: no pool stats available")
             except Exception as e:
                 issues.append(f"Connection manager error: {e}")
 
-        # Проверяем performance monitor
+        # Check performance monitor
         if self._performance_monitor:
             try:
                 current_metrics = self._performance_monitor.get_current_metrics()
@@ -284,15 +284,15 @@ class CoreSystemManager:
             logger.debug("Health check passed")
 
     async def shutdown(self):
-        """Корректное завершение работы всех систем."""
+        """Graceful shutdown of all systems."""
         if not self._initialized or self._shutdown:
             return
 
         logger.info("Shutting down core systems...")
         self._shutdown = True
 
-        # Останавливаем background tasks runner (Phase 3 Task A.1)
-        # TaskGroup автоматически отменит все задачи при выходе
+        # Stop background tasks runner
+        # TaskGroup automatically cancels all tasks when exiting
         if self._task_group_runner:
             if not self._task_group_runner.done():
                 logger.debug("Cancelling background task group runner...")
@@ -304,7 +304,7 @@ class CoreSystemManager:
             else:
                 logger.debug("Background task group runner already done")
 
-        # Останавливаем компоненты в обратном порядке
+        # Stop components in reverse order
         try:
             await shutdown_connection_manager()
             logger.info("Connection manager shut down")
@@ -327,14 +327,14 @@ class CoreSystemManager:
         logger.info("Core systems shutdown complete")
 
     async def _cleanup_on_failure(self):
-        """Очистка при неудачной инициализации."""
+        """Cleanup on failed initialization."""
         try:
             await self.shutdown()
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
 
     def get_comprehensive_status(self) -> Dict[str, Any]:
-        """Получение полного статуса всех систем."""
+        """Get comprehensive status of all systems."""
         if not self._initialized:
             return {"status": "not_initialized", "uptime": 0, "components": {}}
 
@@ -354,7 +354,7 @@ class CoreSystemManager:
             "components": {},
         }
 
-        # Статус кэш-менеджера
+        # Cache manager status
         if self._cache_manager:
             try:
                 cache_stats = self._cache_manager.get_stats()
@@ -368,7 +368,7 @@ class CoreSystemManager:
             except Exception as e:
                 status["components"]["cache"] = {"status": "error", "error": str(e)}
 
-        # Статус connection manager
+        # Connection manager status
         if self._connection_manager:
             try:
                 pool_stats = self._connection_manager.get_pool_stats()
@@ -382,7 +382,7 @@ class CoreSystemManager:
                     "error": str(e),
                 }
 
-        # Статус performance monitor
+        # Performance monitor status
         if self._performance_monitor:
             try:
                 perf_summary = self._performance_monitor.get_performance_summary()
@@ -402,51 +402,51 @@ class CoreSystemManager:
         return status
 
     async def get_performance_recommendations(self) -> list[str]:
-        """Получение рекомендаций по производительности."""
+        """Get performance recommendations."""
         if not self._performance_monitor:
             return ["Performance monitor not available"]
 
         return self._performance_monitor.get_performance_recommendations()
 
     def record_operation(self, success: bool):
-        """Запись результата операции."""
+        """Record operation result."""
         self._total_operations += 1
         if success:
             self._successful_operations += 1
         else:
             self._failed_operations += 1
 
-    # Методы для получения менеджеров
+    # Methods for getting managers
     def get_cache_manager(self) -> Optional[CacheManager]:
-        """Получение кэш-менеджера."""
+        """Get cache manager."""
         return self._cache_manager
 
     def get_connection_manager(self) -> Optional[ConnectionManager]:
-        """Получение менеджера соединений."""
+        """Get connection manager."""
         return self._connection_manager
 
     def get_performance_monitor(self) -> Optional[PerformanceMonitor]:
-        """Получение монитора производительности."""
+        """Get performance monitor."""
         return self._performance_monitor
 
-    # Настройки адаптации
+    # Adaptation settings
     def enable_adaptation(self, enabled: bool = True):
-        """Включение/выключение автоматической адаптации."""
+        """Enable/disable automatic adaptation."""
         self.adaptation_enabled = enabled
         logger.info(f"Automatic adaptation {'enabled' if enabled else 'disabled'}")
 
     def set_adaptation_cooldown(self, seconds: float):
-        """Установка периода cooldown для адаптации."""
-        self.adaptation_cooldown = max(30.0, seconds)  # Минимум 30 секунд
+        """Set adaptation cooldown period."""
+        self.adaptation_cooldown = max(30.0, seconds)  # Minimum 30 seconds
 
     async def force_cache_cleanup(self):
-        """Принудительная очистка кэша."""
+        """Force cache cleanup."""
         if self._cache_manager:
             await self._cache_manager.clear()
             logger.info("Cache forcibly cleared")
 
     def update_performance_profile(self, profile: str):
-        """Обновить профиль производительности."""
+        """Update performance profile."""
         if profile not in ["conservative", "balanced", "aggressive"]:
             logger.warning(f"Unknown performance profile '{profile}', keeping current")
             return
@@ -454,7 +454,7 @@ class CoreSystemManager:
         old_profile = self.performance_profile
         self.performance_profile = profile
 
-        # Обновляем performance monitor если он инициализирован
+        # Update performance monitor if initialized
         if self._performance_monitor:
             success = self._performance_monitor.set_performance_profile(profile)
             if success:
@@ -469,15 +469,15 @@ class CoreSystemManager:
         logger.info(f"Core manager performance profile set to: {profile}")
 
     def is_initialized(self) -> bool:
-        """Проверка инициализации системы."""
+        """Check system initialization."""
         return self._initialized
 
     def get_uptime(self) -> float:
-        """Получение времени работы системы."""
+        """Get system uptime."""
         return time.time() - self._start_time if self._initialized else 0.0
 
 
-# Глобальный экземпляр
+# Global instance
 _core_manager: Optional[CoreSystemManager] = None
 
 
@@ -486,14 +486,14 @@ async def initialize_core_systems(
     performance_profile: str = "balanced",
 ) -> CoreSystemManager:
     """
-    Инициализация core систем.
+    Initialize core systems.
 
     Args:
-        config_path: Путь к конфигурационным файлам
-        performance_profile: Профиль производительности (conservative, balanced, aggressive)
+        config_path: Path to configuration files
+        performance_profile: Performance profile (conservative, balanced, aggressive)
 
     Returns:
-        Экземпляр CoreSystemManager
+        CoreSystemManager instance
     """
     global _core_manager
 
@@ -513,7 +513,7 @@ async def initialize_core_systems(
 
 
 async def shutdown_core_systems():
-    """Завершение работы core систем."""
+    """Shutdown core systems."""
     global _core_manager
     if _core_manager:
         await _core_manager.shutdown()
@@ -521,10 +521,10 @@ async def shutdown_core_systems():
 
 
 def get_core_manager() -> Optional[CoreSystemManager]:
-    """Получение глобального экземпляра CoreSystemManager."""
+    """Get global CoreSystemManager instance."""
     return _core_manager
 
 
 def is_core_initialized() -> bool:
-    """Проверка инициализации core систем."""
+    """Check core systems initialization."""
     return _core_manager is not None and _core_manager.is_initialized()

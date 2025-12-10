@@ -477,8 +477,9 @@ class InteractiveUI:
 
             # Use robust link parser first
             from src.utils import LinkParser
+
             parsed = LinkParser.parse(link_input)
-            
+
             resolve_input = link_input
             if parsed and parsed["peer"]:
                 resolve_input = parsed["peer"]
@@ -798,6 +799,11 @@ class InteractiveUI:
             table.add_row("  Language", lang)
             device = self.config.transcription.device or "auto"
             table.add_row("  Device", device)
+            # Show parallelism settings (v5.1.0)
+            max_concurrent = getattr(self.config.transcription, "max_concurrent", 2)
+            sorting = getattr(self.config.transcription, "sorting", "size_asc")
+            table.add_row("  Parallelism", f"×{max_concurrent}")
+            table.add_row("  Sorting", sorting)
 
         self.console.print(table)
 
@@ -822,13 +828,21 @@ class InteractiveUI:
             rprint(f"2. Videos: {videos_status}")
             rprint(f"3. Audio: {audio_status}")
             rprint(f"4. Other (stickers, docs): {other_status}")
-            
+
             # Extension filters display
-            inc_str = ", ".join(self.config.include_extensions) if self.config.include_extensions else "None"
-            exc_str = ", ".join(self.config.exclude_extensions) if self.config.exclude_extensions else "None"
+            inc_str = (
+                ", ".join(self.config.include_extensions)
+                if self.config.include_extensions
+                else "None"
+            )
+            exc_str = (
+                ", ".join(self.config.exclude_extensions)
+                if self.config.exclude_extensions
+                else "None"
+            )
             rprint(f"5. Included Extensions: [cyan]{inc_str}[/cyan]")
             rprint(f"6. Excluded Extensions: [cyan]{exc_str}[/cyan]")
-            
+
             rprint("7. Enable all types")
             rprint("8. Disable all types")
             rprint("9. Return")
@@ -860,24 +874,40 @@ class InteractiveUI:
                 rprint(f"[green]Other media download {status}[/green]")
                 input("Press Enter to continue...")
             elif choice == "5":
-                rprint("[dim]Enter extensions separated by comma (e.g. jpg, png, mp4)[/dim]")
+                rprint(
+                    "[dim]Enter extensions separated by comma (e.g. jpg, png, mp4)[/dim]"
+                )
                 rprint("[dim]Leave empty to clear list[/dim]")
                 inp = Prompt.ask("Extensions to INCLUDE")
                 if not inp.strip():
                     self.config.include_extensions = []
                 else:
-                    self.config.include_extensions = [e.strip().lower().replace('.', '') for e in inp.split(',') if e.strip()]
-                rprint(f"[green]Updated include list: {self.config.include_extensions}[/green]")
+                    self.config.include_extensions = [
+                        e.strip().lower().replace(".", "")
+                        for e in inp.split(",")
+                        if e.strip()
+                    ]
+                rprint(
+                    f"[green]Updated include list: {self.config.include_extensions}[/green]"
+                )
                 input("Press Enter to continue...")
             elif choice == "6":
-                rprint("[dim]Enter extensions separated by comma (e.g. zip, rar, exe)[/dim]")
+                rprint(
+                    "[dim]Enter extensions separated by comma (e.g. zip, rar, exe)[/dim]"
+                )
                 rprint("[dim]Leave empty to clear list[/dim]")
                 inp = Prompt.ask("Extensions to EXCLUDE")
                 if not inp.strip():
                     self.config.exclude_extensions = []
                 else:
-                    self.config.exclude_extensions = [e.strip().lower().replace('.', '') for e in inp.split(',') if e.strip()]
-                rprint(f"[green]Updated exclude list: {self.config.exclude_extensions}[/green]")
+                    self.config.exclude_extensions = [
+                        e.strip().lower().replace(".", "")
+                        for e in inp.split(",")
+                        if e.strip()
+                    ]
+                rprint(
+                    f"[green]Updated exclude list: {self.config.exclude_extensions}[/green]"
+                )
                 input("Press Enter to continue...")
             elif choice == "7":
                 self.config.download_photos = True
@@ -956,6 +986,9 @@ class InteractiveUI:
             cache_status = (
                 "✓ Enabled" if self.config.transcription_cache_enabled else "✗ Disabled"
             )
+            # Parallelism settings (v5.1.0)
+            max_concurrent = getattr(self.config.transcription, "max_concurrent", 2)
+            sorting = getattr(self.config.transcription, "sorting", "size_asc")
 
             rprint("\n[bold]Current Settings:[/bold]")
             rprint(f"1. Toggle Transcription: {transcription_status}")
@@ -963,7 +996,9 @@ class InteractiveUI:
             rprint(f"3. Set Device: {device}")
             rprint(f"4. Set Compute Type: {compute_type}")
             rprint(f"5. Toggle Cache: {cache_status}")
-            rprint("6. Return to main menu")
+            rprint(f"6. Set Parallelism: ×{max_concurrent}")
+            rprint(f"7. Set Sorting: {sorting}")
+            rprint("8. Return to main menu")
 
             rprint("\n[dim]Note: Transcription converts voice messages to text.[/dim]")
             rprint(
@@ -972,8 +1007,8 @@ class InteractiveUI:
 
             choice = Prompt.ask(
                 "Choose option",
-                choices=["1", "2", "3", "4", "5", "6"],
-                default="6",
+                choices=["1", "2", "3", "4", "5", "6", "7", "8"],
+                default="8",
             )
 
             if choice == "1":
@@ -1077,6 +1112,50 @@ class InteractiveUI:
                 input("Press Enter to continue...")
 
             elif choice == "6":
+                # Set parallelism
+                clear_screen()
+                rprint("[bold cyan]Transcription Parallelism[/bold cyan]")
+                rprint("=" * 40)
+                rprint("\n[bold]Options:[/bold]")
+                rprint("0. Auto (1 for GPU, CPU cores/4 for CPU)")
+                rprint("1. Sequential (safest, recommended for GPU)")
+                rprint("2. Low parallelism (×2, default)")
+                rprint("3. Medium parallelism (×4)")
+                rprint("4. High parallelism (×8, CPU only)")
+
+                para_choice = Prompt.ask(
+                    "Select parallelism", choices=["0", "1", "2", "3", "4"], default="2"
+                )
+
+                para_map = {"0": 0, "1": 1, "2": 2, "3": 4, "4": 8}
+                self.config.transcription.max_concurrent = para_map[para_choice]
+                rprint(
+                    f"[green]Parallelism set to: ×{self.config.transcription.max_concurrent}[/green]"
+                )
+                input("Press Enter to continue...")
+
+            elif choice == "7":
+                # Set sorting
+                clear_screen()
+                rprint("[bold cyan]Transcription Sorting[/bold cyan]")
+                rprint("=" * 40)
+                rprint("\n[bold]Options:[/bold]")
+                rprint("1. size_asc  - Smaller files first (faster feedback)")
+                rprint("2. size_desc - Larger files first (LPT, better parallelism)")
+                rprint("3. none      - Original order")
+
+                sort_choice = Prompt.ask(
+                    "Select sorting", choices=["1", "2", "3"], default="1"
+                )
+
+                sort_map = {"1": "size_asc", "2": "size_desc", "3": "none"}
+                self.config.transcription.sorting = sort_map[sort_choice]
+                rprint(
+                    f"[green]Sorting set to: {self.config.transcription.sorting}[/green]"
+                )
+                input("Press Enter to continue...")
+
+            elif choice == "8":
                 break
 
     async def _configure_performance(self):
@@ -1090,10 +1169,21 @@ class InteractiveUI:
             rprint(
                 f"\nCurrent Profile: [green]{self.config.performance_profile}[/green]"
             )
-            sharding_status = "Enabled" if self.config.sharding_enabled else "Disabled"
-            rprint(f"Sharding (Parallel Export): [green]{sharding_status}[/green]")
-            if self.config.sharding_enabled:
-                rprint(f"Shard Count: [green]{self.config.shard_count}[/green]")
+            takeout_status = "Enabled" if self.config.use_takeout else "Disabled"
+            rprint(f"Takeout Mode: [green]{takeout_status}[/green]")
+
+            # Sharding status
+            sharding_status = (
+                "Enabled" if self.config.enable_shard_fetch else "Disabled"
+            )
+            rprint(
+                f"Sharding (Parallel Message Fetch): [green]{sharding_status}[/green]"
+            )
+            if self.config.enable_shard_fetch:
+                rprint(f"  ├─ Shard Count: [green]{self.config.shard_count}[/green]")
+                rprint(
+                    f"  └─ Chunk Size: [green]{self.config.shard_chunk_size}[/green] messages/request"
+                )
 
             rprint("\n[bold]Options:[/bold]")
             rprint("1. Change Performance Profile")
@@ -1123,21 +1213,36 @@ class InteractiveUI:
                 input("\nPress Enter to continue...")
 
             elif choice == "2":
+                # Configure sharding
                 enable_sharding = Confirm.ask(
-                    "Enable parallel export (sharding)?",
-                    default=self.config.sharding_enabled,
+                    "Enable parallel message fetching (sharding)?",
+                    default=self.config.enable_shard_fetch,
                 )
-                self.config.sharding_enabled = enable_sharding
+                self.config.enable_shard_fetch = enable_sharding
 
                 if enable_sharding:
+                    rprint(
+                        "\n[bold yellow]ℹ️ Sharding accelerates message fetching for large chats (10k+ messages)[/bold yellow]"
+                    )
+
                     shard_count = IntPrompt.ask(
-                        "Number of workers (shards)",
+                        "Number of parallel workers (shards)",
                         default=self.config.shard_count,
                         show_default=True,
                     )
-                    self.config.shard_count = max(1, shard_count)
+                    self.config.shard_count = max(
+                        1, min(shard_count, 32)
+                    )  # Min 1, Max 32
 
-                rprint("[green]Sharding configuration updated.[/green]")
+                    chunk_size = IntPrompt.ask(
+                        "Messages per request (chunk size)",
+                        default=self.config.shard_chunk_size,
+                        show_default=True,
+                    )
+                    # Takeout API limits
+                    self.config.shard_chunk_size = max(100, min(chunk_size, 1000))
+
+                rprint("[green]✓ Sharding configuration updated.[/green]")
                 input("\nPress Enter to continue...")
 
             elif choice == "3":

@@ -1,5 +1,5 @@
 """
-Metrics collection and reporting for TOBS (Phase 3 Task B.1).
+Metrics collection and reporting for TOBS.
 
 Provides centralized metrics collection with JSON export for performance monitoring.
 All metrics are collected in-memory and can be exported to JSON for analysis.

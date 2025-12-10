@@ -17,11 +17,11 @@ async def test_sharded_manager():
 
     # 1. Setup Config
     config = Config.from_env()
-    config.sharding_enabled = True
+    config.enable_shard_fetch = True
     config.shard_count = 4
     config.session_path = os.getenv("SESSION_NAME", "tobs_session")
 
-    print(f"⚙️ Config: Sharding={config.sharding_enabled}, Workers={config.shard_count}")
+    print(f"⚙️ Config: Sharding={config.enable_shard_fetch}, Workers={config.shard_count}")
 
     # 2. Setup Manager
     conn_manager = ConnectionManager(config)

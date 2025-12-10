@@ -101,6 +101,8 @@ class TelethonFilter(logging.Filter):
             re.compile(
                 r"Using async sessions support is an experimental feature"
             ),  # Фильтр для async sessions warning
+            re.compile(r"Telegram is having internal issues"),  # Suppress retry spam
+            re.compile(r"TimeoutError.*GetFileRequest"),  # Suppress timeout spam
         ]
 
     def filter(self, record) -> bool:
@@ -109,8 +111,17 @@ class TelethonFilter(logging.Filter):
         return not any(pattern.search(msg) for pattern in self._ignore_patterns)
 
 
-# Применяем фильтр
-logging.getLogger("telethon").addFilter(TelethonFilter())
+# Применяем фильтр ко всем telethon логгерам
+_telethon_filter = TelethonFilter()
+for logger_name in [
+    "telethon",
+    "telethon.client",
+    "telethon.client.users",
+    "telethon.client.downloads",
+    "telethon.client.telegrambaseclient",
+    "telethon.network",
+]:
+    logging.getLogger(logger_name).addFilter(_telethon_filter)
 
 
 def clear_screen():

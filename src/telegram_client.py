@@ -28,6 +28,7 @@ from telethon.tl.types import (
 
 from src.config import ITER_MESSAGES_TIMEOUT, Config, ExportTarget
 from src.core.connection import PoolType
+from src.logging_context import get_context_prefix, update_context_prefix
 from src.exceptions import TelegramConnectionError
 from src.utils import clear_screen, logger, notify_and_pause, sanitize_filename
 
@@ -108,28 +109,8 @@ class TelegramManager:
 
         base_timeout = getattr(config.performance, "base_download_timeout", 300.0)
 
-        # Check for tdata import
-        if config.tdata_path and not os.path.exists(f"{config.session_name}.session"):
-            try:
-                from src.auth.tdesktop import TDesktopManager
-
-                if TDesktopManager.is_tdata(config.tdata_path):
-                    logger.info(f"Found tdata at {config.tdata_path}, importing...")
-                    # This creates the session file
-                    TDesktopManager.convert_tdata(
-                        config.tdata_path,
-                        config.session_name,
-                        config.api_id,
-                        config.api_hash,
-                    )
-                else:
-                    logger.warning(
-                        f"Provided tdata_path {config.tdata_path} does not look like a valid tdata folder"
-                    )
-            except ImportError:
-                logger.warning("opentele not installed, skipping tdata import")
-            except Exception as e:
-                logger.error(f"Failed to import tdata: {e}")
+        # Legacy automatic conversion support removed; use Telethon .session file for authentication.
+        # If you need to migrate a legacy session, convert the file externally and place the resulting .session file in the app directory.
 
         self.client = TelegramClient(
             config.session_name,
@@ -309,7 +290,7 @@ class TelegramManager:
     ) -> AsyncGenerator[Message, None]:
         """
         Fetch messages from a Telegram entity with FloodWaitError retry support and timeout.
-        Yields messages one-by-one with timeout protection (Phase 2 Task 2.2).
+        Yields messages one-by-one with timeout protection.
 
         Supports lazy loading pagination when enabled in config.
 
@@ -320,6 +301,9 @@ class TelegramManager:
             page: Page number for pagination (0-based, requires page_size)
             page_size: Messages per page (uses config.lazy_message_page_size if None)
         """
+        # 🔍 CRITICAL DEBUG: Verify which fetch_messages is called
+        logger.info(f"🔍 TelegramManager.fetch_messages() CALLED (BASE CLASS) - entity={entity}, limit={limit}, page={page}")
+        
         # Handle pagination parameters
         if page is not None:
             if page_size is None:
@@ -333,7 +317,7 @@ class TelegramManager:
             offset_id = None
 
         if min_id:
-            logger.info(f"Starting from message ID: {min_id}")
+            logger.info(f"{update_context_prefix()}Starting from message ID: {min_id}")
 
         # Apply pagination limit if specified
         if page is not None and page_size:
@@ -346,7 +330,7 @@ class TelegramManager:
 
         while retry_count < max_retries:
             try:
-                # Wrap iter_messages in timeout (Phase 2 Task 2.2)
+                # Wrap iter_messages in timeout
                 async def _message_generator():
                     async for message in self.client.iter_messages(
                         entity=entity,
@@ -1042,7 +1026,7 @@ class TelegramManager:
         Stream messages from a topic with FloodWait retry support and timeout protection.
 
         ASYNC GENERATOR - streams messages one at a time instead of collecting in memory.
-        Much more efficient for large topics (Phase 2 Task 2.2: Added timeout protection).
+        Much more efficient for large topics.
 
         Usage:
             async for message in await telegram_manager.get_topic_messages_stream(entity, topic_id):
@@ -1076,7 +1060,7 @@ class TelegramManager:
                         if message.id != topic_id:
                             yield message
 
-                # Execute with timeout per batch of messages (Phase 2 Task 2.2)
+                # Execute with timeout per batch of messages
                 async for message in _topic_message_generator():
                     try:
                         # Each message must be yielded within timeout

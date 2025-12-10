@@ -4,10 +4,12 @@ Audio Transcription Module for TOBS.
 This module provides audio transcription functionality using faster-whisper
 (Whisper Large V3 model with CTranslate2 for efficient CPU/GPU inference).
 
-Version: 5.0.0 - Simplified standalone implementation
+Version: 5.1.0 - Added auto-unload feature to save memory when inactive
 """
 
+import asyncio
 import hashlib
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -27,6 +29,7 @@ except ImportError:
     logger.warning(
         "faster-whisper not installed. Whisper transcription will be disabled."
     )
+
 
 
 @dataclass
@@ -63,9 +66,13 @@ class WhisperTranscriber:
     - VAD (Voice Activity Detection) filtering
     - Multi-language support (99+ languages)
     - Result caching support
+    - Auto-unload after inactivity to save memory (~4-6GB)
 
     Uses Systran/faster-whisper-large-v3 model.
     """
+
+    # Default auto-unload timeout (seconds). Override via WHISPER_UNLOAD_TIMEOUT env var.
+    DEFAULT_UNLOAD_TIMEOUT = int(os.getenv("WHISPER_UNLOAD_TIMEOUT", "60"))
 
     def __init__(
         self,
@@ -76,6 +83,7 @@ class WhisperTranscriber:
         use_batched: bool = True,
         enable_cache: bool = True,
         cache_dir: Optional[Path] = None,
+        auto_unload_timeout: Optional[int] = None,
     ):
         """
         Initialize Whisper transcriber.
@@ -88,6 +96,8 @@ class WhisperTranscriber:
             use_batched: Enable batched inference for long audio files
             enable_cache: Enable result caching
             cache_dir: Optional cache directory (default: .cache/transcriptions)
+            auto_unload_timeout: Seconds of inactivity before auto-unloading model.
+                                 Set to 0 or None to disable. Default: 60s.
 
         Raises:
             RuntimeError: If faster-whisper is not installed
@@ -112,6 +122,14 @@ class WhisperTranscriber:
         self._model: Optional[WhisperModel] = None
         self._batched_model: Optional[BatchedInferencePipeline] = None
         self.is_loaded = False
+        
+        # Auto-unload feature to save ~4-6GB RAM when model not in use
+        self._auto_unload_timeout = (
+            auto_unload_timeout if auto_unload_timeout is not None 
+            else self.DEFAULT_UNLOAD_TIMEOUT
+        )
+        self._last_used: float = 0.0
+        self._unload_task: Optional[asyncio.Task] = None
 
         if self.use_batched and not BATCHED_AVAILABLE:
             logger.warning(
@@ -124,7 +142,8 @@ class WhisperTranscriber:
             f"device={self.device}, "
             f"compute_type={self.compute_type}, "
             f"batched={'enabled' if self.use_batched else 'disabled'}, "
-            f"cache={'enabled' if self.enable_cache else 'disabled'}"
+            f"cache={'enabled' if self.enable_cache else 'disabled'}, "
+            f"auto_unload={self._auto_unload_timeout}s"
         )
 
     def _resolve_device(self, device: str) -> str:
@@ -191,17 +210,58 @@ class WhisperTranscriber:
             raise RuntimeError(f"Whisper model loading failed: {e}") from e
 
     def unload_model(self) -> None:
-        """Unload the model from memory."""
+        """Unload the model from memory to free ~4-6GB RAM."""
         if not self.is_loaded:
             return
 
         try:
+            # Cancel any pending unload task
+            if self._unload_task and not self._unload_task.done():
+                self._unload_task.cancel()
+            self._unload_task = None
+            
             self._model = None
             self._batched_model = None
             self.is_loaded = False
-            logger.info("Whisper model unloaded")
+            
+            # Force garbage collection to actually free memory
+            import gc
+            gc.collect()
+            
+            logger.info("🧹 Whisper model unloaded (freed ~4-6GB memory)")
         except Exception as e:
             logger.error(f"Error unloading Whisper model: {e}")
+
+    async def _schedule_auto_unload(self) -> None:
+        """Schedule auto-unload after timeout period of inactivity."""
+        if self._auto_unload_timeout <= 0:
+            return
+        
+        # Cancel any existing unload task
+        if self._unload_task and not self._unload_task.done():
+            self._unload_task.cancel()
+            try:
+                await self._unload_task
+            except asyncio.CancelledError:
+                pass
+        
+        async def _unload_after_timeout():
+            try:
+                await asyncio.sleep(self._auto_unload_timeout)
+                # Check if still inactive
+                if self.is_loaded and (time.time() - self._last_used) >= self._auto_unload_timeout:
+                    logger.info(
+                        f"🕐 Auto-unloading Whisper model after {self._auto_unload_timeout}s of inactivity"
+                    )
+                    self.unload_model()
+            except asyncio.CancelledError:
+                pass  # Expected when transcribe() is called again
+        
+        self._unload_task = asyncio.create_task(_unload_after_timeout())
+
+    def _touch_last_used(self) -> None:
+        """Update last used timestamp."""
+        self._last_used = time.time()
 
     def transcribe(
         self,
@@ -226,6 +286,9 @@ class WhisperTranscriber:
             RuntimeError: If model not loaded or transcription fails
             FileNotFoundError: If audio file doesn't exist
         """
+        # Update last used timestamp for auto-unload
+        self._touch_last_used()
+        
         # Auto-load model on first use (lazy loading)
         if not self.is_loaded:
             logger.info("Model not loaded yet, loading now (lazy initialization)...")
@@ -246,7 +309,7 @@ class WhisperTranscriber:
             else:
                 logger.debug(f"Cache MISS: {audio_path.name}, will transcribe")
 
-        # Get audio duration (used for batched mode and beam_size optimization)
+        # Get audio duration (used for batched mode and beam_size)
         duration = self._get_audio_duration(audio_path)
 
         # Determine if we should use batched mode
@@ -268,7 +331,7 @@ class WhisperTranscriber:
             )
             mode_name = "batched" if use_batched_mode else "standard"
 
-            # Phase 1 Optimization: Adaptive beam_size based on duration
+            # Adaptive beam_size based on duration
             beam_size = self._determine_optimal_beam_size(duration, kwargs)
 
             logger.info(
@@ -280,7 +343,7 @@ class WhisperTranscriber:
             # Start timing
             start_time = time.time()
 
-            # Phase 1 Optimization: Optimized transcription parameters
+            # Transcription parameters
             transcribe_params = {
                 "language": language,
                 "beam_size": beam_size,
@@ -348,12 +411,23 @@ class WhisperTranscriber:
         except Exception as e:
             logger.error(f"Transcription failed for {audio_path.name}: {e}")
             raise RuntimeError(f"Transcription failed: {e}") from e
+        
+        finally:
+            # Update timestamp and schedule auto-unload
+            self._touch_last_used()
+
+    async def schedule_auto_unload_async(self) -> None:
+        """
+        Schedule auto-unload (async version for use in async context).
+        Call this after transcription batch is complete.
+        """
+        await self._schedule_auto_unload()
 
     def _get_cache_key(self, audio_path: Path, language: Optional[str]) -> str:
         """
         Generate cache key for audio file.
 
-        Phase 1 Optimization: Use fast stat-based key instead of reading entire file.
+        Use fast stat-based key instead of reading entire file.
         50-100x faster than MD5 of full file content (0.1ms vs 100ms for large files).
 
         Key components:
@@ -471,7 +545,7 @@ class WhisperTranscriber:
         """
         Determine optimal beam_size based on audio duration.
 
-        Phase 1 Optimization: Use greedy decoding (beam_size=1) for short audio
+        Use greedy decoding (beam_size=1) for short audio
         to achieve 2-3x speedup with minimal quality loss.
 
         Args:
