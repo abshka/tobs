@@ -1,5 +1,4 @@
 import asyncio
-import os
 import re
 import sys
 from datetime import datetime
@@ -28,7 +27,7 @@ from telethon.tl.types import (
 
 from src.config import ITER_MESSAGES_TIMEOUT, Config, ExportTarget
 from src.core.connection import PoolType
-from src.logging_context import get_context_prefix, update_context_prefix
+from src.logging_context import update_context_prefix
 from src.exceptions import TelegramConnectionError
 from src.utils import clear_screen, logger, notify_and_pause, sanitize_filename
 
@@ -133,6 +132,7 @@ class TelegramManager:
         self.entity_cache: Dict[str, Any] = {}
         self.topics_cache: Dict[Union[str, int], List[TopicInfo]] = {}
         self.client_connected = False
+        self._external_takeout_id: Optional[int] = None
 
     async def connect(self) -> bool:
         """
@@ -311,17 +311,17 @@ class TelegramManager:
             # Calculate offset_id for pagination
             # Note: This is a simplified implementation
             # In practice, you'd need to track message IDs for proper pagination
-            offset_id = None  # Would need to be calculated based on page
+            offset_id: int = 0  # Would need to be calculated based on page
             logger.info(f"Fetching page {page} with page size {page_size}")
         else:
-            offset_id = None
+            offset_id = 0
 
         if min_id:
             logger.info(f"{update_context_prefix()}Starting from message ID: {min_id}")
 
         # Apply pagination limit if specified
         if page is not None and page_size:
-            effective_limit = page_size
+            effective_limit: Optional[int] = page_size
         else:
             effective_limit = limit
 
@@ -335,7 +335,7 @@ class TelegramManager:
                     async for message in self.client.iter_messages(
                         entity=entity,
                         limit=effective_limit,
-                        offset_id=offset_id or 0,
+                        offset_id=offset_id,
                         reverse=True,
                         min_id=min_id or 0,
                         wait_time=self.config.request_delay,
@@ -368,7 +368,7 @@ class TelegramManager:
                     f"Timeout: {ITER_MESSAGES_TIMEOUT}s"
                 )
                 if retry_count < max_retries:
-                    logger.info(f"⏱️  Waiting 5 seconds before retry...")
+                    logger.info("⏱️  Waiting 5 seconds before retry...")
                     await asyncio.sleep(5)
                 else:
                     logger.error(
@@ -489,7 +489,9 @@ class TelegramManager:
         List recent dialogs and allow user to select them interactively.
         """
         await notify_and_pause_async("[cyan]Fetching recent dialogs...[/cyan]")
-        offset_date, offset_id, offset_peer = None, 0, None
+        offset_date: Optional[Any] = None
+        offset_id: Optional[int] = 0
+        offset_peer: Optional[Any] = None
         page_stack = []
         page_num = 1
 
@@ -499,7 +501,7 @@ class TelegramManager:
                 dialogs = await self.client.get_dialogs(
                     limit=self.config.dialog_fetch_limit,
                     offset_date=offset_date,
-                    offset_id=offset_id,
+                    offset_id=offset_id or 0,
                     offset_peer=offset_peer,
                 )
                 if not dialogs:
@@ -529,13 +531,14 @@ class TelegramManager:
                     last_dialog = dialogs[-1]
                     offset_date, offset_id, offset_peer = (
                         last_dialog.date,
-                        last_dialog.id,
+                        int(last_dialog.id or 0),
                         last_dialog.entity,
                     )
                     page_num += 1
                     continue
                 if selection in ("p", "prev", "previous") and page_stack:
-                    offset_date, offset_id, offset_peer = page_stack.pop()
+                    popped = page_stack.pop()
+                    offset_date, offset_id, offset_peer = popped
                     page_num = max(1, page_num - 1)
                     continue
 
@@ -892,7 +895,7 @@ class TelegramManager:
             List of TopicInfo objects
         """
         page_size = limit or self.config.lazy_topic_page_size
-        topics = []
+        topics: List[TopicInfo] = []
         current_offset = offset_topic
 
         try:

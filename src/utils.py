@@ -861,7 +861,7 @@ def is_voice_message(message) -> bool:
     """
     try:
         # Import here to avoid circular dependencies
-        from telethon.tl.types import DocumentAttributeAudio, MessageMediaDocument
+        from telethon.tl.types import DocumentAttributeAudio, MessageMediaDocument  # type: ignore[import-untyped]
 
         # Check if message has media
         if not hasattr(message, "media") or message.media is None:
@@ -913,7 +913,6 @@ class LinkParser:
             - topic_id: Optional[int]
             - is_private: bool
         """
-        import re
         from urllib.parse import parse_qs, urlparse
 
         # Clean URL
@@ -931,7 +930,7 @@ class LinkParser:
         path_parts = [p for p in parsed.path.split("/") if p]
         query = parse_qs(parsed.query)
 
-        result = {
+        result: Dict[str, Any] = {
             "peer": None,
             "message_id": None,
             "topic_id": None,

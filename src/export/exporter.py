@@ -7,10 +7,10 @@ import asyncio
 import functools
 import inspect
 import os
+import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 import aiofiles
 import aiohttp
@@ -23,7 +23,6 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from telethon import errors
-from telethon.errors import FloodWaitError
 from telethon.tl.functions import InvokeWithTakeoutRequest
 from telethon.tl.functions.account import (
     FinishTakeoutSessionRequest,
@@ -60,7 +59,6 @@ MEDIA_COPY_CHUNK_SIZE = int(
 )  # 8MB
 
 
-from ..logging_context import set_batch_context, set_prefetch_context
 
 
 class BloomFilter:
@@ -121,7 +119,7 @@ class BloomFilter:
         """Get memory usage in MB."""
         return len(self.bit_array) / (1024 * 1024)
 
-    def stats(self) -> Dict[str, any]:
+    def stats(self) -> Dict[str, Any]:
         """Get filter statistics."""
         return {
             "size_bits": self.size,
@@ -192,7 +190,7 @@ class TakeoutSessionWrapper:
             return self
         except Exception as e:
             if "TakeoutInitDelayError" in str(type(e).__name__):
-                raise errors.TakeoutInitDelayError()
+                raise errors.TakeoutInitDelayError(e.request)  # type: ignore
             raise e
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -344,7 +342,7 @@ class ExportStatistics:
 
     def __init__(self):
         self.start_time = time.time()
-        self.end_time = None
+        self.end_time: Optional[float] = None
         self.messages_processed = 0
         self.media_downloaded = 0
         self.notes_created = 0
@@ -529,11 +527,6 @@ class Exporter:
                 logger.warning(message)
 
         self._log_batch.clear()
-        """Intern string to reduce memory usage for repeated strings."""
-        if s in self._interned_strings:
-            return s
-        self._interned_strings.add(s)
-        return sys.intern(s)
 
     async def _batch_cache_set(self, key: str, value: Any):
         """Add cache update to batch queue."""
@@ -1203,7 +1196,6 @@ class Exporter:
             )
             # In a real implementation, this would call a detailed method
             # similar to _export_regular_target but for a topic.
-            pass
 
         return self.statistics
 
@@ -1344,10 +1336,6 @@ async def run_export(
                 logger.info(
                     "⚠️  Please check your Telegram messages (Service Notifications) to ALLOW the request."
                 )
-
-                # Calculate max file size in bytes (default 2GB)
-                # Telethon requires file_max_size if files=True
-                max_file_size = getattr(config, "max_file_size_mb", 2000) * 1024 * 1024
 
                 # 🧹 Force-clear stale state blindly
                 # The error "Can't send a takeout request while another takeout..." is a client-side check

@@ -49,7 +49,7 @@ class TranscriptionResult:
     language: str
     duration_seconds: float
     confidence: Optional[float] = None
-    segments: list = None
+    segments: Optional[list] = None
 
     def __post_init__(self):
         if self.segments is None:
@@ -149,12 +149,9 @@ class WhisperTranscriber:
     def _resolve_device(self, device: str) -> str:
         """Resolve device specification."""
         if device == "auto":
-            try:
-                import torch
-
-                return "cuda" if torch.cuda.is_available() else "cpu"
-            except ImportError:
-                return "cpu"
+            # Since torch was removed from dependencies, default to CPU
+            # faster-whisper can still use CUDA if available via its own detection
+            return "cpu"
         return device
 
     def _resolve_compute_type(self, compute_type: str) -> str:
@@ -360,7 +357,10 @@ class WhisperTranscriber:
                 transcribe_params["batch_size"] = self.batch_size
 
             # Perform transcription
-            segments, info = model_to_use.transcribe(
+            if model_to_use is None:
+                raise RuntimeError("No transcription model available")
+            
+            segments, info = model_to_use.transcribe(  # type: ignore
                 str(audio_path), **transcribe_params
             )
 
@@ -557,7 +557,12 @@ class WhisperTranscriber:
         """
         # Allow manual override
         if "beam_size" in kwargs:
-            return kwargs["beam_size"]
+            beam_size = kwargs["beam_size"]
+            if isinstance(beam_size, int):
+                return beam_size
+            else:
+                logger.warning(f"Invalid beam_size type {type(beam_size)}, using default")
+                return 3
 
         # If duration unknown, use conservative default
         if duration is None:

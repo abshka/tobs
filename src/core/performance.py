@@ -4,7 +4,6 @@
 
 import asyncio
 import inspect
-import json
 import logging
 import time
 from collections import deque

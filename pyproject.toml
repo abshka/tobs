@@ -57,6 +57,10 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
     "pytest-mock>=3.14.0",
+    "mypy>=1.0.0",
+    "types-aiofiles>=24.1.0",
+    "types-psutil>=6.0.0",
+    "autoflake>=2.0.0",
 ]
 
 [tool.mypy]
@@ -65,11 +69,11 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 check_untyped_defs = true
+mypy_path = "stubs"
 
 # Ignore missing imports for external libraries without type stubs
 [[tool.mypy.overrides]]
 module = [
-    "telethon.*",
     "ffmpeg.*",
     "aiohttp_proxy.*",
     "aiorwlock.*",

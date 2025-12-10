@@ -21,7 +21,6 @@ from telethon.tl.types import Message
 class TelegramServerError(Exception):
     """Raised when Telegram servers are having issues (not client-side problem)."""
 
-    pass
 
 
 # Patterns indicating Telegram server-side issues
@@ -212,7 +211,6 @@ class TakeoutClientWrapper:
 
     # NOTE: The TakeoutClientWrapper above handles wrapping requests with InvokeWithTakeoutRequest.
     # For complex download scenarios, consider using the wrapper's download_media/download_file methods.
-    pass
 
 
 def get_best_threads(file_size: int, max_threads: int = 16) -> int:
@@ -245,7 +243,7 @@ class MediaDownloader:
         connection_manager: Any,
         temp_dir: Path,
         client: Any = None,
-        worker_clients: list = None,
+        worker_clients: Optional[list] = None,
     ):
         """
         Инициализация загрузчика медиа.
@@ -447,9 +445,8 @@ class MediaDownloader:
                             ),
                             timeout=chunk_timeout,
                         )
-                    except Exception as e_file:
+                    except Exception:
                         # Fallback to download_media if download_file fails (e.g. location extraction issue)
-                        # logger.debug(f"download_file failed, falling back to download_media: {e_file}")
                         await asyncio.wait_for(
                             download_client.download_media(
                                 message,
@@ -542,7 +539,7 @@ class MediaDownloader:
                 # Special handling for DC migration errors
                 if "FileMigrateError" in str(type(e)) or "DC" in error_str:
                     logger.info(
-                        f"DC migration detected, extending timeout for next attempt"
+                        "DC migration detected, extending timeout for next attempt"
                     )
                     # Increase timeout for DC migration
                     chunk_timeout = min(chunk_timeout * 1.5, 2400)  # Max 40 minutes
@@ -589,6 +586,12 @@ class MediaDownloader:
                 else min(5 + consecutive_failures * 2, 30)
             )
             await asyncio.sleep(delay)
+
+        # Все попытки исчерпаны
+        logger.error(
+            f"❌ Persistent download failed after {MAX_PERSISTENT_ATTEMPTS} attempts for message {message.id}"
+        )
+        return None
 
     async def _standard_download(
         self,

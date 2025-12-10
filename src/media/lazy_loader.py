@@ -4,12 +4,11 @@ Provides lazy loading functionality for media files, allowing metadata storage
 and on-demand downloading instead of immediate downloads during export.
 """
 
-import asyncio
 import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 from loguru import logger
 from telethon.tl.types import Message
@@ -32,8 +31,8 @@ class LazyMediaMetadata:
     duration: Optional[float] = None
     telegram_file_id: Optional[str] = None
     download_url: Optional[str] = None
-    created_at: float = None
-    lazy_load_token: str = None
+    created_at: Optional[float] = None
+    lazy_load_token: Optional[str] = None
 
     def __post_init__(self):
         if self.created_at is None:
@@ -126,6 +125,7 @@ class LazyMediaLoader:
                 return None
 
             # Store in memory cache
+            assert metadata.lazy_load_token is not None
             self._metadata_cache[metadata.lazy_load_token] = metadata
 
             # Save to disk
@@ -155,6 +155,7 @@ class LazyMediaLoader:
             Placeholder for markdown
         """
         description = self._create_description(metadata)
+        assert metadata.lazy_load_token is not None
         placeholder = LazyLoadPlaceholder(
             token=metadata.lazy_load_token,
             media_type=metadata.media_type,

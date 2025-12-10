@@ -7,7 +7,6 @@ Main entry point for the application.
 import asyncio
 import signal
 import sys
-from pathlib import Path
 
 # Attempt to use uvloop for performance improvement
 try:
@@ -20,10 +19,10 @@ except ImportError:
 import aiohttp
 from rich import print as rprint
 
-from src.config import Config, ExportTarget
+from src.config import Config
 from src.core_manager import CoreSystemManager
-from src.exceptions import ConfigError, TelegramConnectionError
-from src.export.exporter import Exporter, run_export
+from src.exceptions import ConfigError
+from src.export.exporter import run_export
 from src.media.manager import MediaProcessor
 from src.note_generator import NoteGenerator
 from src.telegram_client import TelegramManager

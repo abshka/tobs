@@ -4,7 +4,6 @@ Handles user interaction, menu systems, and interactive configuration.
 Provides modular user interface functionality.
 """
 
-import asyncio
 from pathlib import Path
 from typing import List, Literal, Optional, cast
 
@@ -612,8 +611,8 @@ class InteractiveUI:
             # Reverse messages to show in chronological order (oldest -> newest)
             for i, msg in enumerate(reversed(messages)):
                 # Get message text or media indicator
-                if msg.text:
-                    text = msg.text.replace("\n", " ")  # Remove newlines
+                if msg.text:  # type: ignore
+                    text = msg.text.replace("\n", " ")  # Remove newlines  # type: ignore
                     if len(text) > 50:
                         text = text[:50] + "..."
                 elif msg.media:
@@ -641,7 +640,7 @@ class InteractiveUI:
                 )
 
             rprint(
-                f"\n[dim]💡 Tip: You can export all messages, last N messages, or start from specific ID[/dim]"
+                "\n[dim]💡 Tip: You can export all messages, last N messages, or start from specific ID[/dim]"
             )
 
             return latest.id

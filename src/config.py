@@ -324,7 +324,7 @@ class TranscriptionConfig:
 
     # Basic settings
     enabled: bool = True
-    language: str = "ru"  # Default language for transcription
+    language: Optional[str] = "ru"  # Default language for transcription
     device: str = "auto"  # 'auto', 'cuda', 'cpu', 'cuda:0'
 
     # Whisper settings

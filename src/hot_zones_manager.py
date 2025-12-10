@@ -21,7 +21,6 @@ adapt chunk sizes based on estimated message density.
 
 import json
 import logging
-import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path

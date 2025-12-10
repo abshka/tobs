@@ -1,6 +1,4 @@
 import asyncio
-import logging
-import math
 import os
 import pickle
 import shutil
@@ -9,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
-from telethon import TelegramClient, functions, types, utils
+from telethon import TelegramClient, types, utils
 from telethon.errors import FloodWaitError
 from telethon.tl.functions import InvokeWithTakeoutRequest
 from telethon.tl.functions.account import (
@@ -19,15 +17,9 @@ from telethon.tl.functions.account import (
 from telethon.tl.functions.messages import GetHistoryRequest
 
 from src.config import Config
-from src.logging_context import get_context_prefix, set_worker_context
+from src.logging_context import set_worker_context
 from src.telegram_client import TelegramManager
 from src.utils import logger  # Use configured logger from utils
-
-# Try to use orjson for speed
-try:
-    import orjson as json
-except ImportError:
-    import json
 
 
 class TakeoutWorkerClient(TelegramClient):
@@ -50,7 +42,7 @@ class TakeoutWorkerClient(TelegramClient):
                 request = InvokeWithTakeoutRequest(
                     takeout_id=self.takeout_id, query=request
                 )
-        return await super().__call__(request, ordered=ordered)
+        return await super().__call__(request)
 
 
 class ShardedTelegramManager(TelegramManager):
@@ -64,21 +56,20 @@ class ShardedTelegramManager(TelegramManager):
         self.worker_clients: List[TelegramClient] = []
         self.takeout_id: Optional[int] = None
         self.worker_count = config.shard_count
-        self.worker_stats: Dict[int, Dict[str, int]] = {}
+        self.worker_stats: Dict[int, Dict[str, Any]] = {}
         self._owned_takeout = False  # Flag to track if we created the session
         self._external_takeout_id: Optional[int] = (
             None  # ID provided externally (e.g. by run_export)
         )
         self.current_entity_dc: int = 0  # DC ID of current entity being exported
 
-    def get_worker_stats(self) -> Dict[int, Dict[str, int]]:
+    def get_worker_stats(self) -> Dict[int, Dict[str, Any]]:
         """Returns statistics for each worker."""
         return self.worker_stats
 
     async def _setup_takeout(self) -> int:
         """Initializes Takeout session on the master client."""
-
-        # 1. Check for externally provided ID (from run_export)
+        # ... existing code ...
         if self._external_takeout_id:
             logger.info(
                 f"♻️ Reusing external Takeout Session (ID: {self._external_takeout_id})"
@@ -96,7 +87,9 @@ class ShardedTelegramManager(TelegramManager):
         if client_takeout_id:
             logger.info(f"♻️ Reusing existing Takeout Session (ID: {client_takeout_id})")
             self._owned_takeout = False
-            return client_takeout_id
+            return int(client_takeout_id)  # type: ignore
+
+        # ... rest of function ...
 
         # 3. Check if we are inside a context manager that wraps the client
         # This is tricky, but if we are here, it means we failed to find the ID.
@@ -126,7 +119,7 @@ class ShardedTelegramManager(TelegramManager):
             )
             takeout_sess = await self.client(init_request)
             self._owned_takeout = True
-            return takeout_sess.id
+            return takeout_sess.id  # type: ignore
         except Exception as e:
             logger.error(f"Failed to init Takeout: {e}")
             # If we failed because another session exists, we might want to try to finish it?
@@ -154,9 +147,9 @@ class ShardedTelegramManager(TelegramManager):
             shutil.copy(base_path, worker_path)
             worker_sessions.append(worker_sess_name)
 
-        return worker_sessions
+        return worker_sessions  # type: ignore
     
-    def _extract_dc_id(self, entity_or_peer) -> int:
+    def _extract_dc_id(self, entity_or_peer: Any) -> int:
         """
         Extract DC (datacenter) ID from entity or peer.
         Returns DC ID or 0 if unable to determine.
@@ -165,7 +158,7 @@ class ShardedTelegramManager(TelegramManager):
             # Try to get DC from photo
             if hasattr(entity_or_peer, 'photo') and entity_or_peer.photo:
                 if hasattr(entity_or_peer.photo, 'dc_id'):
-                    return entity_or_peer.photo.dc_id
+                    return int(entity_or_peer.photo.dc_id)
             
             # Try to get from access_hash (channel/user)
             if hasattr(entity_or_peer, 'access_hash'):
@@ -174,7 +167,7 @@ class ShardedTelegramManager(TelegramManager):
                 pass
             
             # For InputPeer types
-            if isinstance(entity_or_peer, (types.InputPeerChannel, types.InputPeerUser)):
+            if isinstance(entity_or_peer, (types.InputPeerChannel, types.InputPeerUser)):  # type: ignore
                 # Unfortunately, InputPeer doesn't carry DC info directly
                 # We'd need to store it from the original entity
                 pass
@@ -209,11 +202,11 @@ class ShardedTelegramManager(TelegramManager):
         max_slow_chunk = max(all_slow_chunks, key=lambda c: c["duration_sec"])
         
         # DC-aware statistics
-        dc_stats = {}
+        dc_stats: Dict[int, Dict[str, Any]] = {}
         for chunk in all_slow_chunks:
             dc = chunk.get("dc_id", 0)
             if dc not in dc_stats:
-                dc_stats[dc] = {"count": 0, "total_duration": 0, "chunks": []}
+                dc_stats[dc] = {"count": 0, "total_duration": 0.0, "chunks": []}
             dc_stats[dc]["count"] += 1
             dc_stats[dc]["total_duration"] += chunk["duration_sec"]
             dc_stats[dc]["chunks"].append(chunk)
@@ -287,7 +280,7 @@ class ShardedTelegramManager(TelegramManager):
         if hasattr(self, "worker_clients"):
             for client in self.worker_clients:
                 try:
-                    if client.is_connected():
+                    if client.is_connected():  # type: ignore
                         await client.disconnect()
                 except Exception as e:
                     logger.warning(f"Error disconnecting worker client: {e}")
@@ -327,11 +320,11 @@ class ShardedTelegramManager(TelegramManager):
         self,
         worker_idx: int,
         client: TelegramClient,
-        input_peer: types.TypeInputPeer,
+        input_peer: "types.TypeInputPeer",  # type: ignore
         id_ranges: List[Tuple[int, int]],
         output_path: Path,
         takeout_id: int,
-        task_queue: Optional[asyncio.Queue] = None,
+        task_queue: Optional[asyncio.Queue[Any]] = None,
     ):
         """
         Worker loop: fetches messages and writes them to a temporary file.
@@ -426,7 +419,7 @@ class ShardedTelegramManager(TelegramManager):
         self,
         worker_idx: int,
         client: TelegramClient,
-        input_peer: types.TypeInputPeer,
+        input_peer: "types.TypeInputPeer",  # type: ignore
         start_id: int,
         end_id: int,
         f,
@@ -632,7 +625,7 @@ class ShardedTelegramManager(TelegramManager):
         min_id: Optional[int] = None,
         page: Optional[int] = None,
         page_size: Optional[int] = None,
-    ) -> AsyncGenerator[types.Message, None]:
+    ) -> AsyncGenerator["types.Message", None]:  # type: ignore
         """
         Overrides fetch_messages to use sharding if applicable.
         Falls back to super().fetch_messages() if sharding is disabled or not possible.
@@ -688,7 +681,7 @@ class ShardedTelegramManager(TelegramManager):
             else:
                 logger.debug("📍 Entity DC: Unknown (will log per-chunk if available)")
             
-            input_peer = utils.get_input_peer(resolved_entity)
+            input_peer = utils.get_input_peer(resolved_entity)  # type: ignore
 
             # Get bounds (max_id)
             step_start = time.time()
@@ -799,7 +792,7 @@ class ShardedTelegramManager(TelegramManager):
             datacenter = f"DC{dc_id}" if dc_id > 0 else "Unknown"
             
             # Create task queue and populate with adaptive-sized chunks
-            task_queue = asyncio.Queue()
+            task_queue: asyncio.Queue[Any] = asyncio.Queue()
             current_id = effective_min
             chunks_created = 0
             
@@ -881,8 +874,8 @@ class ShardedTelegramManager(TelegramManager):
             # 5. Yield from Files in Order with Profiling
             count = 0
             merge_start_time = time.time()
-            total_read_time_ms = 0
-            total_deserialize_time_ms = 0
+            total_read_time_ms: float = 0
+            total_deserialize_time_ms: float = 0
             total_bytes_read = 0
             last_log_time = time.time()
             last_count = 0

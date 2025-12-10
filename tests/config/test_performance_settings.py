@@ -48,7 +48,7 @@ class TestPerformanceSettingsDefaults:
         settings = PerformanceSettings()
         assert settings.enable_persistent_download is True
         assert settings.persistent_download_min_size_mb == 1
-        assert settings.persistent_max_failures == 20
+        assert settings.persistent_max_failures == 30
         assert settings.persistent_chunk_timeout == 600
 
     def test_parallel_download_defaults(self):

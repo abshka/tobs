@@ -12,7 +12,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import aiofiles
 import aiofiles.os
@@ -30,6 +30,9 @@ from .models import ProcessingSettings, ProcessingTask
 from .processors.audio import AudioProcessor
 from .processors.image import ImageProcessor
 from .processors.video import VideoProcessor
+
+if TYPE_CHECKING:
+    from .processors import WhisperTranscriber
 from .validators import MediaValidator
 
 
@@ -50,7 +53,7 @@ class MediaProcessor:
         max_workers: int = 4,
         temp_dir: Optional[Path] = None,
         enable_smart_caching: bool = True,
-        worker_clients: list = None,
+        worker_clients: Optional[list] = None,
     ):
         """
         Инициализация медиа-процессора.
@@ -106,7 +109,7 @@ class MediaProcessor:
         self._image_processor: Optional[ImageProcessor] = None
 
         # Транскрайбер (опционально, если включена транскрипция)
-        self._transcriber = None
+        self._transcriber: Optional["WhisperTranscriber"] = None
 
         # Очередь обработки
         self._processing_queue: asyncio.Queue = asyncio.Queue()
@@ -367,6 +370,7 @@ class MediaProcessor:
         Returns placeholder paths immediately - actual files will be downloaded
         by background workers.
         """
+        assert self._download_queue is not None, "Download queue must be initialized for async downloads"
         result_paths = []
 
         for media_type, msg in media_items:
@@ -471,14 +475,14 @@ class MediaProcessor:
     def _should_download_media_type(self, media_type: str) -> bool:
         """Check if the given media type should be downloaded based on config."""
         if media_type in ["photo", "image"]:
-            return self.config.download_photos
+            return bool(self.config.download_photos)
         elif media_type == "video":
-            return self.config.download_videos
+            return bool(self.config.download_videos)
         elif media_type == "audio":
-            return self.config.download_audio
+            return bool(self.config.download_audio)
         else:
             # "document", "webpage", "unknown", "sticker", etc.
-            return self.config.download_other
+            return bool(self.config.download_other)
 
     def _determine_media_type(self, message: Message) -> Optional[str]:
         """Определение типа медиа."""
@@ -1128,6 +1132,7 @@ class MediaProcessor:
         Returns:
             True if all completed, False if timeout
         """
+        assert self._download_queue is not None, "Download queue must be initialized"
         from datetime import timedelta
 
         from rich.progress import (
@@ -1303,6 +1308,8 @@ class MediaProcessor:
             logger.debug("Transcriber not available")
             return None
 
+        assert self._transcriber is not None, "Transcriber must be initialized"
+
         try:
             # Get language from config
             language = getattr(self.config.transcription, "language", None)
@@ -1311,7 +1318,7 @@ class MediaProcessor:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 self.cpu_executor,
-                lambda: self._transcriber.transcribe(file_path, language=language),
+                lambda: self._transcriber.transcribe(file_path, language=language),  # type: ignore
             )
 
             if result and result.text:

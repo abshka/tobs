@@ -40,7 +40,7 @@ class CompressionType(Enum):
 class CacheEntry:
     """Cache entry."""
 
-    data: Any
+    data: Union[str, bytes, Any]
     created_at: float
     last_accessed: float
     access_count: int = 0
@@ -410,6 +410,7 @@ class CacheManager:
                 for key, entry_data in entries_data.items():
                     try:
                         raw_data = entry_data["data"]
+                        processed_data: Union[str, bytes, Any]
                         if (
                             isinstance(raw_data, str)
                             and entry_data.get("data_encoding") == "base64"
@@ -469,6 +470,7 @@ class CacheManager:
                 for key, entry_data in entries_data.items():
                     try:
                         raw_data = entry_data.get("data")
+                        processed_data: Union[str, bytes, Any]
                         if (
                             isinstance(raw_data, str)
                             and entry_data.get("data_encoding") == "base64"
@@ -546,7 +548,7 @@ class CacheManager:
                             if isinstance(entry_dict.get("data"), (bytes, bytearray)):
                                 entry_dict["data"] = base64.b64encode(
                                     entry_dict["data"]
-                                ).decode("ascii")
+                                ).decode("ascii")  # type: ignore[assignment]
                                 entry_dict["data_encoding"] = "base64"
                             entries_dict[key] = entry_dict
 
