@@ -1,0 +1,79 @@
+# VCS
+.git
+.github
+.gitignore
+
+# Docker
+.dockerignore
+Dockerfile
+docker-compose.yml
+docker-compose.*.yml
+
+# Python virtual environments - CRITICAL: Must exclude from build context!
+**/.venv
+**/venv
+*.venv
+env/
+ENV/
+
+# Python cache - MUST exclude from build context!
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing and coverage
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# Environment files
+.env
+.env.*
+*.env
+
+# Build artifacts
+dist/
+build/
+export/
+
+# Logs
+*.log
+
+# Monitoring and cache (будут монтироваться как volumes)
+monitoring_*.json
+cache/
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Tests and stubs
+tests/
+stubs/
+
+# Временные файлы
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Session files - НЕ ВКЛЮЧАТЬ В ОБРАЗ (security risk!)
+*.session
+*.session-journal
+sessions/
+
+# База данных (если есть)
+*.db

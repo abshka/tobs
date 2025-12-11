@@ -964,7 +964,7 @@ class ShardedTelegramManager(TelegramManager):
                             time.time() - deserialize_start
                         ) * 1000
 
-                        for msg in batch:
+                        for msg in sorted(batch, key=lambda m: m.id):  # Sort by ID to ensure chronological order (oldest first)
                             # Re-attach worker client to the message for parallel media download
                             msg._client = self.worker_clients[i]
                             yield msg

@@ -336,7 +336,7 @@ class TelegramManager:
                         entity=entity,
                         limit=effective_limit,
                         offset_id=offset_id,
-                        reverse=True,
+                        reverse=False,  # Changed from True to False for chronological order (oldest first)
                         min_id=min_id or 0,
                         wait_time=self.config.request_delay,
                     ):
@@ -1058,7 +1058,7 @@ class TelegramManager:
                         reply_to=topic_id,
                         limit=limit,
                         min_id=offset_id,
-                        reverse=True,
+                        reverse=False,  # Changed to False for chronological order (oldest first)
                     ):
                         if message.id != topic_id:
                             yield message

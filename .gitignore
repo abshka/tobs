@@ -69,3 +69,6 @@ Thumbs.db
 *.md
 !README.md
 docs/
+
+# Session files (credentials)
+sessions/

@@ -228,7 +228,7 @@ class NoteGenerator:
 
                 comments = []
                 async for comment in client.iter_messages(
-                    channel_id, reply_to=main_post.id, reverse=True
+                    channel_id, reply_to=main_post.id, reverse=False  # Changed to False for chronological order
                 ):
                     comments.append(comment)
 

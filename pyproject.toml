@@ -51,18 +51,6 @@ dependencies = [
   "cryptg>=0.4.0",
 ]
 
-[dependency-groups]
-dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.24.0",
-    "pytest-cov>=6.0.0",
-    "pytest-mock>=3.14.0",
-    "mypy>=1.0.0",
-    "types-aiofiles>=24.1.0",
-    "types-psutil>=6.0.0",
-    "autoflake>=2.0.0",
-]
-
 [tool.mypy]
 python_version = "3.11"
 warn_return_any = true

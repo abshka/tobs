@@ -1,0 +1,70 @@
+version: "3.8"
+
+services:
+    tobs:
+        build:
+            context: .
+            dockerfile: Dockerfile
+            args:
+                # Явно передать пустые прокси при сборке
+                http_proxy: ""
+                https_proxy: ""
+                HTTP_PROXY: ""
+                HTTPS_PROXY: ""
+                ftp_proxy: ""
+                FTP_PROXY: ""
+                no_proxy: ""
+                NO_PROXY: ""
+
+        container_name: tobs
+        hostname: tobs
+
+        network_mode: bridge
+        stdin_open: true
+        tty: true
+
+        restart: unless-stopped
+
+        env_file:
+            - .env
+
+        environment:
+            # Пути внутри контейнера
+            - EXPORT_PATH=/home/appuser/export
+            - SESSION_NAME=sessions/tobs_session
+            - CACHE_PATH=/home/appuser/cache
+            - PYTHONUNBUFFERED=1
+
+            # ЯВНО отключить прокси в runtime (переопределяем хост)
+            - HTTP_PROXY=
+            - HTTPS_PROXY=
+            - http_proxy=
+            - https_proxy=
+            - FTP_PROXY=
+            - ftp_proxy=
+            - NO_PROXY=*
+            - no_proxy=*
+
+        volumes:
+            # Данные экспорта
+            - ./export:/home/appuser/export:Z
+
+            # Session файлы в отдельной директории
+            - ./sessions:/app/sessions:Z
+
+            # Кэш транскрипций
+            - ./cache:/home/appuser/cache:Z
+
+        group_add:
+            - video
+            - "988"
+        # Hardware acceleration для FFmpeg
+        devices:
+            - /dev/dri:/dev/dri
+
+        # Логирование
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "10m"
+                max-file: "3"

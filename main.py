@@ -22,13 +22,77 @@ from rich import print as rprint
 from src.config import Config
 from src.core_manager import CoreSystemManager
 from src.exceptions import ConfigError
-from src.export.exporter import run_export
+from src.export.exporter import TakeoutSessionWrapper, run_export
+from telethon import errors
 from src.media.manager import MediaProcessor
 from src.note_generator import NoteGenerator
 from src.telegram_client import TelegramManager
 from src.telegram_sharded_client import ShardedTelegramManager
 from src.ui.interactive import run_interactive_configuration
 from src.utils import logger, setup_logging
+
+
+async def precheck_takeout(config, telegram_manager):
+    """
+    Pre-check and initialize Takeout session before export.
+    Returns True if Takeout is ready or not needed, False if user needs to grant permission.
+    """
+    if not config.use_takeout:
+        return True  # Takeout not needed
+
+    logger.info("🔍 Checking Takeout session status...")
+
+    # 1. Check if we are already in a Takeout session (Reuse Strategy)
+    current_client = telegram_manager.client
+    existing_id = getattr(
+        current_client,
+        "takeout_id",
+        getattr(current_client, "_takeout_id", None),
+    )
+
+    if existing_id:
+        logger.info(f"♻️ Client is already in Takeout mode (ID: {existing_id}). Ready to export.")
+        telegram_manager._external_takeout_id = existing_id
+        return True
+
+    # 2. Try to init new session
+    try:
+        logger.info("🚀 Attempting to initiate Telegram Takeout session...")
+        rprint("[bold yellow]⚠️  IMPORTANT: Please check your Telegram messages (Service Notifications) to ALLOW the Takeout request.[/bold yellow]")
+        rprint("[bold cyan]ℹ️  Telegram will send you a notification asking to allow data export.[/bold cyan]")
+        rprint("[bold cyan]ℹ️  You have 5 minutes to approve it in Telegram.[/bold cyan]")
+        rprint("[bold green]⏳ Waiting for Takeout session initialization...[/bold green]")
+
+        # 🧹 Force-clear stale state blindly
+        try:
+            telegram_manager.client._takeout_id = None
+        except Exception:
+            pass
+
+        # Try to initialize Takeout session
+        async with TakeoutSessionWrapper(
+            telegram_manager.client, config
+        ) as takeout_client:
+            logger.info("✅ Takeout session established successfully!")
+            takeout_id = takeout_client.takeout_id
+            if takeout_id:
+                logger.info(f"♻️ Takeout ID {takeout_id} ready for export")
+            return True
+
+    except errors.TakeoutInitDelayError as e:
+        logger.warning("⚠️  Takeout request needs confirmation. Please check Telegram Service Notifications.")
+        rprint("[bold red]❌ Takeout permission required![/bold red]")
+        rprint("[bold yellow]📱 Please go to Telegram → Service Notifications → Allow the data export request[/bold yellow]")
+        rprint("[bold cyan]⏳ You have 5 minutes to approve it.[/bold cyan]")
+        rprint("[bold green]🔄 After approving, run the export again.[/bold green]")
+        return False
+
+    except Exception as e:
+        logger.warning(f"⚠️  Takeout session failed: {e}")
+        rprint(f"[bold red]❌ Takeout initialization failed: {e}[/bold red]")
+        rprint("[bold yellow]ℹ️  Falling back to Standard API (slower but works without Takeout)[/bold yellow]")
+        config.use_takeout = False  # Disable Takeout for this session
+        return True
 
 
 def handle_sigint(signum, frame):
@@ -229,6 +293,12 @@ async def async_main():
 
             # User selected "Start Export" - proceed with export
             rprint("\n[bold green]✓ Starting export...[/bold green]\n")
+
+            # 🚀 PRECHECK TAKEOUT BEFORE EXPORT
+            takeout_ready = await precheck_takeout(config, telegram_manager)
+            if not takeout_ready:
+                rprint("[bold yellow]ℹ️  Export cancelled. Please approve Takeout request and try again.[/bold yellow]")
+                return  # Exit without error
 
             # Reuse existing connections for export
             cache_manager = core_manager.get_cache_manager()

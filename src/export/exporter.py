@@ -624,7 +624,7 @@ class Exporter:
         """Fetch a batch of messages (MW1)."""
         # Uses whatever client is currently in telegram_manager (Standard or Takeout)
         return await self.telegram_manager.client.get_messages(
-            entity, limit=limit, min_id=min_id, reverse=True
+            entity, limit=limit, min_id=min_id, reverse=False  # Changed to False for chronological order
         )
 
     async def _process_message_parallel(
