@@ -28,7 +28,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="telethon.utils")
 
 # Компилируем один раз при импорте модуля для +50% производительности
 
-_FILENAME_SANITIZE_PATTERN = re.compile(r'[\\/*?:"<>|&!]')
+_FILENAME_SANITIZE_PATTERN = re.compile(r'[\\/*?:"<>|&! ]')
 _TELEGRAM_LINK_PATTERN = re.compile(r"(?:https?://)?t\.me/([\w_]+)/([0-9]+)")
 _TELEGRAPH_LINK_PATTERN = re.compile(r"https?://telegra\.ph/[\w\-]+(?:/[\w\-]+)*")
 _TELEGRAPH_MARKDOWN_PATTERN = re.compile(
@@ -861,7 +861,10 @@ def is_voice_message(message) -> bool:
     """
     try:
         # Import here to avoid circular dependencies
-        from telethon.tl.types import DocumentAttributeAudio, MessageMediaDocument  # type: ignore[import-untyped]
+        from telethon.tl.types import (  # type: ignore[import-untyped]
+            DocumentAttributeAudio,
+            MessageMediaDocument,
+        )
 
         # Check if message has media
         if not hasattr(message, "media") or message.media is None:
