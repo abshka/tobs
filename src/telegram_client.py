@@ -8,27 +8,14 @@ from rich import print as rprint
 from rich.panel import Panel
 from rich.prompt import Confirm
 from telethon import TelegramClient, types
-from telethon.errors import (
-    ChannelPrivateError,
-    ChatAdminRequiredError,
-    FloodWaitError,
-    PeerIdInvalidError,
-    SessionPasswordNeededError,
-    UsernameInvalidError,
-    UsernameNotOccupiedError,
-    UserNotParticipantError,
-)
-from telethon.tl.functions.channels import GetForumTopicsRequest
-from telethon.tl.types import (
-    Channel,
-    ForumTopic,
-    Message,
-)
+from telethon.errors import FloodWaitError, SessionPasswordNeededError, PhoneCodeInvalidError
+from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.types import Channel, Message, User
 
 from src.config import ITER_MESSAGES_TIMEOUT, Config, ExportTarget
 from src.core.connection import PoolType
-from src.logging_context import update_context_prefix
 from src.exceptions import TelegramConnectionError
+from src.logging_context import update_context_prefix
 from src.utils import clear_screen, logger, notify_and_pause, sanitize_filename
 
 
@@ -86,16 +73,15 @@ class TelegramManager:
     Manages Telegram connection, dialog selection, and user interaction.
     """
 
-    def __init__(self, config: Config, connection_manager=None):
-        """
-        Initialize Telegram manager with configuration.
-
-        Args:
-            config (Config): The configuration object.
-            connection_manager: The connection manager for retries.
-        """
+    def __init__(
+        self,
+        config: Config,
+        connection_manager: Any = None,
+        cache_manager: Any = None,
+    ):
         self.config = config
         self.connection_manager = connection_manager
+        self.cache_manager = cache_manager
         proxy_info = None
         if config.proxy_type and config.proxy_addr and config.proxy_port:
             proxy_scheme = config.proxy_type.lower()
@@ -199,16 +185,29 @@ class TelegramManager:
         if not self.config.phone_number:
             raise TelegramConnectionError("Phone number required for authorization.")
         try:
+            # Request an auth code and allow the user a few attempts to enter it correctly.
             await self.client.send_code_request(self.config.phone_number)
-            rprint("[bold]Enter the code you received in Telegram:[/bold]", end=" ")
-            code = input().strip()
-            await self.client.sign_in(self.config.phone_number, code)
-            return True
-        except SessionPasswordNeededError:
-            rprint("[bold]Enter your 2FA password:[/bold]", end=" ")
-            password = input().strip()
-            await self.client.sign_in(password=password)
-            return True
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                rprint(f"[bold]Enter the code you received in Telegram (attempt {attempt}/{max_attempts}):[/bold]", end=" ")
+                code = input().strip()
+                try:
+                    await self.client.sign_in(self.config.phone_number, code)
+                    return True
+                except PhoneCodeInvalidError:
+                    logger.warning("Invalid phone code entered by user.")
+                    rprint("[red]Invalid code. Please try again.[/red]")
+                    if attempt == max_attempts:
+                        raise TelegramConnectionError(
+                            "Maximum code entry attempts exceeded."
+                        )
+                    continue
+                except SessionPasswordNeededError:
+                    rprint("[bold]Enter your 2FA password:[/bold]", end=" ")
+                    password = input().strip()
+                    await self.client.sign_in(password=password)
+                    return True
+
         except Exception as e:
             logger.critical(f"Failed to sign in: {e}", exc_info=True)
             raise TelegramConnectionError(f"Sign-in failed: {e}") from e
@@ -302,8 +301,10 @@ class TelegramManager:
             page_size: Messages per page (uses config.lazy_message_page_size if None)
         """
         # 🔍 CRITICAL DEBUG: Verify which fetch_messages is called
-        logger.info(f"🔍 TelegramManager.fetch_messages() CALLED (BASE CLASS) - entity={entity}, limit={limit}, page={page}")
-        
+        logger.info(
+            f"🔍 TelegramManager.fetch_messages() CALLED (BASE CLASS) - entity={entity}, limit={limit}, page={page}"
+        )
+
         # Handle pagination parameters
         if page is not None:
             if page_size is None:
@@ -325,71 +326,83 @@ class TelegramManager:
         else:
             effective_limit = limit
 
-        max_retries = 3
-        retry_count = 0
+        # Optimization: Use batch fetching with get_messages instead of iter_messages
+        batch_size = getattr(self.config, "batch_fetch_size", 100)
+        total_fetched = 0
+        current_offset_id = offset_id
 
-        while retry_count < max_retries:
-            try:
-                # Wrap iter_messages in timeout
-                async def _message_generator():
-                    async for message in self.client.iter_messages(
-                        entity=entity,
-                        limit=effective_limit,
-                        offset_id=offset_id,
-                        reverse=False,  # Changed from True to False for chronological order (oldest first)
-                        min_id=min_id or 0,
-                        wait_time=self.config.request_delay,
-                    ):
-                        if isinstance(message, Message) and not message.action:
-                            yield message
+        logger.info(f"🚀 Starting batch fetch (batch_size={batch_size})")
 
-                # Execute with timeout - if exceeds ITER_MESSAGES_TIMEOUT, raise asyncio.TimeoutError
-                async for message in _message_generator():
-                    try:
-                        # Apply timeout for each message fetch operation
-                        yield await asyncio.wait_for(
-                            self._yield_with_timeout(message),
-                            timeout=ITER_MESSAGES_TIMEOUT,
-                        )
-                    except asyncio.TimeoutError:
-                        logger.error(
-                            f"⏰ Timeout while processing message {message.id} "
-                            f"(exceeded {ITER_MESSAGES_TIMEOUT}s limit)"
-                        )
-                        raise
-
-                # Success, exit retry loop
+        while True:
+            # Check if we've reached the limit
+            if effective_limit is not None and total_fetched >= effective_limit:
                 break
 
-            except asyncio.TimeoutError:
-                retry_count += 1
-                logger.warning(
-                    f"⏱️ Message fetching timeout (attempt {retry_count}/{max_retries}). "
-                    f"Timeout: {ITER_MESSAGES_TIMEOUT}s"
-                )
-                if retry_count < max_retries:
-                    logger.info("⏱️  Waiting 5 seconds before retry...")
-                    await asyncio.sleep(5)
-                else:
-                    logger.error(
-                        "❌ Max retries reached for message fetching (timeout), aborting"
-                    )
-                    raise
+            # Calculate batch limit
+            current_batch_limit = batch_size
+            if effective_limit is not None:
+                current_batch_limit = min(batch_size, effective_limit - total_fetched)
 
-            except FloodWaitError as e:
-                retry_count += 1
-                wait_time = e.seconds
-                logger.warning(
-                    f"⏳ FloodWait detected while fetching messages: need to wait {wait_time}s (attempt {retry_count}/{max_retries})"
-                )
-                if retry_count < max_retries:
-                    logger.info(f"⏱️  Waiting {wait_time + 1} seconds before retry...")
-                    await asyncio.sleep(wait_time + 1)
-                else:
-                    logger.error(
-                        "❌ Max retries reached for message fetching, aborting"
+            # Retry loop for the batch
+            batch_messages = []
+            max_retries = 3
+            retry_count = 0
+
+            while retry_count < max_retries:
+                try:
+                    # Fetch batch of messages
+                    # Note: using reverse=True to fetch messages in chronological order (oldest first).
+                    # We get a batch of oldest messages first and then use the last element's id as the offset
+                    # for the next batch to continue forward in time.
+                    batch_messages = await self.client.get_messages(
+                        entity=entity,
+                        limit=current_batch_limit,
+                        offset_id=current_offset_id,
+                        min_id=min_id or 0,
+                        wait_time=self.config.request_delay,
+                        reverse=True,
                     )
-                    raise
+                    break  # Success
+                except FloodWaitError as e:
+                    retry_count += 1
+                    wait_time = e.seconds
+                    logger.warning(
+                        f"⏳ FloodWait detected: need to wait {wait_time}s (attempt {retry_count}/{max_retries})"
+                    )
+                    if retry_count < max_retries:
+                        await asyncio.sleep(wait_time + 1)
+                    else:
+                        logger.error(
+                            "❌ Max retries reached for batch fetching (FloodWait)"
+                        )
+                        raise
+                except Exception as e:
+                    retry_count += 1
+                    logger.warning(
+                        f"⚠️ Error fetching batch: {e} (attempt {retry_count}/{max_retries})"
+                    )
+                    if retry_count < max_retries:
+                        await asyncio.sleep(5)
+                    else:
+                        logger.error(f"❌ Max retries reached for batch fetching: {e}")
+                        raise
+
+            if not batch_messages:
+                break  # No more messages
+
+            # Process batch (yield in chronological order)
+            for message in batch_messages:
+                if isinstance(message, Message) and not message.action:
+                    yield message
+                    total_fetched += 1
+
+                    if effective_limit is not None and total_fetched >= effective_limit:
+                        break
+
+            # Update offset for next batch (last message is the oldest in this batch)
+            # If we yielded all messages, update offset to the last one
+            if batch_messages:
+                current_offset_id = batch_messages[-1].id
 
     async def _yield_with_timeout(self, value):
         """Helper to yield value without blocking (used with asyncio.wait_for)."""
@@ -964,12 +977,53 @@ class TelegramManager:
         return topics
 
     async def _get_topic_message_count_via_api(self, entity: Any, topic_id: int) -> int:
+        cache_key = f"topic_msg_count_{entity.id}_{topic_id}"
+
+        # Check cache first
+        if self.cache_manager:
+            cached_count = await self.cache_manager.get(cache_key)
+            if cached_count is not None:
+                logger.debug(f"Cache hit for topic message count: {cache_key}")
+                return cached_count
+
+        count = 0
         try:
-            result = await self.client.get_messages(entity, reply_to=topic_id, limit=0)
-            count = getattr(result, "total", 0)
-            return count - 1 if count > 0 else 0
-        except Exception:
-            return 0
+            # Prefer GetFullChannelRequest for channels for more stable total
+            if isinstance(entity, Channel):
+                # Fetch full channel info, which often contains message count
+                full_channel = await self.client(GetFullChannelRequest(entity))
+                # read_inbox_max_id gives the latest message ID, which is often total - 1
+                # Subtract 1 because topic ID itself is not a message
+                count = getattr(full_channel.full_chat, "read_inbox_max_id", 0) - 1
+                if count < 0:
+                    count = 0  # Ensure non-negative
+                logger.debug(
+                    f"Fetched topic message count via GetFullChannelRequest: {count}"
+                )
+
+            if count == 0:  # Fallback if not a channel or count still 0
+                result = await self.client.get_messages(
+                    entity, reply_to=topic_id, limit=0
+                )
+                # get_messages(limit=0) returns an object with 'total' attribute
+                count = getattr(result, "total", 0) - 1  # Subtract 1 for topic ID
+                if count < 0:
+                    count = 0  # Ensure non-negative
+                logger.debug(
+                    f"Fetched topic message count via get_messages(limit=0): {count}"
+                )
+
+        except Exception as e:
+            logger.warning(
+                f"Error fetching topic message count for {entity.id}/{topic_id}: {e}"
+            )
+            count = 0
+
+        # Store in cache
+        if self.cache_manager:
+            await self.cache_manager.set(cache_key, count, ttl=3600)  # Cache for 1 hour
+
+        return count
 
     # DEPRECATED: Use get_topic_messages_stream() instead for better memory efficiency
     # Kept for backward compatibility, but collects all messages in memory
@@ -1045,92 +1099,83 @@ class TelegramManager:
             Message objects one at a time
         """
         offset_id = min_id or 0
-        max_retries = 3
-        retry_count = 0
         messages_yielded = 0
 
-        while retry_count < max_retries:
-            try:
+        # Optimization: Use batch fetching with get_messages instead of iter_messages
+        batch_size = getattr(self.config, "batch_fetch_size", 100)
+        current_offset_id = offset_id
 
-                async def _topic_message_generator():
-                    async for message in self.client.iter_messages(
+        logger.info(
+            f"🚀 Starting topic stream batch fetch (topic={topic_id}, batch_size={batch_size})"
+        )
+
+        while True:
+            # Check if we've reached the limit
+            if limit is not None and messages_yielded >= limit:
+                break
+
+            # Calculate batch limit
+            current_batch_limit = batch_size
+            if limit is not None:
+                current_batch_limit = min(batch_size, limit - messages_yielded)
+
+            # Retry loop for the batch
+            batch_messages = []
+            max_retries = 3
+            retry_count = 0
+
+            while retry_count < max_retries:
+                try:
+                    # Fetch batch of topic messages
+                    batch_messages = await self.client.get_messages(
                         entity=entity,
+                        limit=current_batch_limit,
+                        offset_id=current_offset_id,
                         reply_to=topic_id,
-                        limit=limit,
-                        min_id=offset_id,
-                        reverse=False,  # Changed to False for chronological order (oldest first)
-                    ):
-                        if message.id != topic_id:
-                            yield message
-
-                # Execute with timeout per batch of messages
-                async for message in _topic_message_generator():
-                    try:
-                        # Each message must be yielded within timeout
-                        yielded_msg = await asyncio.wait_for(
-                            self._yield_with_timeout(message),
-                            timeout=ITER_MESSAGES_TIMEOUT,
-                        )
-                        offset_id = (
-                            yielded_msg.id
-                        )  # Remember last ID for potential retry
-                        messages_yielded += 1
-                        yield yielded_msg
-                    except asyncio.TimeoutError:
+                        min_id=min_id or 0,
+                        wait_time=self.config.request_delay,
+                    )
+                    break  # Success
+                except FloodWaitError as e:
+                    retry_count += 1
+                    wait_time = e.seconds
+                    logger.warning(
+                        f"⏳ FloodWait detected in topic {topic_id}: need to wait {wait_time}s (attempt {retry_count}/{max_retries})"
+                    )
+                    if retry_count < max_retries:
+                        await asyncio.sleep(wait_time + 1)
+                    else:
                         logger.error(
-                            f"⏰ Timeout streaming topic {topic_id} message {message.id} "
-                            f"(exceeded {ITER_MESSAGES_TIMEOUT}s limit)"
+                            f"❌ Max retries reached for topic {topic_id} batch fetching"
                         )
                         raise
-
-                # Success, exit retry loop
-                logger.debug(
-                    f"✅ Topic {topic_id}: streamed {messages_yielded} messages successfully"
-                )
-                break
-
-            except asyncio.TimeoutError:
-                retry_count += 1
-                logger.warning(
-                    f"⏱️ Timeout streaming topic {topic_id}: {ITER_MESSAGES_TIMEOUT}s exceeded "
-                    f"(attempt {retry_count}/{max_retries}, already yielded {messages_yielded} messages)"
-                )
-                if retry_count < max_retries:
-                    logger.info(
-                        f"⏱️  Waiting 5 seconds before resuming from message ID {offset_id}..."
+                except Exception as e:
+                    retry_count += 1
+                    logger.warning(
+                        f"⚠️ Error fetching topic batch: {e} (attempt {retry_count}/{max_retries})"
                     )
-                    await asyncio.sleep(5)
-                    # Loop will retry with offset_id, resuming from where we left off
-                else:
-                    logger.error(
-                        f"❌ Max retries reached for topic {topic_id} stream (timeout) after yielding {messages_yielded} messages. "
-                        f"Resuming from message ID {offset_id}."
-                    )
-                    break
+                    if retry_count < max_retries:
+                        await asyncio.sleep(5)
+                    else:
+                        logger.error(f"❌ Max retries reached for topic fetching: {e}")
+                        raise
 
-            except FloodWaitError as e:
-                retry_count += 1
-                wait_time = e.seconds
-                logger.warning(
-                    f"⏳ FloodWait in stream for topic {topic_id}: waited {wait_time}s "
-                    f"(attempt {retry_count}/{max_retries}, already yielded {messages_yielded} messages)"
-                )
-                if retry_count < max_retries:
-                    logger.info(
-                        f"⏱️  Waiting {wait_time + 1} seconds before resuming from message ID {offset_id}..."
-                    )
-                    await asyncio.sleep(wait_time + 1)
-                    # Loop will retry with offset_id, resuming from where we left off
-                else:
-                    logger.error(
-                        f"❌ Max retries reached for topic {topic_id} stream after yielding {messages_yielded} messages. "
-                        f"Resuming from message ID {offset_id}."
-                    )
-                    break
+            if not batch_messages:
+                break  # No more messages
 
-            except Exception as e:
-                logger.error(f"Error streaming messages from topic {topic_id}: {e}")
-                break
+            # Process batch
+            for message in batch_messages:
+                # Skip the topic creation message itself if returned
+                if message.id != topic_id:
+                    yield message
+                    messages_yielded += 1
+
+                    if limit is not None and messages_yielded >= limit:
+                        break
+
+            # Update offset for next batch
+            if batch_messages:
+                current_offset_id = batch_messages[-1].id
 
     async def get_topic_messages(
         self,
