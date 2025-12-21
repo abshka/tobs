@@ -1,6 +1,7 @@
 import asyncio
 import re
 import sys
+import os
 from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
@@ -8,7 +9,13 @@ from rich import print as rprint
 from rich.panel import Panel
 from rich.prompt import Confirm
 from telethon import TelegramClient, types
-from telethon.errors import FloodWaitError, SessionPasswordNeededError, PhoneCodeInvalidError
+from telethon.errors import FloodWaitError, SessionPasswordNeededError
+from telethon.errors.rpcerrorlist import PhoneCodeInvalidError
+# Backwards-compat alias for older Telethon versions
+try:
+    from telethon.errors.rpcerrorlist import PhoneCodeInvalidError as PhoneCodeInvalidErrorRPC
+except Exception:
+    PhoneCodeInvalidErrorRPC = PhoneCodeInvalidError
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.types import Channel, Message, User
 
@@ -189,12 +196,26 @@ class TelegramManager:
             await self.client.send_code_request(self.config.phone_number)
             max_attempts = 3
             for attempt in range(1, max_attempts + 1):
-                rprint(f"[bold]Enter the code you received in Telegram (attempt {attempt}/{max_attempts}):[/bold]", end=" ")
-                code = input().strip()
+                # If running non-interactively (no TTY), read code from env var if provided
+                env_code = os.getenv("EXPORT_TG_CODE")
+                if env_code:
+                    rprint("[dim]Using code from EXPORT_TG_CODE environment variable[/dim]")
+                    code = env_code.strip()
+                else:
+                    if not sys.stdin.isatty():
+                        raise TelegramConnectionError(
+                            "No TTY available for code entry. Set EXPORT_TG_CODE env var for non-interactive runs."
+                        )
+                    rprint(f"[bold]Enter the code you received in Telegram (attempt {attempt}/{max_attempts}):[/bold]", end=" ")
+                    try:
+                        code = input().strip()
+                    except EOFError:
+                        raise TelegramConnectionError("No input available for code entry (EOF)")
+
                 try:
                     await self.client.sign_in(self.config.phone_number, code)
                     return True
-                except PhoneCodeInvalidError:
+                except (PhoneCodeInvalidError, PhoneCodeInvalidErrorRPC):
                     logger.warning("Invalid phone code entered by user.")
                     rprint("[red]Invalid code. Please try again.[/red]")
                     if attempt == max_attempts:
@@ -204,7 +225,12 @@ class TelegramManager:
                     continue
                 except SessionPasswordNeededError:
                     rprint("[bold]Enter your 2FA password:[/bold]", end=" ")
-                    password = input().strip()
+                    try:
+                        password = input().strip()
+                    except EOFError:
+                        raise TelegramConnectionError(
+                            "No input available for 2FA password (EOF)"
+                        )
                     await self.client.sign_in(password=password)
                     return True
 
