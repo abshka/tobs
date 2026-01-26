@@ -18,14 +18,16 @@ except ImportError:
 
 import aiohttp
 from rich import print as rprint
+from telethon import errors
 
 from src.config import Config
 from src.core_manager import CoreSystemManager
 from src.exceptions import ConfigError
 from src.export.exporter import TakeoutSessionWrapper, run_export
-from telethon import errors
 from src.media.manager import MediaProcessor
 from src.note_generator import NoteGenerator
+from src.session_gc import run_session_gc
+from src.shutdown_manager import shutdown_manager
 from src.telegram_client import TelegramManager
 from src.telegram_sharded_client import ShardedTelegramManager
 from src.ui.interactive import run_interactive_configuration
@@ -51,17 +53,25 @@ async def precheck_takeout(config, telegram_manager):
     )
 
     if existing_id:
-        logger.info(f"♻️ Client is already in Takeout mode (ID: {existing_id}). Ready to export.")
+        logger.info(
+            f"♻️ Client is already in Takeout mode (ID: {existing_id}). Ready to export."
+        )
         telegram_manager._external_takeout_id = existing_id
         return True
 
     # 2. Try to init new session
     try:
         logger.info("🚀 Attempting to initiate Telegram Takeout session...")
-        rprint("[bold yellow]⚠️  IMPORTANT: Please check your Telegram messages (Service Notifications) to ALLOW the Takeout request.[/bold yellow]")
-        rprint("[bold cyan]ℹ️  Telegram will send you a notification asking to allow data export.[/bold cyan]")
-        rprint("[bold cyan]ℹ️  You have 5 minutes to approve it in Telegram.[/bold cyan]")
-        rprint("[bold green]⏳ Waiting for Takeout session initialization...[/bold green]")
+        rprint(
+            "[bold yellow]⚠️  IMPORTANT: Please check your Telegram messages (Service Notifications) to ALLOW the Takeout request.[/bold yellow]"
+        )
+        rprint(
+            "[bold cyan]ℹ️  Telegram will send you a notification asking to allow data export.[/bold cyan]"
+        )
+        rprint("[bold cyan]ℹ️  You have up to 5 minutes to approve it.[/bold cyan]")
+        rprint(
+            "[bold green]⏳ System will automatically check for confirmation every 5 seconds...[/bold green]"
+        )
 
         # 🧹 Force-clear stale state blindly
         try:
@@ -69,7 +79,7 @@ async def precheck_takeout(config, telegram_manager):
         except Exception:
             pass
 
-        # Try to initialize Takeout session
+        # Try to initialize Takeout session (now with auto-retry)
         async with TakeoutSessionWrapper(
             telegram_manager.client, config
         ) as takeout_client:
@@ -80,25 +90,97 @@ async def precheck_takeout(config, telegram_manager):
             return True
 
     except errors.TakeoutInitDelayError as e:
-        logger.warning("⚠️  Takeout request needs confirmation. Please check Telegram Service Notifications.")
-        rprint("[bold red]❌ Takeout permission required![/bold red]")
-        rprint("[bold yellow]📱 Please go to Telegram → Service Notifications → Allow the data export request[/bold yellow]")
-        rprint("[bold cyan]⏳ You have 5 minutes to approve it.[/bold cyan]")
-        rprint("[bold green]🔄 After approving, run the export again.[/bold green]")
+        logger.warning(
+            "⚠️  Takeout confirmation timeout - user did not approve within 5 minutes."
+        )
+        rprint("[bold red]❌ Takeout approval timeout![/bold red]")
+        rprint(
+            "[bold yellow]📱 You did not approve the Takeout request within 5 minutes.[/bold yellow]"
+        )
+        rprint(
+            "[bold yellow]ℹ️  Please check Telegram → Service Notifications for the request.[/bold yellow]"
+        )
+        rprint(
+            "[bold green]🔄 Run the export again and approve it faster.[/bold green]"
+        )
         return False
 
     except Exception as e:
         logger.warning(f"⚠️  Takeout session failed: {e}")
         rprint(f"[bold red]❌ Takeout initialization failed: {e}[/bold red]")
-        rprint("[bold yellow]ℹ️  Falling back to Standard API (slower but works without Takeout)[/bold yellow]")
+        rprint(
+            "[bold yellow]ℹ️  Falling back to Standard API (slower but works without Takeout)[/bold yellow]"
+        )
         config.use_takeout = False  # Disable Takeout for this session
         return True
 
 
 def handle_sigint(signum, frame):
-    """Handle SIGINT (Ctrl+C) signal."""
-    rprint("\n[bold yellow]Received interrupt signal. Cleaning up...[/bold yellow]")
-    sys.exit(0)
+    """Handle SIGINT (Ctrl+C) signal - delegate to ShutdownManager."""
+    shutdown_manager.handle_sigint(signum, frame)
+
+
+def aggregate_statistics(results):
+    """
+    Aggregate statistics from multiple export results into a single summary.
+
+    Args:
+        results: List of ExportStatistics objects
+
+    Returns:
+        Aggregated ExportStatistics object
+    """
+    from src.export.exporter import ExportStatistics
+
+    if not results:
+        return ExportStatistics()
+
+    aggregated = ExportStatistics()
+
+    # Use earliest start time and latest end time
+    aggregated.start_time = min(s.start_time for s in results)
+
+    # Handle case when no results have end_time set
+    end_times = [s.end_time for s in results if s.end_time]
+    aggregated.end_time = max(end_times) if end_times else None
+
+    # Sum all counters
+    aggregated.messages_processed = sum(s.messages_processed for s in results)
+    aggregated.media_downloaded = sum(s.media_downloaded for s in results)
+    aggregated.notes_created = sum(s.notes_created for s in results)
+    aggregated.errors_encountered = sum(s.errors_encountered for s in results)
+    aggregated.cache_hits = sum(s.cache_hits for s in results)
+    aggregated.cache_misses = sum(s.cache_misses for s in results)
+
+    # Average CPU and max memory across all exports
+    valid_cpu = [s.avg_cpu_percent for s in results if s.avg_cpu_percent > 0]
+    valid_mem = [s.peak_memory_mb for s in results if s.peak_memory_mb > 0]
+
+    aggregated.avg_cpu_percent = sum(valid_cpu) / len(valid_cpu) if valid_cpu else 0.0
+    aggregated.peak_memory_mb = max(valid_mem) if valid_mem else 0.0
+
+    # Sum operation durations
+    aggregated.messages_export_duration = sum(
+        s.messages_export_duration for s in results
+    )
+    aggregated.media_download_duration = sum(s.media_download_duration for s in results)
+    aggregated.transcription_duration = sum(s.transcription_duration for s in results)
+
+    # Sum performance profiling fields (TIER A profiling)
+    aggregated.time_api_requests = sum(
+        s.time_api_requests for s in results if hasattr(s, "time_api_requests")
+    )
+    aggregated.time_processing = sum(
+        s.time_processing for s in results if hasattr(s, "time_processing")
+    )
+    aggregated.time_file_io = sum(
+        s.time_file_io for s in results if hasattr(s, "time_file_io")
+    )
+    aggregated.api_request_count = sum(
+        s.api_request_count for s in results if hasattr(s, "api_request_count")
+    )
+
+    return aggregated
 
 
 def print_comprehensive_summary(stats, performance_monitor, core_manager):
@@ -111,6 +193,35 @@ def print_comprehensive_summary(stats, performance_monitor, core_manager):
     rprint(f"[cyan]Всего медиафайлов:[/cyan] {stats.media_downloaded}")
     rprint(f"[cyan]Ошибок:[/cyan] {stats.errors_encountered}")
     rprint(f"[cyan]Общее время:[/cyan] {stats.duration:.1f}s")
+
+    # Performance profiling breakdown
+    if hasattr(stats, "time_api_requests") and stats.time_api_requests > 0:
+        rprint("\n[bold yellow]Детальная производительность:[/bold yellow]")
+        total_tracked = (
+            stats.time_api_requests + stats.time_processing + stats.time_file_io
+        )
+
+        rprint(
+            f"  [cyan]⏱️  API запросы:[/cyan] {stats.time_api_requests:.1f}s ({stats.time_api_requests / stats.duration * 100:.1f}%)"
+        )
+        rprint(
+            f"  [cyan]⚙️  Обработка:[/cyan] {stats.time_processing:.1f}s ({stats.time_processing / stats.duration * 100:.1f}%)"
+        )
+        rprint(
+            f"  [cyan]💾 Запись на диск:[/cyan] {stats.time_file_io:.1f}s ({stats.time_file_io / stats.duration * 100:.1f}%)"
+        )
+
+        if hasattr(stats, "api_request_count") and stats.api_request_count > 0:
+            avg_msg_per_request = stats.messages_processed / stats.api_request_count
+            rprint(
+                f"  [cyan]📊 API запросов:[/cyan] {stats.api_request_count} (avg {avg_msg_per_request:.1f} msgs/request)"
+            )
+
+        if stats.messages_processed > 0:
+            rprint(
+                f"  [cyan]⚡ Скорость:[/cyan] {stats.messages_processed / stats.duration:.1f} сообщений/сек"
+            )
+
     rprint("[bold green]═══════════════════════════════════════════════[/bold green]\n")
 
     # Time in minutes
@@ -242,6 +353,9 @@ async def async_main():
     # Setup logging (default to INFO)
     setup_logging("INFO")
 
+    # Apply LogBatcher adapter for Exporter lazy logging (safe, idempotent)
+    # LogBatcher adapter removed; Exporter now uses the global_batcher singleton natively.
+
     # Load configuration from .env
     try:
         config = Config.from_env()
@@ -249,6 +363,40 @@ async def async_main():
         rprint(f"[bold red]Configuration error: {e}[/bold red]")
         rprint("Make sure .env file exists with API_ID and API_HASH")
         sys.exit(1)
+
+    # Initialize TTY detection and output manager (TIER B - B-5)
+    from src.ui.output_manager import initialize_output_manager
+    from src.ui.tty_detector import initialize_tty_detector
+
+    tty_detector = initialize_tty_detector(mode=config.tty_mode)
+    output_manager = initialize_output_manager()
+
+    logger.info(
+        f"🎨 TTY mode: {tty_detector.get_mode_name()} (is_tty: {tty_detector.is_tty()})"
+    )
+
+    # Run session garbage collection (TIER A - Task 6)
+    if config.session_gc_enabled:
+        try:
+            session_dir = "sessions"  # Default session directory
+            active_session = (
+                config.session_name.split("/")[-1]
+                if "/" in config.session_name
+                else config.session_name
+            )
+
+            logger.info("🧹 Running session garbage collection...")
+            removed, errors = run_session_gc(
+                session_dir=session_dir,
+                max_age_days=config.session_gc_max_age_days,
+                keep_last_n=config.session_gc_keep_last_n,
+                active_session_name=active_session,
+            )
+
+            if removed > 0:
+                rprint(f"[cyan]♻️  Cleaned up {removed} old session files[/cyan]")
+        except Exception as e:
+            logger.warning(f"Session GC failed (non-critical): {e}")
 
     # Initialize systems for interactive mode
     core_manager = CoreSystemManager(
@@ -258,9 +406,12 @@ async def async_main():
     await core_manager.initialize()
 
     connection_manager = core_manager.get_connection_manager()
+    cache_manager = core_manager.get_cache_manager()
 
     telegram_manager = TelegramManager(
-        config=config, connection_manager=connection_manager
+        config=config,
+        connection_manager=connection_manager,
+        cache_manager=cache_manager,
     )
     await telegram_manager.connect()
 
@@ -272,24 +423,23 @@ async def async_main():
 
             # 🚀 CRITICAL FIX: If sharding was enabled via menu, replace telegram_manager
             if config.enable_shard_fetch:
-                rprint("[bold cyan]🚀 Switching to Sharded Telegram Manager...[/bold cyan]")
+                rprint(
+                    "[bold cyan]🚀 Switching to Sharded Telegram Manager...[/bold cyan]"
+                )
                 # Create new ShardedTelegramManager with existing connection
                 old_client = telegram_manager.client
                 sharded_manager = ShardedTelegramManager(
-                    config=config, connection_manager=connection_manager
+                    config=config,
+                    connection_manager=connection_manager,
+                    cache_manager=cache_manager,
                 )
                 # Reuse the existing connected client
                 sharded_manager.client = old_client
                 sharded_manager.client_connected = True
-                sharded_manager.telegram_manager = telegram_manager  # Keep reference to base manager
+                sharded_manager.telegram_manager = (
+                    telegram_manager  # Keep reference to base manager
+                )
                 telegram_manager = sharded_manager
-                
-                # DEBUG: Verify the switch worked
-                logger.info(f"✅ Switched to ShardedTelegramManager with {config.shard_count} workers")
-                logger.info(f"🔍 telegram_manager type: {type(telegram_manager)}")
-                logger.info(f"🔍 telegram_manager.__class__.__name__: {telegram_manager.__class__.__name__}")
-                logger.info(f"🔍 Has fetch_messages: {hasattr(telegram_manager, 'fetch_messages')}")
-                logger.info(f"🔍 fetch_messages method: {telegram_manager.fetch_messages}")
 
             # User selected "Start Export" - proceed with export
             rprint("\n[bold green]✓ Starting export...[/bold green]\n")
@@ -297,7 +447,9 @@ async def async_main():
             # 🚀 PRECHECK TAKEOUT BEFORE EXPORT
             takeout_ready = await precheck_takeout(config, telegram_manager)
             if not takeout_ready:
-                rprint("[bold yellow]ℹ️  Export cancelled. Please approve Takeout request and try again.[/bold yellow]")
+                rprint(
+                    "[bold yellow]ℹ️  Export cancelled. Please approve Takeout request and try again.[/bold yellow]"
+                )
                 return  # Exit without error
 
             # Reuse existing connections for export
@@ -307,11 +459,44 @@ async def async_main():
 
             # Initialize HTTP session with connection pooling
             connector = aiohttp.TCPConnector(
-                limit=100,  # Total connection pool size
+                limit=0,  # Total connection pool size
                 limit_per_host=30,  # Connections per host
                 ttl_dns_cache=300,  # DNS cache TTL (5 min)
+                use_dns_cache=True,
+                enable_cleanup_closed=True,
+                force_close=False,  # Держим соединения открытыми (Keep-Alive)
             )
-            http_session = aiohttp.ClientSession(connector=connector)
+
+            # Security S-5: Split socket timeout (sock_read) and total timeout
+            # sock_read=60s: prevents indefinite hanging on slow/stalled sockets
+            # total=1800s: allows large file downloads (30 minutes max)
+            timeout = aiohttp.ClientTimeout(
+                total=1800,  # 30 minutes total
+                sock_read=60,  # 60 seconds socket read timeout
+                sock_connect=10,  # 10 seconds socket connect timeout
+            )
+
+            http_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+
+            # Register cleanup hooks for graceful shutdown (TIER A - Task 3)
+            # These will be called when shutdown_requested is True
+            shutdown_manager.register_async_cleanup_hook(
+                lambda: telegram_manager.disconnect()
+            )
+            shutdown_manager.register_async_cleanup_hook(lambda: http_session.close())
+            if core_manager:
+                # CacheManager has async shutdown() method, not close()
+                async def cleanup_cache():
+                    cache_mgr = core_manager.get_cache_manager()
+                    if cache_mgr:
+                        await cache_mgr.shutdown()
+                
+                shutdown_manager.register_async_cleanup_hook(cleanup_cache)
+
+            # Flush logs on shutdown
+            from src.logging.global_batcher import global_batcher
+
+            shutdown_manager.register_cleanup_hook(global_batcher.flush)
 
             try:
                 # Initialize Media Processor
@@ -342,22 +527,38 @@ async def async_main():
                     performance_monitor=performance_monitor,
                 )
 
-                # Display comprehensive summary for each target
-                for stats in results:
+                # Display single comprehensive summary with aggregated statistics
+                if results:
+                    aggregated_stats = aggregate_statistics(results)
                     print_comprehensive_summary(
-                        stats, performance_monitor, core_manager
+                        aggregated_stats, performance_monitor, core_manager
                     )
+                else:
+                    rprint("[yellow]No export results to display[/yellow]")
 
             finally:
+                # Graceful shutdown: stop media processor first
+                if media_processor:
+                    await media_processor.shutdown()
                 if note_generator:
                     await note_generator.shutdown()
-                if http_session:
-                    await http_session.close()
+
+                # Run graceful cleanup if shutdown was requested
+                if shutdown_manager.shutdown_requested:
+                    await shutdown_manager.run_graceful_cleanup()
+                else:
+                    # Normal cleanup path
+                    if http_session:
+                        await http_session.close()
         else:
             rprint("[bold yellow]Configuration not changed[/bold yellow]")
     finally:
-        await telegram_manager.disconnect()
-        await core_manager.shutdown()
+        # Final cleanup - these are safe to call multiple times
+        if telegram_manager and not shutdown_manager.shutdown_requested:
+            # Only disconnect if not already handled by graceful cleanup
+            await telegram_manager.disconnect()
+        if core_manager:
+            await core_manager.shutdown()
 
 
 def main():

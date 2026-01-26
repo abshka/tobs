@@ -1,20 +1,10 @@
-version: "3.8"
-
 services:
     tobs:
         build:
             context: .
             dockerfile: Dockerfile
             args:
-                # Явно передать пустые прокси при сборке
-                http_proxy: ""
-                https_proxy: ""
-                HTTP_PROXY: ""
-                HTTPS_PROXY: ""
-                ftp_proxy: ""
-                FTP_PROXY: ""
-                no_proxy: ""
-                NO_PROXY: ""
+                PYTHON_VERSION: ${PYTHON_VERSION:-3.11.8}
 
         container_name: tobs
         hostname: tobs
@@ -35,16 +25,6 @@ services:
             - CACHE_PATH=/home/appuser/cache
             - PYTHONUNBUFFERED=1
 
-            # ЯВНО отключить прокси в runtime (переопределяем хост)
-            - HTTP_PROXY=
-            - HTTPS_PROXY=
-            - http_proxy=
-            - https_proxy=
-            - FTP_PROXY=
-            - ftp_proxy=
-            - NO_PROXY=*
-            - no_proxy=*
-
         volumes:
             # Данные экспорта
             - ./export:/home/appuser/export:Z
@@ -57,10 +37,28 @@ services:
 
         group_add:
             - video
-            - "988"
+            - ${RENDER_GID:-988}
         # Hardware acceleration для FFmpeg
         devices:
             - /dev/dri:/dev/dri
+
+        # Resource limits для защиты хоста
+        deploy:
+            resources:
+                limits:
+                    cpus: '4.0'
+                    memory: 8G
+                reservations:
+                    cpus: '1.0'
+                    memory: 2G
+
+        # Healthcheck для мониторинга состояния
+        healthcheck:
+            test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 40s
 
         # Логирование
         logging:

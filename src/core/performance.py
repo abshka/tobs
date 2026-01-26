@@ -45,7 +45,7 @@ class AdaptationStrategy(Enum):
     AGGRESSIVE = "aggressive"
 
 
-@dataclass
+@dataclass(slots=True)
 class SystemMetrics:
     """Системные метрики."""
 
@@ -63,7 +63,7 @@ class SystemMetrics:
     open_files: int
 
 
-@dataclass
+@dataclass(slots=True)
 class PerformanceAlert:
     """Алерт производительности."""
 
@@ -78,7 +78,7 @@ class PerformanceAlert:
     resolved_at: Optional[float] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class PerformanceProfile:
     """Профиль производительности."""
 
@@ -94,7 +94,7 @@ class PerformanceProfile:
     cpu_limit_percent: Optional[float] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class ComponentStats:
     """Статистика компонента."""
 

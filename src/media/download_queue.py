@@ -43,15 +43,16 @@ class DownloadStatus(Enum):
     CANCELLED = "cancelled"
 
 
-@dataclass
+@dataclass(slots=True)
 class DownloadTask:
     """A single download task in the queue."""
 
     task_id: str
-    message: Message
-    entity_id: Union[str, int]
-    output_path: Path
-    media_type: str
+    message_id: int  # Store only message ID, not the entire Message object
+    message: Optional[Message] = None  # Will be set when processing, not stored in queue
+    entity_id: Union[str, int] = None
+    output_path: Optional[Path] = None
+    media_type: str = ""
     expected_size: int = 0
     status: DownloadStatus = DownloadStatus.PENDING
     created_at: float = field(default_factory=time.time)
@@ -77,7 +78,7 @@ class DownloadTask:
         return start - self.created_at
 
 
-@dataclass
+@dataclass(slots=True)
 class QueueStats:
     """Statistics for the download queue."""
 
@@ -254,7 +255,8 @@ class MediaDownloadQueue:
 
         task = DownloadTask(
             task_id=task_id,
-            message=message,
+            message_id=message.id,  # Store only message ID
+            message=message,  # Will be used in _process_task, not serialized
             entity_id=entity_id,
             output_path=output_path,
             media_type=media_type,

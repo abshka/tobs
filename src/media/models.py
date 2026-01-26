@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 
-@dataclass
+@dataclass(slots=True)
 class MediaMetadata:
     """Метаданные медиа файла."""
 
@@ -28,7 +28,7 @@ class MediaMetadata:
     checksum: Optional[str] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class ProcessingSettings:
     """Настройки обработки медиа."""
 
@@ -44,7 +44,7 @@ class ProcessingSettings:
     aggressive_compression: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class ProcessingTask:
     """Задача обработки медиа."""
 

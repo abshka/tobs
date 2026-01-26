@@ -25,8 +25,7 @@ class AudioProcessor(BaseProcessor):
 
     def __init__(
         self,
-        io_executor: Any,
-        cpu_executor: Any,
+        thread_pool: Any,  # UnifiedThreadPool instance
         validator: Any,
         config: Optional[Any] = None,
         settings: Optional[ProcessingSettings] = None,
@@ -35,13 +34,12 @@ class AudioProcessor(BaseProcessor):
         Инициализация аудиопроцессора.
 
         Args:
-            io_executor: Executor для IO операций
-            cpu_executor: Executor для CPU-интенсивных операций (FFmpeg)
+            thread_pool: Unified thread pool для всех операций
             validator: MediaValidator для проверки целостности файлов
             config: Объект конфигурации
             settings: Настройки обработки по умолчанию
         """
-        super().__init__(io_executor, cpu_executor, settings)
+        super().__init__(thread_pool, settings)  # 🧵 TIER B - B-1
         self.validator = validator
         self.config = config
 
@@ -265,7 +263,7 @@ class AudioProcessor(BaseProcessor):
 
     async def _copy_file(self, task: ProcessingTask) -> bool:
         """
-        Копирование файла как fallback при ошибках обработки.
+        Копирование файла с zero-copy оптимизацией как fallback при ошибках обработки.
 
         Args:
             task: Задача обработки
@@ -273,6 +271,8 @@ class AudioProcessor(BaseProcessor):
         Returns:
             True если копирование успешно
         """
+        from src.media.zero_copy import ZeroCopyConfig, get_zero_copy_transfer
+
         max_attempts = 3
 
         for attempt in range(max_attempts):
@@ -294,31 +294,29 @@ class AudioProcessor(BaseProcessor):
                 if task.output_path.exists():
                     task.output_path.unlink()
 
-                # Копирование файла
-                copied_bytes = 0
-                async with aiofiles.open(task.input_path, "rb") as src:
-                    async with aiofiles.open(task.output_path, "wb") as dst:
-                        while chunk := await src.read(64 * 1024):  # 64KB chunks
-                            await dst.write(chunk)
-                            copied_bytes += len(chunk)
-                        await dst.flush()
-
-                # Проверка результата
-                if not task.output_path.exists():
-                    logger.error(f"Output file was not created: {task.output_path}")
+                # Zero-copy transfer
+                config = ZeroCopyConfig(
+                    enabled=True,
+                    min_size_mb=10,
+                    verify_copy=True,
+                    chunk_size_mb=64
+                )
+                
+                transfer = get_zero_copy_transfer(config)
+                success = await transfer.copy_file(
+                    task.input_path,
+                    task.output_path,
+                    verify=True
+                )
+                
+                if success:
+                    self._audio_copied_count += 1
+                    return True
+                else:
+                    logger.error(f"Zero-copy failed on attempt {attempt + 1}")
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(1)
                     continue
-
-                output_size = task.output_path.stat().st_size
-
-                if output_size != source_size:
-                    logger.error(
-                        f"File copy size mismatch! Source: {source_size} bytes, "
-                        f"Output: {output_size} bytes (attempt {attempt + 1})"
-                    )
-                    continue
-
-                self._audio_copied_count += 1
-                return True
 
             except Exception as e:
                 logger.error(f"File copy failed on attempt {attempt + 1}: {e}")

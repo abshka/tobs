@@ -10,7 +10,6 @@ import os
 import shutil
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
@@ -19,6 +18,7 @@ import aiofiles.os
 from loguru import logger
 from telethon.tl.types import Message
 
+from src.core.thread_pool import get_thread_pool  # 🧵 TIER B - B-1: Unified thread pool
 from src.utils import sanitize_filename
 
 from .cache import MediaCache
@@ -80,24 +80,26 @@ class MediaProcessor:
         # Создание временной директории
         self.temp_dir.mkdir(exist_ok=True)
 
-        # Пулы потоков для разных типов операций
-        self.io_executor = ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="media_io"
-        )
-        self.cpu_executor = ThreadPoolExecutor(
-            max_workers=max_workers // 2 or 1, thread_name_prefix="media_cpu"
-        )
-        self.ffmpeg_executor = ThreadPoolExecutor(
-            max_workers=max_workers // 2 or 1, thread_name_prefix="ffmpeg"
-        )
+        # 🧵 TIER B - B-1: Use unified thread pool instead of local executors
+        # This eliminates thread contention between download/processing/ffmpeg operations
+        self._thread_pool = get_thread_pool()
+        logger.info(f"📊 MediaProcessor using UnifiedThreadPool (global singleton)")
+
+        # Legacy compatibility: keep references as properties for now
+        # These will be removed in future versions once all processors are updated
+        self.io_executor = None  # Deprecated - use _thread_pool.submit() instead
+        self.cpu_executor = None  # Deprecated - use _thread_pool.submit() instead
+        self.ffmpeg_executor = None  # Deprecated - use _thread_pool.submit() instead
 
         # Настройки обработки по умолчанию
         self.default_processing = ProcessingSettings()
 
         # Инициализация модульных компонентов
         self._hw_detector = HardwareAccelerationDetector(config)
-        self._metadata_extractor = MetadataExtractor(self.io_executor)
-        self._validator = MediaValidator(self.io_executor)
+        self._metadata_extractor = MetadataExtractor(
+            self._thread_pool
+        )  # Pass thread pool
+        self._validator = MediaValidator(self._thread_pool)  # Pass thread pool
         self._cache = MediaCache(cache_manager)
 
         # Downloader будет инициализирован после start()
@@ -164,6 +166,8 @@ class MediaProcessor:
                 temp_dir=self.temp_dir,
                 client=self.client,
                 worker_clients=self.worker_clients,
+                cache_manager=self.cache_manager,
+                config=self.config,
             )
 
             # 🚀 Инициализация Background Download Queue (если включено)
@@ -179,10 +183,9 @@ class MediaProcessor:
                     f"🚀 Background download queue started with {workers} workers"
                 )
 
-            # Инициализация процессоров
+            # Инициализация процессоров (используют unified thread pool)
             self._video_processor = VideoProcessor(
-                io_executor=self.io_executor,
-                cpu_executor=self.cpu_executor,
+                thread_pool=self._thread_pool,  # 🧵 TIER B - B-1
                 hw_detector=self._hw_detector,
                 metadata_extractor=self._metadata_extractor,
                 config=self.config,
@@ -190,16 +193,14 @@ class MediaProcessor:
             )
 
             self._audio_processor = AudioProcessor(
-                io_executor=self.io_executor,
-                cpu_executor=self.cpu_executor,
+                thread_pool=self._thread_pool,  # 🧵 TIER B - B-1
                 validator=self._validator,
                 config=self.config,
                 settings=self.default_processing,
             )
 
             self._image_processor = ImageProcessor(
-                io_executor=self.io_executor,
-                cpu_executor=self.cpu_executor,
+                thread_pool=self._thread_pool,  # 🧵 TIER B - B-1
                 config=self.config,
                 settings=self.default_processing,
             )
@@ -220,6 +221,7 @@ class MediaProcessor:
                     cache_dir = None
                     if transcription_config.cache_dir:
                         from pathlib import Path
+
                         cache_dir = Path(transcription_config.cache_dir)
 
                     self._transcriber = WhisperTranscriber(
@@ -370,7 +372,9 @@ class MediaProcessor:
         Returns placeholder paths immediately - actual files will be downloaded
         by background workers.
         """
-        assert self._download_queue is not None, "Download queue must be initialized for async downloads"
+        assert self._download_queue is not None, (
+            "Download queue must be initialized for async downloads"
+        )
         result_paths = []
 
         for media_type, msg in media_items:
@@ -996,18 +1000,30 @@ class MediaProcessor:
                 return False
 
     async def _copy_file(self, task: ProcessingTask) -> bool:
-        """Простое копирование файла при невозможности обработки."""
-        try:
-            async with aiofiles.open(task.input_path, "rb") as src:
-                async with aiofiles.open(task.output_path, "wb") as dst:
-                    while chunk := await src.read(8192 * 1024):
-                        await dst.write(chunk)
+        """
+        Простое копирование файла с zero-copy оптимизацией при невозможности обработки.
 
-            if task.output_path.exists() and task.output_path.stat().st_size > 0:
+        Uses os.sendfile() on supported platforms for efficient kernel-level copying.
+        """
+        from src.media.zero_copy import ZeroCopyConfig, get_zero_copy_transfer
+
+        try:
+            # Zero-copy transfer with config
+            config = ZeroCopyConfig(
+                enabled=True, min_size_mb=10, verify_copy=True, chunk_size_mb=64
+            )
+
+            transfer = get_zero_copy_transfer(config)
+            success = await transfer.copy_file(
+                task.input_path, task.output_path, verify=True
+            )
+
+            if success:
                 logger.info(f"File copied successfully: {task.output_path}")
                 return True
-
-            return False
+            else:
+                logger.error("Zero-copy transfer failed")
+                return False
 
         except Exception as e:
             logger.error(f"File copy failed: {e}")
@@ -1388,9 +1404,12 @@ class MediaProcessor:
         # Закрытие пулов потоков
         try:
             logger.debug("Shutting down thread executors...")
-            self.io_executor.shutdown(wait=True)
-            self.cpu_executor.shutdown(wait=True)
-            self.ffmpeg_executor.shutdown(wait=True)
+            if self.io_executor:
+                self.io_executor.shutdown(wait=True)
+            if self.cpu_executor:
+                self.cpu_executor.shutdown(wait=True)
+            if self.ffmpeg_executor:
+                self.ffmpeg_executor.shutdown(wait=True)
             logger.debug("Thread executors shut down successfully")
         except Exception as e:
             logger.error(f"Error during executor shutdown: {e}")

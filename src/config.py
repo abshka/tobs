@@ -32,7 +32,7 @@ HEALTH_CHECK_TIMEOUT = 10  # 10 seconds for health check
 MEDIA_DOWNLOAD_TIMEOUT = 3600  # 1 hour for downloading media
 
 
-@dataclass
+@dataclass(slots=True)
 class ExportTarget:
     """
     Представляет цель экспорта (канал, чат или пользователь) с улучшенной типизацией.
@@ -55,9 +55,7 @@ class ExportTarget:
     is_forum: bool = False  # Whether the chat is a forum with topics
     topic_id: Optional[int] = None  # ID of specific topic (if exporting a topic)
     export_all_topics: bool = True  # Export all topics or only specified
-    topic_filter: Optional[List[int]] = (
-        None  # List of topic IDs to export (if not all)
-    )
+    topic_filter: Optional[List[int]] = None  # List of topic IDs to export (if not all)
     export_path: Optional[Path] = None  # Add the missing export_path
 
     def __post_init__(self):
@@ -111,23 +109,53 @@ class ExportTarget:
             logger.warning(f"Could not determine type for entity ID: {self.id}")
 
 
-@dataclass
+@dataclass(slots=True)
 class PerformanceSettings:
     """
     Performance settings with automatic optimization.
     """
 
     # Core parallelism settings
-    workers: int = 8
-    download_workers: int = 12
-    io_workers: int = 16
-    ffmpeg_workers: int = 4
+    workers: int = 8  # General worker count (for backward compatibility)
+    
+    # 🚀 Media Download Workers (NEW - auto-tuned by disk type)
+    media_download_workers: int = 0  # 0 = auto-detect based on disk type (SSD vs HDD)
+
+    # 🧵 Unified Thread Pool settings (TIER B - B-1)
+    max_threads: int = 0  # 0 = auto-detect (CPU cores * 1.5)
+    thread_pool_metrics_enabled: bool = True  # Enable thread pool metrics collection
+
+    # 🚀 Parallel Media Processing settings (TIER B - B-3)
+    parallel_media_processing: bool = True  # Enable parallel media processing
+    max_parallel_media: int = (
+        0  # Max concurrent media operations (0 = auto: CPU cores / 2)
+    )
+    parallel_media_memory_limit_mb: int = 2048  # Memory limit for parallel processing
+
+    # 🔐 Hash-Based Media Deduplication settings (TIER B - B-6)
+    hash_based_deduplication: bool = (
+        True  # Enable hash-based deduplication (content-based)
+    )
+    hash_cache_max_size: int = 10000  # Maximum hash cache entries (LRU eviction)
+    hash_api_timeout: float = 5.0  # Timeout for GetFileHashes API call (seconds)
+
+    # 🗃️ InputPeer Cache settings (TIER C - C-3)
+    input_peer_cache_size: int = 1000  # Maximum cached InputPeer entries (LRU eviction)
+    input_peer_cache_ttl: float = 3600.0  # Time-to-live for cache entries in seconds
+
+    # 🚀 Zero-Copy Media Transfer settings (TIER B - B-2)
+    zero_copy_enabled: bool = True  # Enable zero-copy file transfer (os.sendfile)
+    zero_copy_min_size_mb: int = (
+        10  # Minimum file size (MB) for zero-copy (smaller → aiofiles)
+    )
+    zero_copy_verify_copy: bool = True  # Verify file size after copy
+    zero_copy_chunk_size_mb: int = 64  # Chunk size (MB) for aiofiles fallback mode
 
     # Batch processing settings
     message_batch_size: int = 100
     media_batch_size: int = 5
     cache_batch_size: int = 50
-    cache_save_interval: int = 100
+    cache_save_interval: int = 2000
 
     # Forum parallel processing settings
     forum_parallel_enabled: bool = True
@@ -171,6 +199,89 @@ class PerformanceSettings:
     persistent_download_min_size_mb: int = (
         1  # Минимальный размер для упорного режима (почти все файлы)
     )
+    
+    def __post_init__(self):
+        """Auto-tune performance settings based on system resources."""
+        # Auto-detect media download workers if not set
+        if self.media_download_workers == 0:
+            self.media_download_workers = self._detect_optimal_media_workers()
+            logger.info(f"🚀 Auto-tuned media_download_workers: {self.media_download_workers}")
+    
+    def _detect_optimal_media_workers(self) -> int:
+        """
+        Detect optimal number of media download workers based on disk type.
+        
+        Strategy:
+        - SSD: 8 workers (can handle parallel I/O efficiently)
+        - HDD: 3 workers (sequential I/O preferred to avoid head seeks)
+        - Unknown/Error: 6 workers (conservative middle ground)
+        
+        Returns:
+            Optimal worker count for media downloads
+        """
+        try:
+            disk_type = self._detect_disk_type()
+            
+            if disk_type == "ssd":
+                return 8  # SSDs handle parallel I/O well
+            elif disk_type == "hdd":
+                return 3  # HDDs suffer from head seeks, keep sequential
+            else:
+                return 6  # Unknown, use middle ground
+        except Exception as e:
+            logger.warning(f"Failed to detect disk type: {e}, using default 6 workers")
+            return 6
+    
+    def _detect_disk_type(self) -> str:
+        """
+        Detect if primary disk is SSD or HDD.
+        
+        Method (Linux): Check /sys/block/*/queue/rotational
+        - 0 = SSD (non-rotational)
+        - 1 = HDD (rotational)
+        
+        Returns:
+            "ssd", "hdd", or "unknown"
+        """
+        try:
+            # Linux detection
+            if os.path.exists("/sys/block"):
+                # Find primary disk (sda, nvme0n1, etc.)
+                import glob
+                rotational_files = glob.glob("/sys/block/*/queue/rotational")
+                
+                if rotational_files:
+                    # Check first available disk
+                    with open(rotational_files[0], "r") as f:
+                        value = f.read().strip()
+                        if value == "0":
+                            logger.debug(f"🔍 Detected SSD (rotational={value})")
+                            return "ssd"
+                        else:
+                            logger.debug(f"🔍 Detected HDD (rotational={value})")
+                            return "hdd"
+            
+            # Windows detection (via psutil)
+            try:
+                import psutil
+                # On Windows, we can't easily detect disk type
+                # Assume SSD if system has > 8GB RAM (heuristic)
+                mem_gb = psutil.virtual_memory().total / (1024 ** 3)
+                if mem_gb > 8:
+                    logger.debug("🔍 Assuming SSD (modern system with >8GB RAM)")
+                    return "ssd"
+                else:
+                    logger.debug("🔍 Assuming HDD (older system)")
+                    return "hdd"
+            except:
+                pass
+            
+            logger.debug("🔍 Could not detect disk type")
+            return "unknown"
+        
+        except Exception as e:
+            logger.debug(f"🔍 Disk detection error: {e}")
+            return "unknown"
     persistent_max_failures: int = (
         30  # Максимум неудач подряд перед отказом (увеличено)
     )
@@ -192,6 +303,10 @@ class PerformanceSettings:
     throttle_threshold_kbps: int = 50
     throttle_pause_s: int = 30
     rate_limit_calls_per_second: float = 10.0
+
+    # Download settings
+    part_size_kb: int = 512  # 0 = auto-tuning based on file size
+    download_retries: int = 5
 
     @classmethod
     def auto_configure(
@@ -218,9 +333,7 @@ class PerformanceSettings:
         if profile == "conservative":
             return cls(
                 workers=min(4, cpu_count),
-                download_workers=min(6, cpu_count),
-                io_workers=min(8, cpu_count * 2),
-                ffmpeg_workers=min(2, cpu_count // 2),
+                media_download_workers=3,  # Conservative for HDD
                 message_batch_size=50,
                 media_batch_size=3,
                 memory_limit_mb=int(available_memory_gb * 200),  # 20% доступной памяти
@@ -250,9 +363,7 @@ class PerformanceSettings:
         elif profile == "balanced":
             return cls(
                 workers=min(8, cpu_count),
-                download_workers=min(12, int(cpu_count * 1.5)),
-                io_workers=min(16, cpu_count * 2),
-                ffmpeg_workers=min(4, cpu_count // 2),
+                media_download_workers=0,  # Auto-detect
                 message_batch_size=100,
                 media_batch_size=5,
                 memory_limit_mb=int(available_memory_gb * 400),  # 40% доступной памяти
@@ -282,9 +393,7 @@ class PerformanceSettings:
         elif profile == "aggressive":
             return cls(
                 workers=min(16, cpu_count * 2),
-                download_workers=min(24, cpu_count * 3),
-                io_workers=min(32, cpu_count * 4),
-                ffmpeg_workers=min(8, cpu_count),
+                media_download_workers=12,  # Aggressive for SSD
                 message_batch_size=200,
                 media_batch_size=10,
                 memory_limit_mb=int(available_memory_gb * 600),  # 60% доступной памяти
@@ -314,7 +423,7 @@ class PerformanceSettings:
             return cls()
 
 
-@dataclass
+@dataclass(slots=True)
 class TranscriptionConfig:
     """
     Configuration for audio transcription system.
@@ -335,14 +444,16 @@ class TranscriptionConfig:
 
     # Caching
     cache_enabled: bool = True  # Enable result caching
-    cache_dir: Optional[str] = None  # Cache directory (default: {export_path}/.cache/transcriptions)
+    cache_dir: Optional[str] = (
+        None  # Cache directory (default: {export_path}/.cache/transcriptions)
+    )
 
     # Parallelism settings (v5.1.0)
     max_concurrent: int = 2  # Max parallel transcriptions (0 = auto based on device)
     sorting: str = "size_asc"  # 'none', 'size_asc', 'size_desc' (LPT scheduling)
 
 
-@dataclass
+@dataclass(slots=True)
 class Config:
     """
     Основная конфигурация экспортера.
@@ -385,10 +496,58 @@ class Config:
     exclude_extensions: List[str] = field(default_factory=list)
 
     export_comments: bool = False  # Export comments for posts
+    export_reactions: bool = False  # Export message reactions
 
     # Takeout settings
     use_takeout: bool = False  # Use Telegram Takeout for export
     takeout_fallback_delay: float = 1.0  # Delay in seconds if Takeout fails/disabled
+
+    # Async pipeline configuration (fetch -> process -> write)
+    # Feature flag to enable async pipeline - ON by default after TIER A completion
+    async_pipeline_enabled: bool = True
+
+    # Worker sizing for the pipeline stages (0 = auto in some cases)
+    async_pipeline_fetch_workers: int = 1
+    async_pipeline_process_workers: int = (
+        0  # 0 = auto (derived from performance settings)
+    )
+    async_pipeline_write_workers: int = 1
+
+    # Bounded queue sizes for pipeline stages (sensible defaults)
+    async_pipeline_fetch_queue_size: int = 64
+    async_pipeline_process_queue_size: int = 256
+
+    # DC-aware routing settings (P1)
+    dc_aware_routing_enabled: bool = (
+        True  # Enable DC-aware worker routing (ON by default)
+    )
+    dc_routing_strategy: str = "smart"  # 'smart' | 'sticky' | 'round_robin'
+    dc_prewarm_enabled: bool = True  # Pre-warm workers to entity DC before heavy fetch
+    dc_prewarm_timeout: int = 5  # Timeout (seconds) for pre-warm RPCs
+
+    # Session garbage collection (TIER A - Task 6)
+    session_gc_enabled: bool = True  # Enable automatic session cleanup on startup
+    session_gc_max_age_days: int = 30  # Remove sessions older than N days
+    session_gc_keep_last_n: int = 3  # Always keep N most recent sessions
+
+    # BloomFilter optimization (TIER B - B-4)
+    bloom_filter_size_multiplier: float = (
+        1.1  # Multiplier for expected message count (10% buffer)
+    )
+    bloom_filter_min_size: int = (
+        10_000  # Minimum size (prevents over-allocation for small chats, ~120KB)
+    )
+    bloom_filter_max_size: int = (
+        10_000_000  # Maximum size (prevents excessive memory, ~12MB)
+    )
+    bloom_filter_only_for_resume: bool = (
+        True  # 🚀 OPTIMIZATION: Only use BloomFilter for resume scenarios (default: True)
+        # When True: new exports use lightweight empty set (near-zero overhead)
+        # When False: always use BloomFilter (original B-4 behavior, ~7ms per batch)
+    )
+
+    # TTY-Aware Modes (TIER B - B-5)
+    tty_mode: str = "auto"  # TTY detection mode: 'auto' | 'force-tty' | 'force-non-tty'
 
     @property
     def any_media_download_enabled(self) -> bool:
@@ -442,32 +601,52 @@ class Config:
     performance: PerformanceSettings = field(default_factory=PerformanceSettings)
 
     # Параметры шардирования (параллельная загрузка сообщений)
-    enable_shard_fetch: bool = False  # Использовать шардирование для загрузки сообщений
+    enable_shard_fetch: bool = False  # TEMPORARY DISABLED: Serialization issues with Message objects
     shard_count: int = 8  # Количество воркеров для шардирования
     shard_chunk_size: int = 1000  # Размер батча (лимит Takeout API)
-    shard_chunks_multiplier: int = 4  # NEW: Множитель чанков (4x workers = 32 chunks для 8 workers)
-    
+    shard_chunks_multiplier: int = (
+        4  # NEW: Множитель чанков (4x workers = 32 chunks для 8 workers)
+    )
+    shard_compression_enabled: bool = True  # Enable zlib compression for shards
+    shard_compression_level: int = 1  # Compression level (1-9, 1=fastest)
+    shard_lightweight_schema_enabled: bool = (
+        False  # Enable lightweight schema for shards (only minimal message data)
+    )
+
     # Adaptive chunking for slow regions (DC/API bottleneck mitigation)
-    slow_chunk_threshold: float = 10.0  # Seconds - chunks slower than this trigger adaptive splitting
+    slow_chunk_threshold: float = (
+        10.0  # Seconds - chunks slower than this trigger adaptive splitting
+    )
     slow_chunk_max_retries: int = 2  # Maximum recursive split attempts for slow chunks
-    slow_chunk_split_factor: int = 4  # How many pieces to split slow chunks into (default: 4)
-    
+    slow_chunk_split_factor: int = (
+        4  # How many pieces to split slow chunks into (default: 4)
+    )
+
     # Hot Zones & Density-Based Adaptive Chunking
-    enable_hot_zones: bool = True  # Enable pre-defined hot zone detection and pre-splitting
+    enable_hot_zones: bool = (
+        True  # Enable pre-defined hot zone detection and pre-splitting
+    )
     enable_density_estimation: bool = True  # Enable density estimation via sampling
-    hot_zones_db_path: Optional[str] = None  # Custom path for slow-ranges database (default: .monitoring/)
-    
+    hot_zones_db_path: Optional[str] = (
+        None  # Custom path for slow-ranges database (default: .monitoring/)
+    )
+
+    # Prefetch optimization (overlap network fetch with processing)
+    enable_prefetch_batches: bool = True  # Enable batch prefetching (default: ON)
+    prefetch_queue_size: int = 2  # Max batches to prefetch (2 = double-buffering)
+    prefetch_batch_size: int = 100  # Messages per batch for prefetch
+
     # Density thresholds for adaptive chunking (messages per 1000 IDs)
     density_very_high_threshold: float = 150.0  # >150 msgs/1K IDs = very high density
     density_high_threshold: float = 100.0  # >100 msgs/1K IDs = high density
     density_medium_threshold: float = 50.0  # >50 msgs/1K IDs = medium density
-    
+
     # Chunk sizes for different density levels (in message IDs)
     chunk_size_very_high_density: int = 5_000  # Very high density → small chunks
     chunk_size_high_density: int = 10_000  # High density → medium-small chunks
     chunk_size_medium_density: int = 15_000  # Medium density → medium chunks
     chunk_size_low_density: int = 50_000  # Low density → large chunks (default)
-    
+
     # Density estimation sampling parameters
     density_sample_points: int = 3  # Number of sample points across ID range
     density_sample_range: int = 1_000  # IDs to sample around each point
@@ -481,12 +660,17 @@ class Config:
     vaapi_device: str = "/dev/dri/renderD128"  # Устройство VA-API
     vaapi_quality: int = 25  # Качество для VA-API (18-28 для h264, 25-35 для hevc)
 
+    # TIER C-1: VA-API Auto-Detection
+    force_cpu_transcode: bool = False  # Override auto-detection, force CPU encoding
+    vaapi_device_path: str = "/dev/dri/renderD128"  # Path to VA-API device
+
     cache_file: Path = field(default=DEFAULT_CACHE_PATH)
     cache_manager: Any = None
 
     log_level: str = "INFO"
 
     dialog_fetch_limit: int = 20
+    batch_fetch_size: int = 100
 
     proxy_type: Optional[ProxyType] = None
     proxy_addr: Optional[str] = None
@@ -523,10 +707,28 @@ class Config:
                 self.performance_profile
             )
 
+        # 🚀 Override performance settings from env if present
+        env_part_size = os.getenv("PART_SIZE_KB")
+        if env_part_size is not None:
+            self.performance.part_size_kb = int(env_part_size)
+
+        env_retries = os.getenv("DOWNLOAD_RETRIES")
+        if env_retries is not None:
+            self.performance.download_retries = int(env_retries)
+
+        # 🗃️ InputPeer Cache settings override (TIER C - C-3)
+        env_cache_size = os.getenv("INPUT_PEER_CACHE_SIZE")
+        if env_cache_size is not None:
+            self.performance.input_peer_cache_size = int(env_cache_size)
+
+        env_cache_ttl = os.getenv("INPUT_PEER_CACHE_TTL")
+        if env_cache_ttl is not None:
+            self.performance.input_peer_cache_ttl = float(env_cache_ttl)
+
         # 🚀 Auto-configure async_download_workers from performance settings
         if self.async_download_workers == 0:
-            # Derive from performance.download_workers (typically 1/3 to avoid overwhelming Telegram)
-            self.async_download_workers = max(3, self.performance.download_workers // 3)
+            # Derive from performance.media_download_workers (typically 1/3 to avoid overwhelming Telegram)
+            self.async_download_workers = max(3, self.performance.media_download_workers // 3)
 
         # Если путь к кэшу не абсолютный — делаем его относительным к export_path
         if not Path(self.cache_file).is_absolute():
@@ -672,7 +874,7 @@ class Config:
             f"Configuration loaded with performance profile: {self.performance_profile}"
         )
         logger.info(
-            f"Workers: {self.performance.workers}, Download workers: {self.performance.download_workers}"
+            f"Workers: {self.performance.workers}, Media download workers: {self.performance.media_download_workers}"
         )
         logger.info(f"Async download workers: {self.async_download_workers}")
         logger.info(f"Memory limit: {self.performance.memory_limit_mb}MB")
@@ -681,7 +883,13 @@ class Config:
         logger.info(f"Transcription cache: {self.transcription.cache_dir}")
         logger.info(f"Takeout enabled: {self.use_takeout}")
         logger.info(f"Async media download: {self.async_media_download}")
-        logger.info(f"🚀 Sharding: enabled={self.enable_shard_fetch}, workers={self.shard_count}, chunk_size={self.shard_chunk_size}")
+        logger.info(
+            f"🚀 Sharding: enabled={self.enable_shard_fetch}, workers={self.shard_count}, chunk_size={self.shard_chunk_size}"
+        )
+        logger.info(
+            f"⚡ Prefetch: enabled={self.enable_prefetch_batches}, "
+            f"queue_size={self.prefetch_queue_size}, batch_size={self.prefetch_batch_size}"
+        )
         if self.enable_hot_zones:
             logger.info(
                 f"🔥 Hot Zones: enabled, density estimation={self.enable_density_estimation}, "
@@ -909,7 +1117,7 @@ class Config:
                 "api_hash": os.getenv("API_HASH", ""),
                 "phone_number": os.getenv("PHONE_NUMBER"),
                 "session_name": os.getenv("SESSION_NAME", "tobs_session"),
-                "export_path": os.getenv("EXPORT_PATH"),
+                "export_path": os.getenv("EXPORT_PATH") or str(DEFAULT_EXPORT_PATH),
                 "media_subdir": os.getenv("MEDIA_SUBDIR", "media"),
                 "cache_subdir": os.getenv("CACHE_SUBDIR", "cache"),
                 "monitoring_subdir": os.getenv("MONITORING_SUBDIR", "monitoring"),
@@ -928,6 +1136,7 @@ class Config:
                     os.getenv("MEDIA_DOWNLOAD"), True
                 ),  # Backward compatibility
                 "export_comments": _parse_bool(os.getenv("EXPORT_COMMENTS"), False),
+                "export_reactions": _parse_bool(os.getenv("EXPORT_REACTIONS"), False),
                 "use_takeout": _parse_bool(os.getenv("USE_TAKEOUT"), False),
                 "takeout_fallback_delay": float(
                     os.getenv("TAKEOUT_FALLBACK_DELAY", "1.0")
@@ -939,6 +1148,46 @@ class Config:
                 "async_download_workers": int(
                     os.getenv("ASYNC_DOWNLOAD_WORKERS", "0")
                 ),  # 0 = auto
+                # Async pipeline configuration (fetch -> process -> write)
+                "async_pipeline_enabled": _parse_bool(
+                    os.getenv("ASYNC_PIPELINE_ENABLED"), False
+                ),
+                "async_pipeline_fetch_workers": int(
+                    os.getenv("ASYNC_PIPELINE_FETCH_WORKERS", "1")
+                ),
+                "async_pipeline_process_workers": int(
+                    os.getenv("ASYNC_PIPELINE_PROCESS_WORKERS", "0")
+                ),  # 0 = auto
+                "async_pipeline_write_workers": int(
+                    os.getenv("ASYNC_PIPELINE_WRITE_WORKERS", "1")
+                ),
+                "async_pipeline_fetch_queue_size": int(
+                    os.getenv("ASYNC_PIPELINE_FETCH_QUEUE_SIZE", "64")
+                ),
+                "async_pipeline_process_queue_size": int(
+                    os.getenv("ASYNC_PIPELINE_PROCESS_QUEUE_SIZE", "256")
+                ),
+                # BloomFilter optimization (TIER B - B-4)
+                "bloom_filter_size_multiplier": float(
+                    os.getenv("BLOOM_FILTER_SIZE_MULTIPLIER", "1.1")
+                ),
+                "bloom_filter_min_size": int(
+                    os.getenv("BLOOM_FILTER_MIN_SIZE", "10000")
+                ),
+                "bloom_filter_max_size": int(
+                    os.getenv("BLOOM_FILTER_MAX_SIZE", "10000000")
+                ),
+                # TTY-Aware Modes (TIER B - B-5)
+                "tty_mode": os.getenv("TTY_MODE", "auto"),
+                # DC-aware routing (P1)
+                "dc_aware_routing_enabled": _parse_bool(
+                    os.getenv("DC_AWARE_ROUTING_ENABLED"), False
+                ),
+                "dc_routing_strategy": os.getenv("DC_ROUTING_STRATEGY", "smart"),
+                "dc_prewarm_enabled": _parse_bool(
+                    os.getenv("DC_PREWARM_ENABLED"), True
+                ),
+                "dc_prewarm_timeout": int(os.getenv("DC_PREWARM_TIMEOUT", "5")),
                 "log_level": os.getenv("LOG_LEVEL", "INFO"),
                 # Производительность
                 "performance_profile": performance_profile,
@@ -948,22 +1197,59 @@ class Config:
                 ),
                 "shard_count": int(os.getenv("SHARD_COUNT", "8")),
                 "shard_chunk_size": int(os.getenv("SHARD_CHUNK_SIZE", "1000")),
-                "shard_chunks_multiplier": int(os.getenv("SHARD_CHUNKS_MULTIPLIER", "4")),
+                "shard_chunks_multiplier": int(
+                    os.getenv("SHARD_CHUNKS_MULTIPLIER", "4")
+                ),
+                "shard_compression_enabled": _parse_bool(
+                    os.getenv("SHARD_COMPRESSION_ENABLED"), True
+                ),
+                "shard_compression_level": int(
+                    os.getenv("SHARD_COMPRESSION_LEVEL", "1")
+                ),
+                "shard_lightweight_schema_enabled": _parse_bool(
+                    os.getenv("SHARD_LIGHTWEIGHT_SCHEMA_ENABLED"), False
+                ),
                 # Adaptive chunking parameters
-                "slow_chunk_threshold": float(os.getenv("SLOW_CHUNK_THRESHOLD", "10.0")),
+                "slow_chunk_threshold": float(
+                    os.getenv("SLOW_CHUNK_THRESHOLD", "10.0")
+                ),
                 "slow_chunk_max_retries": int(os.getenv("SLOW_CHUNK_MAX_RETRIES", "2")),
-                "slow_chunk_split_factor": int(os.getenv("SLOW_CHUNK_SPLIT_FACTOR", "4")),
+                "slow_chunk_split_factor": int(
+                    os.getenv("SLOW_CHUNK_SPLIT_FACTOR", "4")
+                ),
                 # Hot Zones & Density-Based Adaptive Chunking
                 "enable_hot_zones": _parse_bool(os.getenv("ENABLE_HOT_ZONES"), True),
-                "enable_density_estimation": _parse_bool(os.getenv("ENABLE_DENSITY_ESTIMATION"), True),
+                "enable_density_estimation": _parse_bool(
+                    os.getenv("ENABLE_DENSITY_ESTIMATION"), True
+                ),
                 "hot_zones_db_path": os.getenv("HOT_ZONES_DB_PATH"),
-                "density_very_high_threshold": float(os.getenv("DENSITY_VERY_HIGH_THRESHOLD", "150.0")),
-                "density_high_threshold": float(os.getenv("DENSITY_HIGH_THRESHOLD", "100.0")),
-                "density_medium_threshold": float(os.getenv("DENSITY_MEDIUM_THRESHOLD", "50.0")),
-                "chunk_size_very_high_density": int(os.getenv("CHUNK_SIZE_VERY_HIGH_DENSITY", "5000")),
-                "chunk_size_high_density": int(os.getenv("CHUNK_SIZE_HIGH_DENSITY", "10000")),
-                "chunk_size_medium_density": int(os.getenv("CHUNK_SIZE_MEDIUM_DENSITY", "15000")),
-                "chunk_size_low_density": int(os.getenv("CHUNK_SIZE_LOW_DENSITY", "50000")),
+                "density_very_high_threshold": float(
+                    os.getenv("DENSITY_VERY_HIGH_THRESHOLD", "150.0")
+                ),
+                "density_high_threshold": float(
+                    os.getenv("DENSITY_HIGH_THRESHOLD", "100.0")
+                ),
+                "density_medium_threshold": float(
+                    os.getenv("DENSITY_MEDIUM_THRESHOLD", "50.0")
+                ),
+                "chunk_size_very_high_density": int(
+                    os.getenv("CHUNK_SIZE_VERY_HIGH_DENSITY", "5000")
+                ),
+                "chunk_size_high_density": int(
+                    os.getenv("CHUNK_SIZE_HIGH_DENSITY", "10000")
+                ),
+                "chunk_size_medium_density": int(
+                    os.getenv("CHUNK_SIZE_MEDIUM_DENSITY", "15000")
+                ),
+                # Prefetch optimization
+                "enable_prefetch_batches": _parse_bool(
+                    os.getenv("ENABLE_PREFETCH_BATCHES"), True
+                ),
+                "prefetch_queue_size": int(os.getenv("PREFETCH_QUEUE_SIZE", "2")),
+                "prefetch_batch_size": int(os.getenv("PREFETCH_BATCH_SIZE", "100")),
+                "chunk_size_low_density": int(
+                    os.getenv("CHUNK_SIZE_LOW_DENSITY", "50000")
+                ),
                 "density_sample_points": int(os.getenv("DENSITY_SAMPLE_POINTS", "3")),
                 "density_sample_range": int(os.getenv("DENSITY_SAMPLE_RANGE", "1000")),
                 # Медиа
@@ -972,6 +1258,13 @@ class Config:
                 "video_preset": os.getenv("VIDEO_PRESET", "fast"),
                 "hw_acceleration": os.getenv("HW_ACCELERATION", "vaapi"),
                 "use_h265": _parse_bool(os.getenv("USE_H265"), False),
+                # TIER C-1: VA-API Auto-Detection
+                "force_cpu_transcode": _parse_bool(
+                    os.getenv("FORCE_CPU_TRANSCODE"), False
+                ),
+                "vaapi_device_path": os.getenv(
+                    "VAAPI_DEVICE_PATH", "/dev/dri/renderD128"
+                ),
                 # Транскрипция (v5.1.0)
                 "transcription": TranscriptionConfig(
                     enabled=_parse_bool(os.getenv("TRANSCRIPTION_ENABLED"), True),
@@ -988,10 +1281,10 @@ class Config:
                     cache_enabled=_parse_bool(
                         os.getenv("TRANSCRIPTION_CACHE_ENABLED"), True
                     ),
-                    cache_dir=os.getenv("TRANSCRIPTION_CACHE_DIR"),  # None = auto ({export_path}/.cache/transcriptions)
-                    max_concurrent=int(
-                        os.getenv("TRANSCRIPTION_MAX_CONCURRENT", "2")
-                    ),
+                    cache_dir=os.getenv(
+                        "TRANSCRIPTION_CACHE_DIR"
+                    ),  # None = auto ({export_path}/.cache/transcriptions)
+                    max_concurrent=int(os.getenv("TRANSCRIPTION_MAX_CONCURRENT", "2")),
                     sorting=os.getenv("TRANSCRIPTION_SORTING", "size_asc"),
                 ),
                 "transcription_timeout": float(
@@ -1048,6 +1341,9 @@ def get_optimal_workers(
 ) -> Dict[str, int]:
     """
     Вычисляет оптимальное количество workers на основе системных ресурсов.
+    
+    DEPRECATED: Use PerformanceSettings.auto_configure() instead.
+    Kept for backward compatibility.
 
     Returns:
         Словарь с рекомендуемыми значениями workers
@@ -1063,9 +1359,7 @@ def get_optimal_workers(
 
     return {
         "workers": max(2, base_workers),
-        "download_workers": max(4, int(base_workers * 1.5)),
-        "io_workers": max(4, int(base_workers * 2)),
-        "ffmpeg_workers": max(1, base_workers // 2),
+        "media_download_workers": max(4, int(base_workers * 1.5)),
     }
 
 

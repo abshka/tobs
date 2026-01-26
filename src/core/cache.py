@@ -5,7 +5,7 @@ Unified cache manager combining simple and advanced caching.
 import asyncio
 import base64
 import logging
-import pickle
+import msgpack  # S-3: Security fix - replaced pickle with msgpack
 import time
 import zlib
 from collections import OrderedDict
@@ -33,7 +33,7 @@ class CompressionType(Enum):
 
     NONE = "none"
     GZIP = "gzip"
-    PICKLE = "pickle"
+    MSGPACK = "msgpack"  # S-3: Renamed from PICKLE to MSGPACK
 
 
 @dataclass
@@ -80,6 +80,8 @@ class CacheStats:
 
 
 def _json_default(obj):
+    if hasattr(obj, "to_dict"):
+        return obj.to_dict()
     if isinstance(obj, set):
         return list(obj)
     raise TypeError
@@ -206,29 +208,28 @@ class CacheManager:
             elif isinstance(data, bytes):
                 raw_data = data
             else:
-                # For extraction of raw_data we choose pickled bytes if PICKLE compression is configured,
-                # otherwise we prefer JSON (orjson) which helps decide compression threshold.
-                if self.compression == CompressionType.PICKLE:
-                    raw_data = pickle.dumps(data)
+                # S-3: Use msgpack instead of pickle for object serialization
+                if self.compression == CompressionType.MSGPACK:
+                    raw_data = msgpack.packb(data, use_bin_type=True)
                 else:
                     # Для сложных объектов пытаемся сериализовать в JSON с помощью orjson
                     try:
                         raw_data = orjson.dumps(data, option=orjson.OPT_NON_STR_KEYS)
                     except TypeError as e:
-                        # Not JSON serializable, fallback to pickle for GZIP if configured
+                        # Not JSON serializable, fallback to msgpack for GZIP if configured
                         logger.debug(
-                            f"Data not JSON serializable: {e}. Falling back to pickle compression."
+                            f"Data not JSON serializable: {e}. Falling back to msgpack compression."
                         )
                         if self.compression == CompressionType.GZIP:
-                            pickled_raw = pickle.dumps(data)
-                            # Track that we fell back from JSON to pickle serialization
+                            msgpack_raw = msgpack.packb(data, use_bin_type=True)
+                            # Track that we fell back from JSON to msgpack serialization
                             self._stats.compression_fallbacks += 1
-                            if len(pickled_raw) < self.compression_threshold:
+                            if len(msgpack_raw) < self.compression_threshold:
                                 return data, False, "none"
-                            compressed = zlib.compress(pickled_raw)
-                            if len(compressed) < len(pickled_raw) * 0.9:
+                            compressed = zlib.compress(msgpack_raw)
+                            if len(compressed) < len(msgpack_raw) * 0.9:
                                 self._stats.compression_saves += 1
-                                return compressed, True, "pickle"
+                                return compressed, True, "msgpack"
                         return data, False, "none"
 
             if len(raw_data) < self.compression_threshold:
@@ -239,12 +240,12 @@ class CacheManager:
                 if len(compressed) < len(raw_data) * 0.9:  # Сжатие эффективно
                     self._stats.compression_saves += 1
                     return compressed, True, "gzip"
-            elif self.compression == CompressionType.PICKLE:
-                pickled_raw = pickle.dumps(data)
-                compressed = zlib.compress(pickled_raw)
-                # For PICKLE compression we always store pickled bytes to preserve types
+            elif self.compression == CompressionType.MSGPACK:
+                msgpack_raw = msgpack.packb(data, use_bin_type=True)
+                compressed = zlib.compress(msgpack_raw)
+                # For MSGPACK compression we always store msgpack bytes to preserve types
                 self._stats.compression_saves += 1
-                return compressed, True, "pickle"
+                return compressed, True, "msgpack"
 
         except Exception as e:
             logger.warning(f"Compression failed: {e}")
@@ -268,7 +269,14 @@ class CacheManager:
                 except orjson.JSONDecodeError:
                     # Если не JSON, возвращаем как строку
                     return decompressed_bytes.decode("utf-8")
+            elif compression_type == "msgpack":
+                # S-3: Security fix - use msgpack instead of pickle
+                return msgpack.unpackb(zlib.decompress(data), raw=False)
             elif compression_type == "pickle":
+                # S-3: Backward compatibility - support old pickle data
+                # TODO: Remove after migration period
+                logger.warning("Found legacy pickle data, consider re-caching with msgpack")
+                import pickle
                 return pickle.loads(zlib.decompress(data))
         except Exception as e:
             logger.error(f"Decompression failed: {e}")
@@ -679,6 +687,15 @@ class CacheManager:
     async def flush_all_pending(self):
         """Принудительное сохранение."""
         await self._save_cache()
+
+    async def get_file_path(self, file_key: str) -> Optional[str]:
+        """Get stored file path for media deduplication."""
+        return await self.get(f"media_file_{file_key}")
+
+    async def store_file_path(self, file_key: str, path: str):
+        """Store file path for media deduplication."""
+        await self.set(f"media_file_{file_key}", path)
+
 
 
 # Глобальный экземпляр кэш-менеджера

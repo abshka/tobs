@@ -65,10 +65,6 @@ tobs_exporter.log*
 .DS_Store
 Thumbs.db
 
-# Project files
-*.md
-!README.md
-docs/
 
 # Session files (credentials)
 sessions/

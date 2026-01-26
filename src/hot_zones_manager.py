@@ -31,7 +31,7 @@ from src.config import Config
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class HotZone:
     """
     Represents a known problematic ID range in a specific datacenter.
@@ -67,7 +67,7 @@ class HotZone:
         return self.id_start <= message_id <= self.id_end
 
 
-@dataclass
+@dataclass(slots=True)
 class SlowChunkRecord:
     """
     Record of a slow chunk for persistent database.

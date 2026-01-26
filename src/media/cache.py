@@ -61,18 +61,29 @@ class MediaCache:
             logger.debug(f"Cache save failed: {e}")
 
     async def _copy_file_async(self, src_path: Path, dst_path: Path):
-        """Асинхронное копирование файла."""
-        import aiofiles
+        """
+        Асинхронное копирование файла с zero-copy оптимизацией.
+        
+        Uses os.sendfile() on supported platforms for kernel-level copying,
+        falls back to aiofiles on unsupported platforms or for small files.
+        """
+        from src.media.zero_copy import ZeroCopyConfig, get_zero_copy_transfer
 
         try:
-            dst_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Простое потоковое копирование
-            async with aiofiles.open(src_path, "rb") as src:
-                async with aiofiles.open(dst_path, "wb") as dst:
-                    while chunk := await src.read(1024 * 1024):  # 1MB chunks
-                        await dst.write(chunk)
-
+            # Use zero-copy transfer with config from cache_manager if available
+            config = ZeroCopyConfig(
+                enabled=True,
+                min_size_mb=10,
+                verify_copy=True,
+                chunk_size_mb=64
+            )
+            
+            transfer = get_zero_copy_transfer(config)
+            success = await transfer.copy_file(src_path, dst_path, verify=True)
+            
+            if not success:
+                raise RuntimeError(f"Zero-copy transfer failed: {src_path} -> {dst_path}")
+            
             logger.debug(f"File copied from cache: {src_path} -> {dst_path}")
 
         except Exception as e:

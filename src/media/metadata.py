@@ -8,6 +8,7 @@ Provides caching for improved performance.
 import asyncio
 import hashlib
 import mimetypes
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Dict
 
@@ -20,13 +21,41 @@ from PIL import Image
 from .models import MediaMetadata
 
 
+def _parse_frame_rate(rate_str: str) -> float:
+    """
+    Безопасный парсинг frame rate из ffprobe (например, '30/1' или '24000/1001').
+    
+    Args:
+        rate_str: Строка с frame rate в формате 'num/den' или просто число
+        
+    Returns:
+        float: FPS значение (fallback: 30.0 при ошибках)
+    """
+    try:
+        if '/' in rate_str:
+            return float(Fraction(rate_str))
+        return float(rate_str)
+    except (ValueError, ZeroDivisionError) as e:
+        logger.warning(f"Invalid frame rate '{rate_str}': {e}, defaulting to 30.0")
+        return 30.0
+
+
 class MetadataExtractor:
     """Извлекает метаданные из медиафайлов."""
 
-    def __init__(self, io_executor):
-        self.io_executor = io_executor
+    def __init__(self, thread_pool):
+        """
+        Initialize metadata extractor.
+        
+        Args:
+            thread_pool: Unified thread pool for CPU-bound operations
+        """
+        self.thread_pool = thread_pool  # 🧵 TIER B - B-1
         self._metadata_cache: Dict[str, MediaMetadata] = {}
         self._file_checksums: Dict[Path, str] = {}
+        
+        # Legacy compatibility
+        self.io_executor = None
 
     async def get_metadata(self, file_path: Path, media_type: str) -> MediaMetadata:
         """Получение метаданных медиа файла."""
@@ -98,7 +127,7 @@ class MetadataExtractor:
                                 "width": int(video_stream.get("width", 0)),
                                 "height": int(video_stream.get("height", 0)),
                                 "duration": float(video_stream.get("duration", 0)),
-                                "fps": eval(video_stream.get("r_frame_rate", "0/1")),
+                                "fps": _parse_frame_rate(video_stream.get("r_frame_rate", "0/1")),
                                 "codec": video_stream.get("codec_name"),
                                 "bitrate": int(video_stream.get("bit_rate", 0)),
                             }

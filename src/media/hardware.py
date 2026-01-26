@@ -11,6 +11,9 @@ from typing import Any, Dict, Optional
 
 from loguru import logger
 
+# TIER C-1: Import VA-API Auto-Detection
+from .vaapi_detector import VAAPIStatus, get_vaapi_capabilities
+
 
 class HardwareAccelerationDetector:
     """Детектор аппаратного ускорения."""
@@ -28,57 +31,62 @@ class HardwareAccelerationDetector:
         }
 
     async def detect_hardware_acceleration(self) -> Dict[str, bool]:
-        """Проверка доступности VA-API кодека в FFmpeg с реальным тестированием."""
+        """Проверка доступности VA-API кодека с auto-detection через vainfo."""
         if self._detection_complete:
             return self.available_encoders
 
         try:
-            # Проверяем доступность VA-API устройства
+            # TIER C-1: Auto-detect VA-API using vainfo command
             vaapi_device = (
-                getattr(self.config, "vaapi_device", "/dev/dri/renderD128")
+                getattr(self.config, "vaapi_device_path", "/dev/dri/renderD128")
                 if self.config
                 else "/dev/dri/renderD128"
             )
-            if not self._check_vaapi_device(vaapi_device):
-                logger.warning(f"VA-API device {vaapi_device} not accessible")
+            
+            # Check if force CPU transcode is enabled
+            force_cpu = (
+                getattr(self.config, "force_cpu_transcode", False)
+                if self.config
+                else False
+            )
+            
+            if force_cpu:
+                logger.info("🐢 Force CPU transcoding enabled (FORCE_CPU_TRANSCODE=true)")
                 self.available_encoders["vaapi"] = False
                 self._detection_complete = True
                 return self.available_encoders
-
-            # Получаем список доступных кодеров
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg",
-                "-hide_banner",
-                "-encoders",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await proc.communicate()
-            encoders_output = stdout.decode("utf-8", errors="ignore")
-
-            # Проверяем наличие VA-API кодека
-            if "h264_vaapi" in encoders_output:
-                # Тестируем VA-API кодер
-                if await self._test_hardware_encoder("h264_vaapi"):
-                    self.available_encoders["vaapi"] = True
-                    logger.info("VA-API hardware encoder h264_vaapi is working")
+            
+            # Run VA-API detection
+            vaapi_caps = get_vaapi_capabilities(device_path=vaapi_device)
+            
+            if vaapi_caps.status == VAAPIStatus.AVAILABLE:
+                # Verify h264_vaapi encoder is in the list
+                if "h264_vaapi" in vaapi_caps.encoders:
+                    # Test the encoder with FFmpeg
+                    if await self._test_hardware_encoder("h264_vaapi"):
+                        self.available_encoders["vaapi"] = True
+                        logger.info(
+                            f"✅ VA-API ready: {vaapi_caps.driver} "
+                            f"(encoders: {', '.join(vaapi_caps.encoders)})"
+                        )
+                    else:
+                        self.available_encoders["vaapi"] = False
+                        logger.warning("VA-API detected but h264_vaapi encoder failed test")
                 else:
                     self.available_encoders["vaapi"] = False
-                    logger.warning("VA-API hardware encoder h264_vaapi failed test")
+                    logger.warning("VA-API detected but h264_vaapi encoder not available")
             else:
                 self.available_encoders["vaapi"] = False
-                logger.warning("VA-API encoder not found in FFmpeg")
+                if vaapi_caps.status == VAAPIStatus.UNAVAILABLE:
+                    logger.info("VA-API unavailable - using CPU encoding")
+                else:
+                    logger.warning("VA-API detection error - falling back to CPU encoding")
 
         except Exception as e:
             logger.warning(f"VA-API detection failed: {e}")
             self.available_encoders["vaapi"] = False
 
         self._detection_complete = True
-
-        if self.available_encoders["vaapi"]:
-            logger.info("VA-API hardware acceleration is available")
-        else:
-            logger.info("VA-API not available, using software encoding")
 
         return self.available_encoders
 
@@ -106,7 +114,7 @@ class HardwareAccelerationDetector:
             elif "vaapi" in encoder:
                 # VA-API требует специальную настройку
                 vaapi_device = (
-                    getattr(self.config, "vaapi_device", "/dev/dri/renderD128")
+                    getattr(self.config, "vaapi_device_path", "/dev/dri/renderD128")
                     if self.config
                     else "/dev/dri/renderD128"
                 )

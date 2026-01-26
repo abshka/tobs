@@ -2,6 +2,8 @@ import asyncio
 import re
 import sys
 import os
+import time
+from collections import deque
 from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
@@ -16,12 +18,13 @@ try:
     from telethon.errors.rpcerrorlist import PhoneCodeInvalidError as PhoneCodeInvalidErrorRPC
 except Exception:
     PhoneCodeInvalidErrorRPC = PhoneCodeInvalidError
-from telethon.tl.functions.channels import GetFullChannelRequest
-from telethon.tl.types import Channel, Message, User
+from telethon.tl.functions.channels import GetFullChannelRequest, GetForumTopicsRequest
+from telethon.tl.types import Channel, ForumTopic, Message, User
 
 from src.config import ITER_MESSAGES_TIMEOUT, Config, ExportTarget
 from src.core.connection import PoolType
 from src.exceptions import TelegramConnectionError
+from src.input_peer_cache import InputPeerCache
 from src.logging_context import update_context_prefix
 from src.utils import clear_screen, logger, notify_and_pause, sanitize_filename
 
@@ -39,6 +42,80 @@ async def notify_and_pause_async(text: str, duration: float = 1.0) -> None:
     """
     notify_and_pause(text)
     await asyncio.sleep(duration)
+
+
+class ThrottleDetector:
+    """
+    Detects server-side throttling by monitoring API request latencies.
+    
+    When Telegram starts throttling, request latencies increase significantly
+    (typically 3-10x baseline). This detector tracks latencies and warns when
+    throttling is detected.
+    """
+    
+    def __init__(self, window_size: int = 100, threshold_multiplier: float = 3.0):
+        """
+        Initialize throttle detector.
+        
+        Args:
+            window_size: Number of recent requests to track
+            threshold_multiplier: Latency multiplier to trigger warning (3.0 = 3x baseline)
+        """
+        self.request_times: deque = deque(maxlen=window_size)
+        self.window_size = window_size
+        self.threshold_multiplier = threshold_multiplier
+        self.avg_latency_ms = 0.0
+        self.baseline_latency_ms = 0.0
+        self._throttle_detected = False
+    
+    def record(self, latency_ms: float):
+        """
+        Record a request latency and check for throttling.
+        
+        Args:
+            latency_ms: Request latency in milliseconds
+        """
+        self.request_times.append(latency_ms)
+        
+        # Calculate average latency
+        if len(self.request_times) > 0:
+            self.avg_latency_ms = sum(self.request_times) / len(self.request_times)
+        
+        # Establish baseline after initial warmup
+        if len(self.request_times) == self.window_size and self.baseline_latency_ms == 0:
+            self.baseline_latency_ms = min(self.request_times)
+            logger.debug(f"📊 ThrottleDetector baseline: {self.baseline_latency_ms:.0f}ms")
+        
+        # Detect throttling: avg latency > threshold * baseline
+        if len(self.request_times) >= 20 and self.baseline_latency_ms > 0:
+            threshold = self.baseline_latency_ms * self.threshold_multiplier
+            
+            if self.avg_latency_ms > threshold:
+                if not self._throttle_detected:
+                    logger.warning(
+                        f"🐌 Server throttling detected: "
+                        f"avg latency {self.avg_latency_ms:.0f}ms "
+                        f"(baseline: {self.baseline_latency_ms:.0f}ms, "
+                        f"threshold: {threshold:.0f}ms)"
+                    )
+                    self._throttle_detected = True
+            else:
+                if self._throttle_detected:
+                    logger.info(f"✅ Throttling cleared: avg latency {self.avg_latency_ms:.0f}ms")
+                    self._throttle_detected = False
+    
+    def is_throttled(self) -> bool:
+        """Check if currently throttled."""
+        return self._throttle_detected
+    
+    def get_stats(self) -> Dict[str, float]:
+        """Get current statistics."""
+        return {
+            "avg_latency_ms": self.avg_latency_ms,
+            "baseline_latency_ms": self.baseline_latency_ms,
+            "sample_count": len(self.request_times),
+            "is_throttled": self._throttle_detected,
+        }
 
 
 class TopicInfo:
@@ -90,42 +167,77 @@ class TelegramManager:
         self.connection_manager = connection_manager
         self.cache_manager = cache_manager
         proxy_info = None
-        if config.proxy_type and config.proxy_addr and config.proxy_port:
-            proxy_scheme = config.proxy_type.lower()
+        # Be defensive: tests or simple DummyConfig objects may omit proxy attributes
+        if getattr(config, "proxy_type", None) and getattr(config, "proxy_addr", None) and getattr(config, "proxy_port", None):
+            proxy_scheme = getattr(config, "proxy_type").lower()
             if proxy_scheme not in ["socks4", "socks5", "http"]:
                 logger.warning(
                     f"Unsupported proxy type for Telethon: '{proxy_scheme}'. Ignoring."
                 )
             else:
-                proxy_info = (proxy_scheme, config.proxy_addr, config.proxy_port)
+                proxy_info = (
+                    proxy_scheme,
+                    getattr(config, "proxy_addr"),
+                    getattr(config, "proxy_port"),
+                )
 
         base_timeout = getattr(config.performance, "base_download_timeout", 300.0)
+
+        # Security S-5: Socket/connection timeouts
+        # Telethon uses MTProto with built-in socket timeouts (not aiohttp).
+        # Configuration:
+        #   - timeout=300s: total request timeout (prevents indefinite hangs)
+        #   - connection_retries=20: max connection attempts before failure
+        #   - retry_delay=1s: delay between retry attempts
+        #   - auto_reconnect=True: automatic reconnection on connection loss
+        # This prevents DoS via socket hanging (total max hang: ~20s retries + 300s timeout)
 
         # Legacy automatic conversion support removed; use Telethon .session file for authentication.
         # If you need to migrate a legacy session, convert the file externally and place the resulting .session file in the app directory.
 
-        self.client = TelegramClient(
-            config.session_name,
-            config.api_id,
-            config.api_hash,
-            device_model="Telegram Desktop",
-            app_version="4.14.8",
-            system_version="Windows 10",
-            lang_code="en",
-            system_lang_code="en",
-            connection_retries=20,
-            retry_delay=1,
-            request_retries=25,
-            timeout=base_timeout,
-            flood_sleep_threshold=0,
-            auto_reconnect=True,
-            sequential_updates=True,
-            proxy=proxy_info,
-        )
+        api_id = getattr(config, "api_id", None)
+        api_hash = getattr(config, "api_hash", None)
+
+        if api_id and api_hash:
+            self.client = TelegramClient(
+                getattr(config, "session_name", "tobs_session"),
+                api_id,
+                api_hash,
+                device_model="Telegram Desktop",
+                app_version="4.14.8",
+                system_version="Windows 10",
+                lang_code="en",
+                system_lang_code="en",
+                connection_retries=20,
+                retry_delay=1,
+                request_retries=25,
+                timeout=base_timeout,
+                flood_sleep_threshold=0,
+                auto_reconnect=True,
+                sequential_updates=True,
+                proxy=proxy_info,
+            )
+        else:
+            logger.info("API credentials not provided; TelegramClient not instantiated (testing/offline mode)")
+            self.client = None
+        self._original_client = self.client  # Store original client for operations that don't support Takeout
         self.entity_cache: Dict[str, Any] = {}
         self.topics_cache: Dict[Union[str, int], List[TopicInfo]] = {}
         self.client_connected = False
         self._external_takeout_id: Optional[int] = None
+        
+        # C-3: InputPeer cache for reducing entity resolution API calls
+        cache_size = getattr(config.performance, "input_peer_cache_size", 1000)
+        cache_ttl = getattr(config.performance, "input_peer_cache_ttl", 3600.0)
+        self._input_peer_cache = InputPeerCache(
+            max_size=cache_size,
+            ttl_seconds=cache_ttl
+        )
+        logger.info(f"InputPeerCache enabled: size={cache_size}, ttl={cache_ttl}s")
+        
+        # Throttle detector for server-side throttling detection
+        self._throttle_detector = ThrottleDetector(window_size=100, threshold_multiplier=3.0)
+        logger.debug("ThrottleDetector initialized")
 
     async def connect(self) -> bool:
         """
@@ -294,6 +406,68 @@ class TelegramManager:
             logger.error(f"Failed to resolve '{entity_id_str}' after all attempts: {e}")
             return None
 
+    async def get_total_message_count(self, entity: Any) -> int:
+        """
+        Get total message count for entity WITHOUT loading all messages.
+        
+        Uses Telegram API's GetHistoryRequest with limit=1 to efficiently
+        fetch total count from history.count field.
+        
+        Args:
+            entity: Telegram entity (chat/channel/user)
+        
+        Returns:
+            Total message count (0 if error or cannot determine)
+        """
+        try:
+            from telethon.tl.functions.messages import GetHistoryRequest
+            
+            # Get input peer for entity
+            input_peer = await self.client.get_input_entity(entity)
+            
+            # Fetch history with limit=1 to get count efficiently
+            result = await self.client(GetHistoryRequest(
+                peer=input_peer,
+                offset_id=0,
+                offset_date=None,
+                add_offset=0,
+                limit=1,
+                max_id=0,
+                min_id=0,
+                hash=0
+            ))
+            
+            # Extract count based on response type
+            from telethon.tl.types.messages import Messages, MessagesSlice, ChannelMessages
+            
+            if isinstance(result, Messages):
+                # For Messages: count = len(messages)
+                count = len(result.messages)
+            elif isinstance(result, (MessagesSlice, ChannelMessages)):
+                # For MessagesSlice/ChannelMessages: use .count field
+                count = result.count
+            else:
+                # Fallback
+                count = getattr(result, 'count', 0)
+            
+            # 🔥 CRITICAL: Sanitize unrealistic counts (INT32_MAX placeholder)
+            MAX_REASONABLE_COUNT = 100_000_000  # 100M messages = ~10 years of 24/7 activity
+            if count > MAX_REASONABLE_COUNT:
+                logger.warning(
+                    f"⚠️ Unrealistic message count {count:,} (likely placeholder), "
+                    f"falling back to 0 (streaming mode)"
+                )
+                return 0  # Fall back to streaming without total (shows 0/0)
+            
+            logger.info(f"📊 Total message count for {entity}: {count:,}")
+            return count if count > 0 else 0  # Ensure non-negative
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to get message count: {e}")
+            return 0  # Return 0 on error (streaming mode)
+
+            return 0
+
     async def _get_entity(self, entity_id_str: str) -> Optional[Any]:
         """
         Get a Telegram entity by its string identifier.
@@ -304,6 +478,53 @@ class TelegramManager:
             if entity_id_str.lstrip("-").isdigit():
                 return await self.client.get_entity(int(entity_id_str))
             raise
+    
+    async def get_input_entity_cached(self, entity: Any) -> Any:
+        """
+        Get InputPeer for entity with caching support (C-3 optimization).
+        
+        Reduces redundant get_input_entity API calls by caching InputPeer objects.
+        Uses LRU cache with TTL for automatic expiration.
+        
+        Args:
+            entity: Telegram entity (can be entity object, ID, or username)
+        
+        Returns:
+            InputPeer object (InputPeerUser, InputPeerChannel, or InputPeerChat)
+        """
+        # Extract entity ID for cache key
+        entity_id = None
+        if isinstance(entity, (int, str)):
+            # For raw IDs or usernames, resolve first
+            resolved = await self.resolve_entity(entity)
+            if resolved:
+                entity_id = getattr(resolved, "id", None)
+                entity = resolved
+        else:
+            entity_id = getattr(entity, "id", None)
+        
+        if entity_id is None:
+            # Fallback to direct API call if ID cannot be extracted
+            return await self.client.get_input_entity(entity)
+        
+        # Check cache first
+        cached_peer = self._input_peer_cache.get(entity_id)
+        if cached_peer is not None:
+            logger.debug(f"InputPeerCache HIT for entity_id={entity_id}")
+            return cached_peer
+        
+        # Cache miss - fetch from API
+        logger.debug(f"InputPeerCache MISS for entity_id={entity_id}")
+        input_peer = await self.client.get_input_entity(entity)
+        
+        # Store in cache
+        self._input_peer_cache.set(entity_id, input_peer)
+        
+        return input_peer
+    
+    def get_input_peer_cache_metrics(self) -> dict:
+        """Get InputPeer cache performance metrics."""
+        return self._input_peer_cache.get_metrics()
 
     async def fetch_messages(
         self,
@@ -416,17 +637,26 @@ class TelegramManager:
             if not batch_messages:
                 break  # No more messages
 
-            # Process batch (yield in chronological order)
+            # Process batch (yield in chronological order when reverse=True)
+            if batch_messages:
+                first_id = batch_messages[0].id
+                last_id = batch_messages[-1].id
+                logger.info(f"📦 Batch: {len(batch_messages)} messages, IDs {first_id} → {last_id} (reverse=True)")
+            
             for message in batch_messages:
-                if isinstance(message, Message) and not message.action:
-                    yield message
-                    total_fetched += 1
+                # Accept Telethon Message instances or any message-like object with an id.
+                # Skip service messages that have an 'action' attribute set.
+                if getattr(message, "action", None):
+                    continue
+                yield message
+                total_fetched += 1
 
-                    if effective_limit is not None and total_fetched >= effective_limit:
-                        break
+                if effective_limit is not None and total_fetched >= effective_limit:
+                    break
 
-            # Update offset for next batch (last message is the oldest in this batch)
-            # If we yielded all messages, update offset to the last one
+            # Update offset for next batch
+            # With reverse=True: batch goes from old→new, so last message is newest
+            # Next batch starts AFTER this ID to continue forward in time
             if batch_messages:
                 current_offset_id = batch_messages[-1].id
 
@@ -877,8 +1107,27 @@ class TelegramManager:
             # Use configured limit or default to 100
             fetch_limit = limit or 100
 
+            # GetForumTopicsRequest doesn't work with Takeout, use original client
+            # If self.client is a TakeoutSessionWrapper, extract the underlying client
+            client_to_use = self.client
+            if hasattr(self.client, 'client'):
+                # This is TakeoutSessionWrapper, get the underlying client
+                client_to_use = self.client.client
+                logger.info(f"🔍 Detected TakeoutSessionWrapper, using underlying client for GetForumTopicsRequest")
+            elif hasattr(self, '_original_client') and self._original_client:
+                # Fallback to _original_client if set
+                client_to_use = self._original_client
+                logger.info(f"🔍 Using _original_client for GetForumTopicsRequest")
+            else:
+                logger.info(f"🔍 Using self.client directly for GetForumTopicsRequest")
+            
+            # Check if client is connected (is_connected is a property, not a method)
+            if hasattr(client_to_use, 'is_connected'):
+                is_connected = client_to_use.is_connected()
+                logger.info(f"🔍 Client connection status: {is_connected}")
+            
             async def _fetch_topics():
-                return await self.client(
+                return await client_to_use(
                     GetForumTopicsRequest(
                         channel=entity,
                         offset_date=None,
@@ -937,13 +1186,23 @@ class TelegramManager:
         topics: List[TopicInfo] = []
         current_offset = offset_topic
 
+        # GetForumTopicsRequest doesn't work with Takeout, use original client
+        # If self.client is a TakeoutSessionWrapper, extract the underlying client
+        client_to_use = self.client
+        if hasattr(self.client, 'client'):
+            # This is TakeoutSessionWrapper, get the underlying client
+            client_to_use = self.client.client
+        elif hasattr(self, '_original_client') and self._original_client:
+            # Fallback to _original_client if set
+            client_to_use = self._original_client
+
         try:
             while len(topics) < page_size:
                 remaining = page_size - len(topics)
                 fetch_limit = min(remaining, 100)  # Telegram API limit
 
                 async def _fetch_page():
-                    return await self.client(
+                    return await client_to_use(
                         GetForumTopicsRequest(
                             channel=entity,
                             offset_date=None,
@@ -1009,35 +1268,22 @@ class TelegramManager:
         if self.cache_manager:
             cached_count = await self.cache_manager.get(cache_key)
             if cached_count is not None:
-                logger.debug(f"Cache hit for topic message count: {cache_key}")
+                logger.info(f"🔍 Cache hit for topic {topic_id}: returning {cached_count} (cached value)")
                 return cached_count
 
         count = 0
         try:
-            # Prefer GetFullChannelRequest for channels for more stable total
-            if isinstance(entity, Channel):
-                # Fetch full channel info, which often contains message count
-                full_channel = await self.client(GetFullChannelRequest(entity))
-                # read_inbox_max_id gives the latest message ID, which is often total - 1
-                # Subtract 1 because topic ID itself is not a message
-                count = getattr(full_channel.full_chat, "read_inbox_max_id", 0) - 1
-                if count < 0:
-                    count = 0  # Ensure non-negative
-                logger.debug(
-                    f"Fetched topic message count via GetFullChannelRequest: {count}"
-                )
-
-            if count == 0:  # Fallback if not a channel or count still 0
-                result = await self.client.get_messages(
-                    entity, reply_to=topic_id, limit=0
-                )
-                # get_messages(limit=0) returns an object with 'total' attribute
-                count = getattr(result, "total", 0) - 1  # Subtract 1 for topic ID
-                if count < 0:
-                    count = 0  # Ensure non-negative
-                logger.debug(
-                    f"Fetched topic message count via get_messages(limit=0): {count}"
-                )
+            # For forum topics, we MUST use get_messages with reply_to parameter
+            # GetFullChannelRequest returns total channel messages, not per-topic
+            logger.info(f"🔍 Fetching message count for topic {topic_id} via API...")
+            result = await self.client.get_messages(
+                entity, reply_to=topic_id, limit=0
+            )
+            # get_messages(limit=0) returns an object with 'total' attribute
+            count = getattr(result, "total", 0)
+            logger.info(
+                f"✅ Topic {topic_id} has {count} messages (fresh from API)"
+            )
 
         except Exception as e:
             logger.warning(
@@ -1152,7 +1398,8 @@ class TelegramManager:
 
             while retry_count < max_retries:
                 try:
-                    # Fetch batch of topic messages
+                    # Fetch batch of topic messages with latency tracking
+                    start_time = time.time()
                     batch_messages = await self.client.get_messages(
                         entity=entity,
                         limit=current_batch_limit,
@@ -1161,6 +1408,11 @@ class TelegramManager:
                         min_id=min_id or 0,
                         wait_time=self.config.request_delay,
                     )
+                    
+                    # Record latency for throttle detection
+                    latency_ms = (time.time() - start_time) * 1000
+                    self._throttle_detector.record(latency_ms)
+                    
                     break  # Success
                 except FloodWaitError as e:
                     retry_count += 1
@@ -1169,7 +1421,13 @@ class TelegramManager:
                         f"⏳ FloodWait detected in topic {topic_id}: need to wait {wait_time}s (attempt {retry_count}/{max_retries})"
                     )
                     if retry_count < max_retries:
-                        await asyncio.sleep(wait_time + 1)
+                        # Adaptive backoff: increase wait time if throttling detected
+                        if self._throttle_detector.is_throttled():
+                            extra_wait = min(wait_time * 0.5, 60)  # Add up to 60s extra
+                            logger.info(f"🐌 Throttling detected, adding {extra_wait:.0f}s extra wait")
+                            await asyncio.sleep(wait_time + extra_wait)
+                        else:
+                            await asyncio.sleep(wait_time + 1)
                     else:
                         logger.error(
                             f"❌ Max retries reached for topic {topic_id} batch fetching"

@@ -16,7 +16,7 @@ from src.core.performance import PerformanceMonitor
 from src.utils import logger
 
 
-@dataclass
+@dataclass(slots=True)
 class ExportMetrics:
     """Метрики экспорта."""
 
@@ -44,6 +44,8 @@ class ExportMetrics:
     bytes_per_second: float = 0.0
     peak_memory_mb: float = 0.0
     avg_cpu_percent: float = 0.0
+    # Pipeline statistics captured when using AsyncPipeline (e.g. processed_count, duration, queue maxes)
+    pipeline_stats: Optional[Dict[str, Any]] = field(default_factory=dict)
 
     # Ошибки
     errors: List[Dict[str, Any]] = field(default_factory=list)
@@ -56,9 +58,15 @@ class ExportMetrics:
     # Keys are stringified worker indices for JSON compatibility
     # Values include: messages, flood_waits, requests, total_latency_ms, io_time_ms
     worker_stats: Optional[Dict[str, Dict[str, int]]] = None
+    
+    # B-3: Parallel media processing metrics (TIER B optimization)
+    parallel_media_metrics: Optional[Dict[str, Any]] = None
+    
+    # C-3: InputPeer cache metrics (TIER C optimization)
+    input_peer_cache_metrics: Optional[Dict[str, Any]] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class SystemInfo:
     """Информация о системе."""
 
@@ -78,7 +86,7 @@ class SystemInfo:
                 self.disk_free_gb = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class EntityReport:
     """Отчет по сущности."""
 
@@ -227,6 +235,20 @@ class ExportReporter:
     def set_total_messages(self, total: int):
         """Установить общее количество сообщений."""
         self.metrics.total_messages = total
+    
+    def record_input_peer_cache_metrics(self, cache_metrics: Dict[str, Any]):
+        """
+        Record InputPeer cache metrics (C-3 optimization).
+        
+        Args:
+            cache_metrics: Dictionary from InputPeerCache.get_metrics()
+        """
+        self.metrics.input_peer_cache_metrics = cache_metrics.copy()
+        logger.debug(
+            f"InputPeer cache metrics: "
+            f"hit_rate={cache_metrics.get('hit_rate', 0)}%, "
+            f"size={cache_metrics.get('size', 0)}/{cache_metrics.get('max_size', 0)}"
+        )
 
     def get_progress(self) -> Dict[str, Any]:
         """Получить текущий прогресс."""

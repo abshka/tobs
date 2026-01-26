@@ -6,7 +6,7 @@ Defines the abstract interface that all media processors must implement.
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from ..models import ProcessingSettings, ProcessingTask
 
@@ -15,11 +15,23 @@ class BaseProcessor(ABC):
     """Базовый класс для всех процессоров медиа."""
 
     def __init__(
-        self, io_executor, cpu_executor, settings: Optional[ProcessingSettings] = None
+        self, 
+        thread_pool: Any,  # UnifiedThreadPool instance
+        settings: Optional[ProcessingSettings] = None
     ):
-        self.io_executor = io_executor
-        self.cpu_executor = cpu_executor
+        """
+        Initialize base processor.
+        
+        Args:
+            thread_pool: Unified thread pool for CPU-bound operations
+            settings: Processing settings
+        """
+        self.thread_pool = thread_pool
         self.settings = settings or ProcessingSettings()
+        
+        # Legacy compatibility - deprecated, will be removed
+        self.io_executor = None
+        self.cpu_executor = None
 
     @abstractmethod
     async def process(self, task: ProcessingTask, worker_name: str) -> bool:

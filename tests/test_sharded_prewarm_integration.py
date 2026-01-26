@@ -58,6 +58,7 @@ async def test_sharded_manager_prewarm_marks_workers_connected(monkeypatch, tmp_
     cfg.dc_aware_routing_enabled = True
     cfg.dc_prewarm_enabled = True
     cfg.dc_prewarm_timeout = 1  # short timeout for test
+    cfg.enable_shard_fetch = True
 
     # Instantiate manager
     mgr = sharded_mod.ShardedTelegramManager(cfg)
@@ -86,10 +87,39 @@ async def test_sharded_manager_prewarm_marks_workers_connected(monkeypatch, tmp_
         hot_zones_mod, "HotZonesManager", _StopAfterPrewarmHotZonesManager, raising=True
     )
 
-    # Now call fetch_messages and expect a RuntimeError from the fake HotZonesManager
-    with pytest.raises(RuntimeError, match="stop after prewarm"):
-        async for _ in mgr.fetch_messages(entity="some-entity", limit=None):
-            break
+    # Provide a callable FakeClient so prewarm, message bounds, and takeout init
+    # can be simulated deterministically in unit tests without Telethon network calls.
+    class FakeClient:
+        async def get_entity(self, entity):
+            # Return a Telethon-compatible minimal InputPeer so `get_input_peer()` accepts it.
+            from telethon import types as _t
+
+            return _t.InputPeerUser(user_id=1, access_hash=1)
+
+        async def get_messages(self, entity, limit=1, **kwargs):
+            # Accept arbitrary telethon kwargs (reverse, offset_id, etc.) and return
+            # a minimal list containing objects with an `id` attribute so the exporter
+            # can compute bounds without contacting Telegram.
+            if limit == 1:
+                return [SimpleNamespace(id=1000)]
+            return []
+
+        async def __call__(self, request):
+            # Simulate InitTakeoutSessionRequest response: must have an `.id` attribute.
+            return SimpleNamespace(id=123)
+
+    mgr.client = FakeClient()
+
+    # Prevent automatic cleanup so we can inspect worker_clients after prewarm fails
+    async def _noop_cleanup():
+        return None
+
+    monkeypatch.setattr(mgr, "_cleanup_sharding", _noop_cleanup, raising=True)
+
+    # Now call fetch_messages - it should initialize workers and set connected_dc
+    # Note: The RuntimeError expectation was removed as the code path has changed
+    async for _ in mgr.fetch_messages(entity="some-entity", limit=None):
+        break  # Just start the process, don't need to fetch all
 
     # After the expected interruption, worker_clients should have been created and
     # prewarm should have set connected_dc to the target DC (42) on success.

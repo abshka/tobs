@@ -32,7 +32,7 @@ except ImportError:
 
 
 
-@dataclass
+@dataclass(slots=True)
 class TranscriptionResult:
     """
     Result of audio transcription.

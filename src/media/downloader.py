@@ -10,12 +10,15 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from loguru import logger
 from telethon import utils
 from telethon.tl.functions import InvokeWithTakeoutRequest
 from telethon.tl.types import Message
+
+# B-6: Hash-based deduplication
+from src.media.hash_dedup import HashBasedDeduplicator
 
 
 class TelegramServerError(Exception):
@@ -244,6 +247,8 @@ class MediaDownloader:
         temp_dir: Path,
         client: Any = None,
         worker_clients: Optional[list] = None,
+        cache_manager: Optional[Any] = None,
+        config: Optional[Any] = None,
     ):
         """
         Инициализация загрузчика медиа.
@@ -253,11 +258,18 @@ class MediaDownloader:
             temp_dir: Директория для временных файлов
             client: Основной клиент Telegram
             worker_clients: Список дополнительных клиентов (воркеров) для распределения нагрузки
+            cache_manager: Менеджер кэша для дедупликации загрузок
+            config: Конфигурация приложения
         """
         self.connection_manager = connection_manager
         self.temp_dir = temp_dir
         self.client = client
         self.worker_clients = worker_clients or []
+        self.cache_manager = cache_manager
+        self.config = config
+        
+        # In-memory cache for current session deduplication
+        self._downloaded_cache: Dict[str, Path] = {}
 
         # Статистика загрузок
         self._persistent_download_attempts = 0
@@ -268,6 +280,61 @@ class MediaDownloader:
         # Настройки из environment
         self._persistent_enabled = PERSISTENT_DOWNLOAD_MODE
         self._persistent_min_size_mb = PERSISTENT_MIN_SIZE_MB
+        
+        # B-6: Hash-based deduplication
+        if config and hasattr(config, 'performance') and config.performance.hash_based_deduplication:
+            # Determine cache directory
+            if hasattr(config, 'cache_path'):
+                cache_dir = Path(config.cache_path)
+            else:
+                cache_dir = temp_dir.parent / 'cache'
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            
+            self._hash_dedup = HashBasedDeduplicator(
+                cache_path=cache_dir / "media_hash_cache.msgpack",
+                max_cache_size=config.performance.hash_cache_max_size,
+                enable_api_hashing=True
+            )
+            logger.info("🔐 Hash-based deduplication ENABLED")
+        else:
+            self._hash_dedup = None
+            logger.info("ID-based deduplication only (hash dedup disabled)")
+
+    def _get_file_key(self, message: Message) -> Optional[str]:
+        """
+        Generate a unique key for the media file to prevent duplicate downloads.
+        """
+        if not hasattr(message, "media") or not message.media:
+            return None
+            
+        media = message.media
+        try:
+            if hasattr(media, "document") and media.document:
+                # Document ID + Access Hash is unique
+                return f"doc_{media.document.id}_{media.document.access_hash}"
+            elif hasattr(media, "photo") and media.photo:
+                # Photo ID + Access Hash is unique
+                return f"photo_{media.photo.id}_{media.photo.access_hash}"
+        except Exception:
+            pass
+            
+        return None
+
+    def _get_part_size(self, file_size: int) -> int:
+        """Determine optimal part size for downloading."""
+        # Use configured value if set (and not 0/auto)
+        if self.config and hasattr(self.config, "performance"):
+            configured_kb = getattr(self.config.performance, "part_size_kb", 0)
+            if configured_kb > 0:
+                return configured_kb
+        
+        # Auto-tuning
+        if file_size < 10 * 1024 * 1024:  # < 10MB
+            return 128
+        elif file_size < 100 * 1024 * 1024:  # < 100MB
+            return 256
+        else:  # > 100MB
+            return 512
 
     async def download_media(
         self,
@@ -278,8 +345,10 @@ class MediaDownloader:
         """
         Главный метод загрузки медиафайла из сообщения.
 
-        Автоматически выбирает стратегию загрузки на основе размера файла
-        и настроек окружения.
+        Использует трёх-уровневую дедупликацию:
+        1. TIER 1: Hash-based (content matching) - highest precision
+        2. TIER 2: ID-based (existing) - fast fallback
+        3. TIER 3: Download - if both caches miss
 
         Args:
             message: Telegram сообщение с медиа
@@ -293,6 +362,64 @@ class MediaDownloader:
             logger.warning("Message has no file attribute or file is None")
             return None
 
+        # Store file_hash for later cache updates
+        file_hash: Optional[str] = None
+        
+        # === TIER 1: Hash-Based Deduplication (B-6) ===
+        if self._hash_dedup:
+            try:
+                # Get file hash from Telegram API
+                file_hash = await self._hash_dedup.get_file_hash(
+                    client=self.client,
+                    media=message.media,
+                    timeout=self.config.performance.hash_api_timeout
+                )
+                
+                if file_hash:
+                    # Check hash cache
+                    cached_path = await self._hash_dedup.check_cache(file_hash)
+                    if cached_path:
+                        # CACHE HIT: Reuse existing file
+                        logger.info(
+                            f"✅ Hash dedup HIT: msg {message.id} -> "
+                            f"{cached_path.name}"
+                        )
+                        return cached_path
+                    else:
+                        logger.debug(
+                            f"Hash dedup MISS: {file_hash[:16]}... (will check ID cache)"
+                        )
+            except Exception as e:
+                logger.warning(f"Hash dedup failed: {e}, falling back to ID-based")
+        
+        # === TIER 2: ID-Based Deduplication (Existing) ===
+        file_key = self._get_file_key(message)
+        if file_key:
+            # 1. Check in-memory cache
+            if file_key in self._downloaded_cache:
+                cached_path = self._downloaded_cache[file_key]
+                if cached_path.exists() and cached_path.stat().st_size > 0:
+                    logger.debug(f"♻️ ID dedup hit (memory): {file_key}")
+                    # Update hash cache if we have the hash
+                    if self._hash_dedup and file_hash:
+                        self._hash_dedup.add_to_cache(file_hash, cached_path)
+                    return cached_path
+            
+            # 2. Check persistent cache manager
+            if self.cache_manager and hasattr(self.cache_manager, "get_file_path"):
+                cached_path_str = await self.cache_manager.get_file_path(file_key)
+                if cached_path_str:
+                    cached_path = Path(cached_path_str)
+                    if cached_path.exists() and cached_path.stat().st_size > 0:
+                        logger.debug(f"♻️ ID dedup hit (persistent): {file_key}")
+                        # Update memory cache
+                        self._downloaded_cache[file_key] = cached_path
+                        # Update hash cache if we have the hash
+                        if self._hash_dedup and file_hash:
+                            self._hash_dedup.add_to_cache(file_hash, cached_path)
+                        return cached_path
+
+        # === TIER 3: Download ===
         expected_size = getattr(message.file, "size", 0)
         if expected_size == 0:
             logger.warning(f"Message {message.id} has zero file size")
@@ -300,18 +427,34 @@ class MediaDownloader:
 
         file_size_mb = expected_size / (1024 * 1024)
         logger.info(
-            f"Starting download for message {message.id}: {file_size_mb:.2f} MB"
+            f"Downloading message {message.id}: {file_size_mb:.2f} MB"
         )
 
+        result_path = None
         # Используем persistent download для всех файлов (guaranteed completion)
         if self._persistent_enabled:
-            return await self._persistent_download(
+            result_path = await self._persistent_download(
                 message, expected_size, progress_queue, task_id
             )
         else:
-            return await self._standard_download(
+            result_path = await self._standard_download(
                 message, expected_size, progress_queue, task_id
             )
+            
+        # === Update ALL Caches on Success ===
+        if result_path and result_path.exists():
+            # Update ID cache (existing)
+            if file_key:
+                self._downloaded_cache[file_key] = result_path
+                if self.cache_manager and hasattr(self.cache_manager, "store_file_path"):
+                    await self.cache_manager.store_file_path(file_key, str(result_path))
+            
+            # Update hash cache (B-6 new)
+            if self._hash_dedup and file_hash:
+                self._hash_dedup.add_to_cache(file_hash, result_path)
+                logger.debug(f"Updated hash cache: {file_hash[:16]}... -> {result_path.name}")
+                
+        return result_path
 
     async def _persistent_download(
         self,
@@ -441,7 +584,7 @@ class MediaDownloader:
                                 location,
                                 file=temp_path,
                                 progress_callback=progress_callback,
-                                part_size_kb=512,
+                                part_size_kb=self._get_part_size(expected_size),
                             ),
                             timeout=chunk_timeout,
                         )
@@ -707,15 +850,27 @@ class MediaDownloader:
 
                 # Загрузка с семафором
                 async with self.connection_manager.download_semaphore:
-                    # Use standard download_media for stability
-                    await asyncio.wait_for(
-                        download_client.download_media(
-                            message,
-                            file=temp_path,
-                            progress_callback=progress_callback,
-                        ),
-                        timeout=base_timeout,
-                    )
+                    try:
+                        location = utils.get_input_location(message.media)
+                        await asyncio.wait_for(
+                            download_client.download_file(
+                                location,
+                                file=temp_path,
+                                progress_callback=progress_callback,
+                                part_size_kb=self._get_part_size(expected_size),
+                            ),
+                            timeout=base_timeout,
+                        )
+                    except Exception:
+                        # Fallback to download_media if download_file fails (e.g. location extraction issue)
+                        await asyncio.wait_for(
+                            download_client.download_media(
+                                message,
+                                file=temp_path,
+                                progress_callback=progress_callback,
+                            ),
+                            timeout=base_timeout,
+                        )
 
                 # Проверяем успешность загрузки
                 if temp_path.exists():
@@ -803,6 +958,9 @@ class MediaDownloader:
             if self._standard_download_attempts > 0
             else 0
         )
+        
+        # B-6: Include hash dedup stats
+        hash_dedup_stats = self.get_hash_dedup_stats() if self._hash_dedup else {}
 
         return {
             "persistent_downloads": {
@@ -817,7 +975,19 @@ class MediaDownloader:
                 "successes": self._standard_download_successes,
                 "success_rate_percent": standard_success_rate,
             },
+            "hash_deduplication": hash_dedup_stats,  # B-6: Hash-based dedup stats
         }
+    
+    def get_hash_dedup_stats(self) -> Dict[str, int]:
+        """
+        Get hash-based deduplication statistics.
+        
+        Returns:
+            Dictionary with hash dedup stats or empty dict if disabled
+        """
+        if self._hash_dedup:
+            return self._hash_dedup.get_stats()
+        return {}
 
     def log_statistics(self) -> None:
         """Логировать статистику загрузок."""

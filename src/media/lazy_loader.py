@@ -16,7 +16,7 @@ from telethon.tl.types import Message
 from .manager import MediaProcessor
 
 
-@dataclass
+@dataclass(slots=True)
 class LazyMediaMetadata:
     """Metadata for lazy-loaded media."""
 

@@ -15,8 +15,17 @@ from PIL import Image
 class MediaValidator:
     """Проверяет целостность медиафайлов."""
 
-    def __init__(self, io_executor):
-        self.io_executor = io_executor
+    def __init__(self, thread_pool):
+        """
+        Initialize media validator.
+        
+        Args:
+            thread_pool: Unified thread pool for CPU-bound operations
+        """
+        self.thread_pool = thread_pool  # 🧵 TIER B - B-1
+        
+        # Legacy compatibility
+        self.io_executor = None
 
     async def validate_file_integrity(self, file_path: Path) -> bool:
         """Проверка целостности скачанного файла."""

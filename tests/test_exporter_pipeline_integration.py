@@ -30,6 +30,10 @@ class FakeTelegramManager:
             count += 1
             yield m
 
+    async def get_total_message_count(self, entity):
+        """Return total message count."""
+        return len(self._messages)
+
 
 class DummyCacheManager:
     async def get(self, key):
