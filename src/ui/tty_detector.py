@@ -101,9 +101,13 @@ class TTYDetector:
                 return False
         
         # Check TERM variable (should be set in real terminals)
-        term = os.environ.get('TERM', '').lower()
-        if not term or term == 'dumb':
-            return False
+        # Note: Windows PowerShell/CMD may not have TERM set, so we check platform
+        import platform
+        if platform.system() != 'Windows':
+            # On Unix-like systems, TERM should be set
+            term = os.environ.get('TERM', '').lower()
+            if not term or term == 'dumb':
+                return False
         
         return True
     

@@ -368,6 +368,14 @@ class AsyncBufferedSaver:
         if exc_type is None:
             # Success: atomically rename tmp -> final
             try:
+                # Windows fix: Remove existing file before rename to avoid WinError 183
+                try:
+                    await aiofiles.os.remove(self.path)
+                except FileNotFoundError:
+                    pass  # File doesn't exist, that's fine
+                except Exception as e:
+                    logger.debug(f"Could not remove existing file {self.path}: {e}")
+                
                 await aiofiles.os.rename(self._tmp_path, self.path)
                 self._finalized = True
             except Exception as e:
